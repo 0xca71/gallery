@@ -109,6 +109,9 @@ class SearchManager {
         isMotion = true;
         break;
       }
+      case MediaType.All: {
+        break;
+      }
     }
 
     const query = this.filter.query || undefined;
