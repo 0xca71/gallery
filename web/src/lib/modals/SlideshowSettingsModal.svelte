@@ -27,6 +27,8 @@
     slideshowTransition,
     slideshowAutoplay,
     slideshowRepeat,
+    slideshowSkipVideos,
+    slideshowSkipMotionPhotos,
     slideshowState,
     slideshowShowMetadataOverlay,
     slideshowMetadataOverlayMode,
@@ -46,6 +48,8 @@
   let tempSlideshowTransition = $state($slideshowTransition);
   let tempSlideshowAutoplay = $state($slideshowAutoplay);
   let tempSlideshowRepeat = $state($slideshowRepeat);
+  let tempSlideshowSkipVideos = $state($slideshowSkipVideos);
+  let tempSlideshowSkipMotionPhotos = $state($slideshowSkipMotionPhotos);
   let tempSlideshowShowMetadataOverlay = $state($slideshowShowMetadataOverlay);
   let tempSlideshowMetadataOverlayMode = $state($slideshowMetadataOverlayMode);
 
@@ -89,6 +93,8 @@
     $slideshowTransition = tempSlideshowTransition;
     $slideshowAutoplay = tempSlideshowAutoplay;
     $slideshowRepeat = tempSlideshowRepeat;
+    $slideshowSkipVideos = tempSlideshowSkipVideos;
+    $slideshowSkipMotionPhotos = tempSlideshowSkipMotionPhotos;
     $slideshowState = SlideshowState.PlaySlideshow;
     $slideshowShowMetadataOverlay = tempSlideshowShowMetadataOverlay;
     $slideshowMetadataOverlayMode = tempSlideshowMetadataOverlayMode;
@@ -130,6 +136,14 @@
 
     <Field label={$t('slideshow_repeat')} description={$t('slideshow_repeat_description')}>
       <Switch bind:checked={tempSlideshowRepeat} />
+    </Field>
+
+    <Field label={$t('skip_videos_in_slideshow')}>
+      <Switch bind:checked={tempSlideshowSkipVideos} />
+    </Field>
+
+    <Field label={$t('skip_motion_photos_in_slideshow')}>
+      <Switch bind:checked={tempSlideshowSkipMotionPhotos} />
     </Field>
 
     <Field label={$t('show_slideshow_metadata_overlay')}>
