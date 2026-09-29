@@ -1,7 +1,11 @@
 <script lang="ts">
   import { lazyComponent } from '$lib/utils/lazy-component.svelte';
   import type { Action } from '$lib/components/asset-viewer/actions/action';
-  import type { AssetCursor } from '$lib/components/asset-viewer/AssetViewer.svelte';
+  import type {
+    AssetCursor,
+    SlideshowRandomAssetResolver,
+    SlideshowStepAssetResolver,
+  } from '$lib/components/asset-viewer/AssetViewer.svelte';
   import { AssetAction } from '$lib/constants';
   import { assetViewerManager } from '$lib/managers/asset-viewer-manager.svelte';
   import { assetCacheManager } from '$lib/managers/AssetCacheManager.svelte';
@@ -264,6 +268,8 @@
     }}
     onUndoDelete={handleUndoDelete}
     onRandom={handleRandom}
+    {resolveSlideshowStepAsset}
+    {resolveSlideshowRandomAsset}
     onRemoveFromAlbum={handleRemoveFromAlbum}
     onClose={handleClose}
   />
