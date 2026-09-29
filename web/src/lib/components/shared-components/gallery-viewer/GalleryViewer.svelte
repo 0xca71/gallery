@@ -3,7 +3,11 @@
   import { goto } from '$app/navigation';
   import { shortcuts, type ShortcutOptions } from '$lib/actions/shortcut';
   import type { Action } from '$lib/components/asset-viewer/actions/action';
-  import type { AssetCursor } from '$lib/components/asset-viewer/AssetViewer.svelte';
+  import type {
+    AssetCursor,
+    SlideshowRandomAssetResolver,
+    SlideshowStepAssetResolver,
+  } from '$lib/components/asset-viewer/AssetViewer.svelte';
   import Thumbnail from '$lib/components/assets/thumbnail/Thumbnail.svelte';
   import TimelineBucketCard from '$lib/components/timeline/TimelineBucketCard.svelte';
   import TimelineRouteGroupingBar from '$lib/components/timeline/TimelineRouteGroupingBar.svelte';
@@ -491,6 +495,20 @@
     }
   });
 
+  const resolveSlideshowStepAsset: SlideshowStepAssetResolver = async (asset, order) => {
+    return order === 'previous' ? getPreviousAsset(navigationAssets, asset) : getNextAsset(navigationAssets, asset);
+  };
+
+  const resolveSlideshowRandomAsset: SlideshowRandomAssetResolver = async (isPlayable) => {
+    const playableAssets = navigationAssets.filter(isPlayable);
+    if (playableAssets.length === 0) {
+      return;
+    }
+
+    const randomIndex = Math.floor(Math.random() * playableAssets.length);
+    return playableAssets[randomIndex];
+  };
+
   const assetCursor = $derived<AssetCursor>({
     current: assetViewerManager.asset!,
     nextAsset: getNextAsset(navigationAssets, assetViewerManager.asset),
@@ -593,6 +611,8 @@
         cursor={assetCursor}
         onAction={handleAction}
         onRandom={handleRandom}
+        {resolveSlideshowStepAsset}
+        {resolveSlideshowRandomAsset}
         onAssetChange={updateCurrentAsset}
         onClose={() => {
           assetViewerManager.showAssetViewer(false);
