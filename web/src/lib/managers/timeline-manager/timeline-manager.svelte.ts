@@ -38,6 +38,7 @@ import {
   isAssetResponseDto,
   setDifference,
   toTimelineAsset,
+  type TimelineDate,
   type TimelineDateTime,
   type TimelineYearMonth,
 } from '$lib/utils/timeline-util';
@@ -293,6 +294,49 @@ export class TimelineManager extends VirtualScrollManager {
         group.deferredLayout = false;
       }
     }
+  }
+
+  async ensureScrubberMonthGeometry(yearMonth: TimelineYearMonth) {
+    if (this.grouping !== 'day') {
+      return;
+    }
+
+    const month = getTimelineMonthByDate(this, yearMonth);
+    if (!month) {
+      return;
+    }
+
+    await this.loadTimelineMonth(yearMonth, { cancelable: false });
+    this.clearDeferredLayout(month);
+    this.#createScrubberMonths();
+  }
+
+  getScrubberDateAtMonthScrollPercent(
+    yearMonth: TimelineYearMonth,
+    monthScrollPercent: number,
+  ): TimelineDate | undefined {
+    if (this.grouping !== 'day') {
+      return undefined;
+    }
+
+    const month = getTimelineMonthByDate(this, yearMonth);
+    if (!month?.isLoaded || !month.isHeightActual || month.timelineDays.length === 0) {
+      return undefined;
+    }
+
+    const clampedPercent = clamp(monthScrollPercent, 0, 0.999_999);
+    const monthY = clampedPercent * month.height;
+    let lastMatchingDay = month.timelineDays[0];
+
+    for (const timelineDay of month.timelineDays) {
+      const dayBottom = timelineDay.top + this.headerHeight + timelineDay.height;
+      if (monthY < dayBottom) {
+        return { year: month.yearMonth.year, month: month.yearMonth.month, day: timelineDay.day };
+      }
+      lastMatchingDay = timelineDay;
+    }
+
+    return { year: month.yearMonth.year, month: month.yearMonth.month, day: lastMatchingDay.day };
   }
 
   async #initializeTimelineBuckets(signal: AbortSignal, sequence: number) {
