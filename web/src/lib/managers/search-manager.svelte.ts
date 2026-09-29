@@ -81,8 +81,9 @@ class SearchManager {
         isFavorite: searchQuery.isFavorite ?? false,
         isNotInAlbum: 'isNotInAlbum' in searchQuery ? (searchQuery.isNotInAlbum ?? false) : false,
       },
-      mediaType:
-        searchQuery.type === AssetTypeEnum.Image
+      mediaType: searchQuery.isMotion
+        ? MediaType.LivePhoto
+        : searchQuery.type === AssetTypeEnum.Image
           ? MediaType.Image
           : searchQuery.type === AssetTypeEnum.Video
             ? MediaType.Video
@@ -93,10 +94,24 @@ class SearchManager {
 
   #toQuery(): MetadataSearchDto | SmartSearchDto {
     let type: AssetTypeEnum | undefined = undefined;
-    if (this.filter.mediaType === MediaType.Image) {
-      type = AssetTypeEnum.Image;
-    } else if (this.filter.mediaType === MediaType.Video) {
-      type = AssetTypeEnum.Video;
+    let isMotion: boolean | undefined = undefined;
+    switch (this.filter.mediaType) {
+      case MediaType.Image: {
+        type = AssetTypeEnum.Image;
+        break;
+      }
+      case MediaType.Video: {
+        type = AssetTypeEnum.Video;
+        break;
+      }
+      case MediaType.LivePhoto: {
+        type = AssetTypeEnum.Image;
+        isMotion = true;
+        break;
+      }
+      case MediaType.All: {
+        break;
+      }
     }
 
     const query = this.filter.query || undefined;
@@ -126,6 +141,7 @@ class SearchManager {
       personIds: this.filter.personIds.size > 0 ? [...this.filter.personIds] : undefined,
       tagIds: this.filter.tagIds === null ? null : this.filter.tagIds.size > 0 ? [...this.filter.tagIds] : undefined,
       type,
+      isMotion,
       rating: this.filter.rating,
     };
   }

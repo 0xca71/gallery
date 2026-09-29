@@ -1,14 +1,8 @@
 name: Weblate checks
 
+# The upstream workflow requires the Immich Weblate bot, which is not installed on this standalone fork.
 on:
-  pull_request:
-    branches: [main, 'release/*']
-    types:
-      - opened
-      - synchronize
-      - ready_for_review
-      - auto_merge_enabled
-      - auto_merge_disabled
+  workflow_dispatch:
 
 permissions: {}
 

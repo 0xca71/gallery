@@ -225,6 +225,7 @@
       takenBefore: $t('end_date'),
       visibility: $t('in_archive'),
       isFavorite: $t('favorite'),
+      isMotion: $t('media_type'),
       isNotInAlbum: $t('not_in_any_album'),
       isInAlbum: $t('in_any_album'),
       type: $t('media_type'),
@@ -307,7 +308,9 @@
   }
 
   function getVisibleSearchKeys(terms: SearchTerms) {
-    return getObjectKeys(terms).filter((key) => key !== 'withSharedSpaces');
+    return getObjectKeys(terms).filter(
+      (key) => key !== 'withSharedSpaces' && !(key === 'type' && terms.isMotion === true),
+    );
   }
 
   function removeFilter(key: keyof SearchTerms) {
@@ -335,7 +338,11 @@
             {getHumanReadableSearchKey(searchKey as keyof SearchTerms)}
           </span>
 
-          {#if value !== true}
+          {#if searchKey === 'isMotion' && value === true}
+            <span class="max-w-[min(36rem,55vw)] min-w-0 truncate px-3 py-1.5 text-immich-fg dark:text-immich-dark-fg">
+              {$t('live_photo')}
+            </span>
+          {:else if value !== true}
             <span class="max-w-[min(36rem,55vw)] min-w-0 truncate px-3 py-1.5 text-immich-fg dark:text-immich-dark-fg">
               {#if (searchKey === 'takenAfter' || searchKey === 'takenBefore') && typeof value === 'string'}
                 {getHumanReadableDate(value)}
