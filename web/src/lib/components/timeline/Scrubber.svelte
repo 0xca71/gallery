@@ -5,6 +5,7 @@
   import { locale } from '$lib/stores/preferences.store';
   import { getTabbable } from '$lib/utils/focus-util';
   import { type ScrubberListener } from '$lib/utils/timeline-util';
+  import { AssetOrder } from '@immich/sdk';
   import { Icon } from '@immich/ui';
   import { mdiPlay } from '@mdi/js';
   import { clamp } from 'lodash-es';
@@ -203,6 +204,22 @@
       { locale: get(locale) },
     );
 
+  const getEstimatedHoverLabel = (yearMonth: { year: number; month: number } | undefined, percent: number) => {
+    if (!yearMonth) {
+      return undefined;
+    }
+
+    const monthDate = DateTime.fromObject(yearMonth, { zone: 'local', locale: get(locale) });
+    const daysInMonth = monthDate.daysInMonth ?? 31;
+    const clampedPercent = clamp(percent, 0, 0.999_999);
+    const descending = timelineManager.getAssetOrder() !== AssetOrder.Asc;
+    const day = descending
+      ? clamp(daysInMonth - Math.floor(clampedPercent * daysInMonth), 1, daysInMonth)
+      : clamp(Math.floor(clampedPercent * daysInMonth) + 1, 1, daysInMonth);
+
+    return formatHoverDate({ ...yearMonth, day });
+  };
+
   const activeYearMonth = $derived.by(() => {
     if (isHoverOnPaddingTop) {
       const segment = segments.at(0);
@@ -226,11 +243,8 @@
     if (actual) {
       return formatHoverDate(actual);
     }
-    if (isHoverOnPaddingTop) {
-      return segments.at(0)?.dateFormatted;
-    }
-    if (isHoverOnPaddingBottom) {
-      return segments.at(-1)?.dateFormatted;
+    if (yearMonth) {
+      return getEstimatedHoverLabel(yearMonth, percent);
     }
     return activeSegment?.dataset.label;
   });
