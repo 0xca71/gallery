@@ -1,6 +1,10 @@
 <script lang="ts">
   import { lazyComponent } from '$lib/utils/lazy-component.svelte';
   import { shortcuts } from '$lib/actions/shortcut';
+  import type {
+    SlideshowRandomAssetResolver,
+    SlideshowStepAssetResolver,
+  } from '$lib/components/asset-viewer/AssetViewer.svelte';
   import DuplicateAsset from './DuplicateAsset.svelte';
   import Portal from '$lib/elements/Portal.svelte';
   import { assetViewerManager } from '$lib/managers/asset-viewer-manager.svelte';
@@ -96,6 +100,20 @@
 
   const handleStack = () => {
     onStack(assets);
+  };
+
+  const resolveSlideshowStepAsset: SlideshowStepAssetResolver = async (asset, order) => {
+    return order === 'previous' ? getPreviousAsset(assets, asset) : getNextAsset(assets, asset);
+  };
+
+  const resolveSlideshowRandomAsset: SlideshowRandomAssetResolver = async (isPlayable) => {
+    const playableAssets = assets.filter(isPlayable);
+    if (playableAssets.length === 0) {
+      return;
+    }
+
+    const index = Math.floor(Math.random() * playableAssets.length);
+    return playableAssets[index];
   };
 
   const assetCursor = $derived({
@@ -210,6 +228,8 @@
         cursor={assetCursor}
         showNavigation={assets.length > 1}
         {onRandom}
+        {resolveSlideshowStepAsset}
+        {resolveSlideshowRandomAsset}
         onClose={() => {
           assetViewerManager.showAssetViewer(false);
           handlePromiseError(navigate({ targetRoute: 'current', assetId: null }));
