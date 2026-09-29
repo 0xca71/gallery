@@ -49,7 +49,10 @@ export function buildSpaceTimelineOptions(spaceId: string, filters: FilterState)
     base.isInAlbum = true;
   }
   if (filters.mediaType !== 'all') {
-    base.$type = filters.mediaType === 'image' ? AssetTypeEnum.Image : AssetTypeEnum.Video;
+    base.$type = filters.mediaType === 'video' ? AssetTypeEnum.Video : AssetTypeEnum.Image;
+    if (filters.mediaType === 'live-photo') {
+      base.isMotion = true;
+    }
   }
   base.order = filters.sortOrder === 'asc' ? AssetOrder.Asc : AssetOrder.Desc;
 
