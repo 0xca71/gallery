@@ -145,8 +145,6 @@
       result.push({ type: 'mediaType', icon: mdiImage, labelKey: 'photos_only' });
     } else if (filters.mediaType === 'video') {
       result.push({ type: 'mediaType', icon: mdiVideo, labelKey: 'videos_only' });
-    } else if (filters.mediaType === 'live-photo') {
-      result.push({ type: 'mediaType', icon: mdiImage, labelKey: 'live_photos_only' });
     }
 
     // Favorites chip (isFavorite === false is also an active, counted filter and must render too —

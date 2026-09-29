@@ -76,10 +76,7 @@ export function buildMapMarkerOptions(filters: FilterState, spaceId?: string): R
   }
 
   if (filters.mediaType !== 'all') {
-    base.$type = filters.mediaType === 'video' ? MapMediaType.Video : MapMediaType.Image;
-    if (filters.mediaType === 'live-photo') {
-      base.isMotion = true;
-    }
+    base.$type = filters.mediaType === 'image' ? MapMediaType.Image : MapMediaType.Video;
   }
 
   return base;
@@ -131,10 +128,7 @@ export function buildMapTimeBucketOptions(filters: FilterState, spaceId?: string
   }
 
   if (filters.mediaType !== 'all') {
-    base.$type = filters.mediaType === 'video' ? AssetTypeEnum.Video : AssetTypeEnum.Image;
-    if (filters.mediaType === 'live-photo') {
-      base.isMotion = true;
-    }
+    base.$type = filters.mediaType === 'image' ? AssetTypeEnum.Image : AssetTypeEnum.Video;
   }
 
   return base;
@@ -161,10 +155,7 @@ export function buildAlbumMapMarkerOptions(albumId: string, filters: FilterState
   }
 
   if (filters.mediaType !== 'all') {
-    base.$type = filters.mediaType === 'video' ? MapMediaType.Video : MapMediaType.Image;
-    if (filters.mediaType === 'live-photo') {
-      base.isMotion = true;
-    }
+    base.$type = filters.mediaType === 'image' ? MapMediaType.Image : MapMediaType.Video;
   }
 
   return base;
@@ -221,10 +212,7 @@ export function buildMapTimelineOptions(
   }
 
   if (filters?.mediaType && filters.mediaType !== 'all') {
-    base.$type = filters.mediaType === 'video' ? AssetTypeEnum.Video : AssetTypeEnum.Image;
-    if (filters.mediaType === 'live-photo') {
-      base.isMotion = true;
-    }
+    base.$type = filters.mediaType === 'image' ? AssetTypeEnum.Image : AssetTypeEnum.Video;
   }
 
   return base;

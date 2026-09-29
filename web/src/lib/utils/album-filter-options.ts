@@ -36,10 +36,7 @@ function applyCommonFilterFields(base: Record<string, unknown>, filters: FilterS
   }
   applyTextFilters(base, filters);
   if (filters.mediaType !== 'all') {
-    base.$type = filters.mediaType === 'video' ? AssetTypeEnum.Video : AssetTypeEnum.Image;
-    if (filters.mediaType === 'live-photo') {
-      base.isMotion = true;
-    }
+    base.$type = filters.mediaType === 'image' ? AssetTypeEnum.Image : AssetTypeEnum.Video;
   }
 
   const context = buildFilterContext(filters);

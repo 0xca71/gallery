@@ -82,21 +82,27 @@ class SearchManager {
         isNotInAlbum: 'isNotInAlbum' in searchQuery ? (searchQuery.isNotInAlbum ?? false) : false,
       },
       mediaType:
-        searchQuery.type === AssetTypeEnum.Image
-          ? MediaType.Image
-          : searchQuery.type === AssetTypeEnum.Video
-            ? MediaType.Video
-            : MediaType.All,
+        searchQuery.isMotion
+          ? MediaType.LivePhoto
+          : searchQuery.type === AssetTypeEnum.Image
+            ? MediaType.Image
+            : searchQuery.type === AssetTypeEnum.Video
+              ? MediaType.Video
+              : MediaType.All,
       rating: searchQuery.rating,
     };
   }
 
   #toQuery(): MetadataSearchDto | SmartSearchDto {
     let type: AssetTypeEnum | undefined = undefined;
+    let isMotion: boolean | undefined = undefined;
     if (this.filter.mediaType === MediaType.Image) {
       type = AssetTypeEnum.Image;
     } else if (this.filter.mediaType === MediaType.Video) {
       type = AssetTypeEnum.Video;
+    } else if (this.filter.mediaType === MediaType.LivePhoto) {
+      type = AssetTypeEnum.Image;
+      isMotion = true;
     }
 
     const query = this.filter.query || undefined;
@@ -126,6 +132,7 @@ class SearchManager {
       personIds: this.filter.personIds.size > 0 ? [...this.filter.personIds] : undefined,
       tagIds: this.filter.tagIds === null ? null : this.filter.tagIds.size > 0 ? [...this.filter.tagIds] : undefined,
       type,
+      isMotion,
       rating: this.filter.rating,
     };
   }

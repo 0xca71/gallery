@@ -34,6 +34,13 @@
       >
         {$t('video')}
       </SearchButton>
+      <SearchButton
+        checked
+        active={filteredMedia === MediaType.LivePhoto}
+        onclick={() => (searchManager.filter.mediaType = MediaType.LivePhoto)}
+      >
+        {$t('live_photo')}
+      </SearchButton>
     </div>
   </fieldset>
 </div>

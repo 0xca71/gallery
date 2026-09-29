@@ -153,7 +153,7 @@ export interface FilterState {
   ocr?: string;
   tagIds: string[];
   rating?: number;
-  mediaType: 'all' | 'image' | 'video' | 'live-photo';
+  mediaType: 'all' | 'image' | 'video';
   isFavorite?: boolean;
   isNotInAlbum?: boolean;
   isInAlbum?: boolean;
@@ -232,7 +232,6 @@ export type FilterContext = {
   /** Contributor narrowing. Composes inside the caller's scope; it can only shrink the set. */
   ownerId?: string;
   mediaType?: AssetTypeEnum;
-  isMotion?: boolean;
 };
 
 function hasDateValue(value: string | undefined): value is string {
@@ -362,10 +361,7 @@ export function buildFilterContext(
   }
 
   if (includes('mediaType') && state.mediaType && state.mediaType !== 'all') {
-    context.mediaType = state.mediaType === 'video' ? AssetTypeEnum.Video : AssetTypeEnum.Image;
-    if (state.mediaType === 'live-photo') {
-      context.isMotion = true;
-    }
+    context.mediaType = state.mediaType === 'image' ? AssetTypeEnum.Image : AssetTypeEnum.Video;
   }
 
   const validDateAfter = includes('dateAfter') ? dateOnlyToUtcStart(state.dateAfter) : undefined;

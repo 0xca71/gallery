@@ -628,7 +628,7 @@
     updateFilters({ ...filters, rating });
   }
 
-  function handleMediaTypeChange(type: 'all' | 'image' | 'video' | 'live-photo') {
+  function handleMediaTypeChange(type: 'all' | 'image' | 'video') {
     updateFilters({ ...filters, mediaType: type });
   }
 

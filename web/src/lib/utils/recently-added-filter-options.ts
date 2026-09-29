@@ -78,10 +78,9 @@ export function buildRecentlyAddedSuggestionRequest(filters: FilterState) {
     mediaType:
       filters.mediaType === 'all'
         ? undefined
-        : filters.mediaType === 'video'
-          ? AssetTypeEnum.Video
-          : AssetTypeEnum.Image,
-    isMotion: filters.mediaType === 'live-photo' ? true : undefined,
+        : filters.mediaType === 'image'
+          ? AssetTypeEnum.Image
+          : AssetTypeEnum.Video,
     takenAfter: context?.takenAfter,
     takenBefore: context?.takenBefore,
   };

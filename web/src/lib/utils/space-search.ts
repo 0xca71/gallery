@@ -131,10 +131,7 @@ export function buildSmartSearchParams(args: SmartSearchParamsArgs): SmartSearch
     params.rating = filters.rating;
   }
   if (filters.mediaType !== 'all') {
-    params.type = filters.mediaType === 'video' ? AssetTypeEnum.Video : AssetTypeEnum.Image;
-    if (filters.mediaType === 'live-photo') {
-      params.isMotion = true;
-    }
+    params.type = filters.mediaType === 'image' ? AssetTypeEnum.Image : AssetTypeEnum.Video;
   }
   if (filters.isNotInAlbum === true) {
     params.isNotInAlbum = true;
