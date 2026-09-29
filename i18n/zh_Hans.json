@@ -3599,5 +3599,15 @@
   "you_dont_have_any_shared_links": "您没有任何共享链接",
   "your_wifi_name": "您的 Wi-Fi 名称",
   "zero_to_clear_rating": "按0清除项目星级",
-  "zoom_image": "缩放图像"
+  "zoom_image": "缩放图像",
+  "explore_random": "随机",
+  "explore_random_exhausted": "暂时没有新的随机照片了，可点击随机按钮重新抽取",
+  "explore_random_progress": "已显示 {shown} / {total}",
+  "explore_random_range_all": "全部时间",
+  "explore_random_range_custom": "自定义范围",
+  "explore_random_range_last_year": "最近 1 年",
+  "explore_random_range_years_1_3": "1-3 年前",
+  "explore_random_range_years_3_5": "3-5 年前",
+  "explore_random_range_years_5_10": "5-10 年前",
+  "explore_random_range_older_10": "10 年以前"
 }
