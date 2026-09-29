@@ -267,11 +267,11 @@
       return;
     }
 
-    const timeout = globalThis.setTimeout(() => {
+    const timeout = setTimeout(() => {
       void timelineManager.ensureScrubberMonthGeometry(yearMonth);
     }, 120);
 
-    return () => globalThis.clearTimeout(timeout);
+    return () => clearTimeout(timeout);
   });
 
   const scrollSegment = $derived.by(() => {
