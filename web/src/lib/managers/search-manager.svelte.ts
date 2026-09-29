@@ -95,13 +95,20 @@ class SearchManager {
   #toQuery(): MetadataSearchDto | SmartSearchDto {
     let type: AssetTypeEnum | undefined = undefined;
     let isMotion: boolean | undefined = undefined;
-    if (this.filter.mediaType === MediaType.Image) {
-      type = AssetTypeEnum.Image;
-    } else if (this.filter.mediaType === MediaType.Video) {
-      type = AssetTypeEnum.Video;
-    } else if (this.filter.mediaType === MediaType.LivePhoto) {
-      type = AssetTypeEnum.Image;
-      isMotion = true;
+    switch (this.filter.mediaType) {
+      case MediaType.Image: {
+        type = AssetTypeEnum.Image;
+        break;
+      }
+      case MediaType.Video: {
+        type = AssetTypeEnum.Video;
+        break;
+      }
+      case MediaType.LivePhoto: {
+        type = AssetTypeEnum.Image;
+        isMotion = true;
+        break;
+      }
     }
 
     const query = this.filter.query || undefined;
