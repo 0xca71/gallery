@@ -25,7 +25,8 @@
 
     albumsLoading = true;
     try {
-      albums = (await getAllAlbums({})).toSorted((a, b) => a.albumName.localeCompare(b.albumName));
+      const allAlbums = await getAllAlbums({});
+      albums = [...allAlbums].sort((a, b) => a.albumName.localeCompare(b.albumName));
     } catch (error) {
       handleError(error, $t('errors.failed_to_load_assets'));
     } finally {

@@ -211,7 +211,7 @@
 
     const monthDate = DateTime.fromObject(yearMonth, { zone: 'local', locale: get(locale) });
     const daysInMonth = monthDate.daysInMonth ?? 31;
-    const clampedPercent = clamp(percent, 0, 0.999_999);
+    const clampedPercent = clamp(percent, 0, 0.999999);
     const descending = timelineManager.getAssetOrder() !== AssetOrder.Asc;
     const day = descending
       ? clamp(daysInMonth - Math.floor(clampedPercent * daysInMonth), 1, daysInMonth)
@@ -238,7 +238,7 @@
 
   const hoverLabel = $derived.by(() => {
     const yearMonth = activeYearMonth;
-    const percent = isHoverOnPaddingTop ? 0 : isHoverOnPaddingBottom ? 0.999_999 : hoverSegmentScrollPercent;
+    const percent = isHoverOnPaddingTop ? 0 : isHoverOnPaddingBottom ? 0.999999 : hoverSegmentScrollPercent;
     const actual = yearMonth ? timelineManager.getScrubberDateAtMonthScrollPercent(yearMonth, percent) : undefined;
     if (actual) {
       return formatHoverDate(actual);
@@ -267,11 +267,11 @@
       return;
     }
 
-    const timeout = window.setTimeout(() => {
+    const timeout = globalThis.setTimeout(() => {
       void timelineManager.ensureScrubberMonthGeometry(yearMonth);
     }, 120);
 
-    return () => window.clearTimeout(timeout);
+    return () => globalThis.clearTimeout(timeout);
   });
 
   const scrollSegment = $derived.by(() => {

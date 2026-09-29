@@ -324,7 +324,7 @@ export class TimelineManager extends VirtualScrollManager {
       return undefined;
     }
 
-    const clampedPercent = clamp(monthScrollPercent, 0, 0.999_999);
+    const clampedPercent = clamp(monthScrollPercent, 0, 0.999999);
     const monthY = clampedPercent * month.height;
     let lastMatchingDay = month.timelineDays[0];
 

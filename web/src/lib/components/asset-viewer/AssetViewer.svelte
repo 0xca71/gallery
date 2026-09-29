@@ -39,6 +39,7 @@
   } from '@immich/sdk';
   import { CommandPaletteDefaultProvider } from '@immich/ui';
   import { onDestroy, onMount, untrack } from 'svelte';
+  import { SvelteSet } from 'svelte/reactivity';
   import type { SwipeCustomEvent } from 'svelte-gestures';
   import { t } from 'svelte-i18n';
   import { fly } from 'svelte/transition';
@@ -66,10 +67,10 @@
   export type SlideshowStepAssetResolver = (
     asset: AssetResponseDto,
     order: SlideshowAssetOrder,
-  ) => Promise<AssetResponseDto | undefined>;
+  ) => AssetResponseDto | undefined | Promise<AssetResponseDto | undefined>;
   export type SlideshowRandomAssetResolver = (
     isPlayable: (asset: AssetResponseDto) => boolean,
-  ) => Promise<AssetResponseDto | undefined>;
+  ) => AssetResponseDto | undefined | Promise<AssetResponseDto | undefined>;
 
   interface Props {
     cursor: AssetCursor;
@@ -199,7 +200,7 @@
         }
         handlePromiseError(handlePlaySlideshow());
       } else if (value === SlideshowState.StopSlideshow) {
-        handlePromiseError(handleStopSlideshow());
+        handleStopSlideshow();
       }
     });
 
@@ -265,7 +266,7 @@
   };
 
   const resolvePlayableSlideshowAsset = async (candidate: AssetResponseDto, order: SlideshowAssetOrder) => {
-    const visitedAssetIds = new Set<string>();
+    const visitedAssetIds = new SvelteSet<string>();
     let nextCandidate = await getAdjacentSlideshowAsset(candidate, order);
 
     while (nextCandidate && !visitedAssetIds.has(nextCandidate.id)) {
@@ -297,7 +298,7 @@
         return true;
       }
 
-      await handleStopSlideshow();
+      handleStopSlideshow();
       return false;
     }
 
@@ -309,7 +310,7 @@
       return true;
     }
 
-    await handleStopSlideshow();
+    handleStopSlideshow();
     return false;
   };
 
@@ -376,7 +377,7 @@
         return;
       }
 
-      await handleStopSlideshow();
+      handleStopSlideshow();
     }, $t('error_while_navigating'));
   };
 
@@ -421,7 +422,7 @@
     await alignSlideshowToPlayableAsset();
   };
 
-  const handleStopSlideshow = async () => {
+  const handleStopSlideshow = () => {
     $stopSlideshowProgress = true;
     $slideshowState = SlideshowState.None;
   };

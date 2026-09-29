@@ -22,6 +22,7 @@
   import { type AlbumResponseDto, type AssetResponseDto, type PersonResponseDto, getAssetInfo } from '@immich/sdk';
   import { onDestroy, onMount } from 'svelte';
   import { t } from 'svelte-i18n';
+  import { SvelteSet } from 'svelte/reactivity';
 
   interface Props {
     timelineManager: TimelineManager;
@@ -104,6 +105,28 @@
 
     await navigate({ targetRoute: 'current', assetId: randomAsset.id });
     return { id: randomAsset.id };
+  };
+
+  const resolveSlideshowStepAsset: SlideshowStepAssetResolver = async (asset, order) => {
+    return order === 'previous' ? await getPreviousAsset(asset) : await getNextAsset(asset);
+  };
+
+  const resolveSlideshowRandomAsset: SlideshowRandomAssetResolver = async (isPlayable) => {
+    const triedAssetIds = new SvelteSet<string>();
+    const maxAttempts = Math.min(Math.max(timelineManager.assetCount, 10), 100);
+
+    for (let attempt = 0; attempt < maxAttempts && triedAssetIds.size < timelineManager.assetCount; attempt++) {
+      const randomAsset = await timelineManager.getRandomAsset();
+      if (!randomAsset || triedAssetIds.has(randomAsset.id)) {
+        continue;
+      }
+
+      triedAssetIds.add(randomAsset.id);
+      const candidate = await getAsset(randomAsset.id);
+      if (candidate && isPlayable(candidate)) {
+        return candidate;
+      }
+    }
   };
 
   const handleClose = async (assetId: string) => {

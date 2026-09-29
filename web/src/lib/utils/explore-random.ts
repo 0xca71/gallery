@@ -69,23 +69,29 @@ export function buildRandomSearchFilter(
 
   const ago = (years: number) => now.minus({ years }).toUTC().toISO()!;
   switch (state.dateRange) {
-    case 'last_year':
+    case 'last_year': {
       filter.takenAt = { gte: ago(1), lt: ago(0) };
       break;
-    case 'years_1_3':
+    }
+    case 'years_1_3': {
       filter.takenAt = { gte: ago(3), lt: ago(1) };
       break;
-    case 'years_3_5':
+    }
+    case 'years_3_5': {
       filter.takenAt = { gte: ago(5), lt: ago(3) };
       break;
-    case 'years_5_10':
+    }
+    case 'years_5_10': {
       filter.takenAt = { gte: ago(10), lt: ago(5) };
       break;
-    case 'older_10':
+    }
+    case 'older_10': {
       filter.takenAt = { lt: ago(10) };
       break;
-    default:
+    }
+    default: {
       break;
+    }
   }
   return filter;
 }

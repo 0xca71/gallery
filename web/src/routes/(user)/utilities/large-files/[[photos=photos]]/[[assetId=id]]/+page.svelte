@@ -59,12 +59,12 @@
     await navigate({ targetRoute: 'current', assetId: asset.id });
   };
 
-  const resolveSlideshowStepAsset: SlideshowStepAssetResolver = async (asset, order) => {
+  const resolveSlideshowStepAsset: SlideshowStepAssetResolver = (asset, order) => {
     return order === 'previous' ? getPreviousAsset(assets, asset) : getNextAsset(assets, asset);
   };
 
-  const resolveSlideshowRandomAsset: SlideshowRandomAssetResolver = async (isPlayable) => {
-    const playableAssets = assets.filter(isPlayable);
+  const resolveSlideshowRandomAsset: SlideshowRandomAssetResolver = (isPlayable) => {
+    const playableAssets = assets.filter((asset) => isPlayable(asset));
     if (playableAssets.length === 0) {
       return;
     }
