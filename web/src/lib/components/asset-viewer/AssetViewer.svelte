@@ -62,6 +62,15 @@
     previousAsset?: AssetResponseDto;
   };
 
+  export type SlideshowAssetOrder = 'previous' | 'next';
+  export type SlideshowStepAssetResolver = (
+    asset: AssetResponseDto,
+    order: SlideshowAssetOrder,
+  ) => Promise<AssetResponseDto | undefined>;
+  export type SlideshowRandomAssetResolver = (
+    isPlayable: (asset: AssetResponseDto) => boolean,
+  ) => Promise<AssetResponseDto | undefined>;
+
   interface Props {
     cursor: AssetCursor;
     showNavigation?: boolean;
@@ -76,6 +85,8 @@
     onClose?: (assetId: string) => void;
     onRemoveFromAlbum?: (assetIds: string[]) => void;
     onRandom?: () => Promise<{ id: string } | undefined>;
+    resolveSlideshowStepAsset?: SlideshowStepAssetResolver;
+    resolveSlideshowRandomAsset?: SlideshowRandomAssetResolver;
     spaceId?: string;
     /** Shared-space surface + the caller's write capability on it — see `Timeline` (#889). */
     space?: { id: string; canWrite: boolean };
@@ -95,6 +106,8 @@
     onClose,
     onRemoveFromAlbum,
     onRandom,
+    resolveSlideshowStepAsset,
+    resolveSlideshowRandomAsset,
     spaceId,
     space,
   }: Props = $props();
@@ -181,7 +194,9 @@
     const slideshowStateUnsubscribe = slideshowState.subscribe((value) => {
       if (value === SlideshowState.PlaySlideshow) {
         slideshowHistory.reset();
-        slideshowHistory.queue(toTimelineAsset(asset));
+        if (isSlideshowAssetPlayable(asset)) {
+          slideshowHistory.queue(toTimelineAsset(asset));
+        }
         handlePromiseError(handlePlaySlideshow());
       } else if (value === SlideshowState.StopSlideshow) {
         handlePromiseError(handleStopSlideshow());
@@ -194,7 +209,9 @@
       }
 
       slideshowHistory.reset();
-      slideshowHistory.queue(toTimelineAsset(asset));
+      if (isSlideshowAssetPlayable(asset)) {
+        slideshowHistory.queue(toTimelineAsset(asset));
+      }
     });
 
     return () => {
@@ -225,6 +242,77 @@
   };
 
   const tracker = new InvocationTracker();
+  const slideshowAlignmentTracker = new InvocationTracker();
+
+  const isSlideshowAssetPlayable = (candidate: AssetResponseDto) => {
+    if ($slideshowSkipVideos && candidate.type === AssetTypeEnum.Video) {
+      return false;
+    }
+
+    if ($slideshowSkipMotionPhotos && !!candidate.livePhotoVideoId) {
+      return false;
+    }
+
+    return true;
+  };
+
+  const getAdjacentSlideshowAsset = async (candidate: AssetResponseDto, order: SlideshowAssetOrder) => {
+    if (candidate.id === cursor.current.id) {
+      return order === 'previous' ? cursor.previousAsset : cursor.nextAsset;
+    }
+
+    return await resolveSlideshowStepAsset?.(candidate, order);
+  };
+
+  const resolvePlayableSlideshowAsset = async (candidate: AssetResponseDto, order: SlideshowAssetOrder) => {
+    const visitedAssetIds = new Set<string>();
+    let nextCandidate = await getAdjacentSlideshowAsset(candidate, order);
+
+    while (nextCandidate && !visitedAssetIds.has(nextCandidate.id)) {
+      if (isSlideshowAssetPlayable(nextCandidate)) {
+        return nextCandidate;
+      }
+
+      visitedAssetIds.add(nextCandidate.id);
+      nextCandidate = await resolveSlideshowStepAsset?.(nextCandidate, order);
+    }
+  };
+
+  const resolveRandomPlayableSlideshowAsset = async () => {
+    return await resolveSlideshowRandomAsset?.(isSlideshowAssetPlayable);
+  };
+
+  const alignSlideshowToPlayableAsset = async () => {
+    if ($slideshowState !== SlideshowState.PlaySlideshow || isSlideshowAssetPlayable(asset)) {
+      return true;
+    }
+
+    if ($slideshowNavigation === SlideshowNavigation.Shuffle) {
+      const randomAsset = await resolveRandomPlayableSlideshowAsset();
+      if (randomAsset) {
+        slideshowHistory.reset();
+        slideshowHistory.queue(toTimelineAsset(randomAsset));
+        await assetViewerManager.setAssetId(randomAsset.id, spaceId);
+        $restartSlideshowProgress = true;
+        return true;
+      }
+
+      await handleStopSlideshow();
+      return false;
+    }
+
+    const order = $slideshowNavigation === SlideshowNavigation.AscendingOrder ? 'previous' : 'next';
+    const nextPlayableAsset = await resolvePlayableSlideshowAsset(asset, order);
+    if (nextPlayableAsset) {
+      await navigateToAsset(nextPlayableAsset);
+      $restartSlideshowProgress = true;
+      return true;
+    }
+
+    await handleStopSlideshow();
+    return false;
+  };
+
   const navigateAsset = (order?: 'previous' | 'next') => {
     if (!order) {
       if ($slideshowState === SlideshowState.PlaySlideshow) {
@@ -249,12 +337,22 @@
       if (isShuffle) {
         hasNext = order === 'previous' ? slideshowHistory.previous() : slideshowHistory.next();
         if (!hasNext) {
-          const asset = await onRandom?.();
-          if (asset) {
-            slideshowHistory.queue(asset);
+          const randomAsset = await resolveRandomPlayableSlideshowAsset();
+          if (randomAsset) {
+            slideshowHistory.queue(toTimelineAsset(randomAsset));
+            await assetViewerManager.setAssetId(randomAsset.id, spaceId);
             hasNext = true;
+          } else {
+            const randomAssetId = await onRandom?.();
+            if (randomAssetId) {
+              slideshowHistory.queue(randomAssetId);
+              hasNext = true;
+            }
           }
         }
+      } else if ($slideshowState === SlideshowState.PlaySlideshow) {
+        const nextPlayableAsset = await resolvePlayableSlideshowAsset(asset, order);
+        hasNext = await navigateToAsset(nextPlayableAsset);
       } else {
         hasNext =
           order === 'previous' ? await navigateToAsset(cursor.previousAsset) : await navigateToAsset(cursor.nextAsset);
@@ -271,7 +369,10 @@
 
       if ($slideshowRepeat && slideshowStartAssetId) {
         await assetViewerManager.setAssetId(slideshowStartAssetId, spaceId);
-        $restartSlideshowProgress = true;
+        const isPlayable = await alignSlideshowToPlayableAsset();
+        if (isPlayable) {
+          $restartSlideshowProgress = true;
+        }
         return;
       }
 
@@ -315,7 +416,9 @@
     slideshowStartAssetId = asset.id;
     if (!$slideshowAutoplay) {
       $slideshowState = SlideshowState.PauseSlideshow;
+      return;
     }
+    await alignSlideshowToPlayableAsset();
   };
 
   const handleStopSlideshow = async () => {
@@ -546,17 +649,28 @@
   };
 
   $effect(() => {
-    if ($slideshowState !== SlideshowState.PlaySlideshow) {
+    const slideshowStateValue = $slideshowState;
+    const currentAssetId = asset.id;
+    const skipVideos = $slideshowSkipVideos;
+    const skipMotionPhotos = $slideshowSkipMotionPhotos;
+
+    if (slideshowStateValue !== SlideshowState.PlaySlideshow || isSlideshowAssetPlayable(asset)) {
       return;
     }
-    const shouldSkip =
-      ($slideshowSkipVideos && asset.type === AssetTypeEnum.Video) ||
-      ($slideshowSkipMotionPhotos && !!asset.livePhotoVideoId);
-    if (!shouldSkip) {
-      return;
-    }
-    const direction = $slideshowNavigation === SlideshowNavigation.AscendingOrder ? 'previous' : 'next';
-    untrack(() => navigateAsset(direction));
+
+    void currentAssetId;
+    void skipVideos;
+    void skipMotionPhotos;
+
+    untrack(() => {
+      if (slideshowAlignmentTracker.isActive()) {
+        return;
+      }
+
+      void slideshowAlignmentTracker.invoke(async () => {
+        await alignSlideshowToPlayableAsset();
+      }, $t('error_while_navigating'));
+    });
   });
 </script>
 
