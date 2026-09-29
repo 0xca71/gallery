@@ -81,14 +81,13 @@ class SearchManager {
         isFavorite: searchQuery.isFavorite ?? false,
         isNotInAlbum: 'isNotInAlbum' in searchQuery ? (searchQuery.isNotInAlbum ?? false) : false,
       },
-      mediaType:
-        searchQuery.isMotion
-          ? MediaType.LivePhoto
-          : searchQuery.type === AssetTypeEnum.Image
-            ? MediaType.Image
-            : searchQuery.type === AssetTypeEnum.Video
-              ? MediaType.Video
-              : MediaType.All,
+      mediaType: searchQuery.isMotion
+        ? MediaType.LivePhoto
+        : searchQuery.type === AssetTypeEnum.Image
+          ? MediaType.Image
+          : searchQuery.type === AssetTypeEnum.Video
+            ? MediaType.Video
+            : MediaType.All,
       rating: searchQuery.rating,
     };
   }
