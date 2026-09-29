@@ -140,7 +140,9 @@ test.describe('OCR boxes and zoom', () => {
 
     const { width, height } = page.viewportSize()!;
     await page.mouse.move(width / 2, height / 2);
+    await page.keyboard.down('Alt');
     await page.mouse.wheel(0, -3);
+    await page.keyboard.up('Alt');
 
     await expect(async () => {
       const zoomedBox = await ocrBox.boundingBox();
