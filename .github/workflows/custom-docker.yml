@@ -29,7 +29,7 @@ jobs:
           persist-credentials: false
 
       - name: Apply Gallery branding
-        uses: ./.github/actions/apply-branding
+        uses: $/.github/actions/apply-branding
         with:
           version: v5.7.0-custom
 
