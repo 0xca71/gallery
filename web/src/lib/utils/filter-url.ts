@@ -280,8 +280,8 @@ function parseBoundedInteger(value: string | null, min: number, max: number): nu
   return Number.isSafeInteger(parsed) && parsed >= min && parsed <= max ? parsed : undefined;
 }
 
-function parseMediaType(value: string | null): 'image' | 'video' | undefined {
-  return value === 'image' || value === 'video' ? value : undefined;
+function parseMediaType(value: string | null): 'image' | 'video' | 'live-photo' | undefined {
+  return value === 'image' || value === 'video' || value === 'live-photo' ? value : undefined;
 }
 
 function parseFavorite(value: string | null): boolean | undefined {
