@@ -623,7 +623,7 @@
 
     assetViewerManager.zoomState = {
       ...assetViewerManager.zoomState,
-      currentZoom: nextZoom < 1.01 ? 1 : nextZoom,
+      currentZoom: zoomDelta < 0 && nextZoom < 1.01 ? 1 : nextZoom,
     };
   };
 
