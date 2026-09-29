@@ -55,7 +55,6 @@ export function buildMapFilterConfig(spaceId?: string): FilterPanelConfig {
           : filters.mediaType === 'video'
             ? AssetTypeEnum.Video
             : AssetTypeEnum.Image,
-      isMotion: filters.mediaType === 'live-photo' ? true : undefined,
       isFavorite: filters.isFavorite,
       isNotInAlbum: filters.isNotInAlbum === true ? true : undefined,
       isInAlbum: filters.isInAlbum === true ? true : undefined,
