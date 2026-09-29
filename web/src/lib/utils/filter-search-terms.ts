@@ -67,7 +67,10 @@ export function filterStateToSearchTerms(filters: FilterState): SearchTerms {
     terms.isInAlbum = true;
   }
   if (filters.mediaType !== 'all') {
-    terms.type = filters.mediaType === 'image' ? AssetTypeEnum.Image : AssetTypeEnum.Video;
+    terms.type = filters.mediaType === 'video' ? AssetTypeEnum.Video : AssetTypeEnum.Image;
+    if (filters.mediaType === 'live-photo') {
+      terms.isMotion = true;
+    }
   }
 
   const context = buildFilterContext(filters);
