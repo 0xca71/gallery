@@ -2,7 +2,7 @@
   import { t } from 'svelte-i18n';
 
   interface Props {
-    selected: 'all' | 'image' | 'video';
+    selected: 'all' | 'image' | 'video' | 'live-photo' | 'live-photo' | 'live-photo';
     availableMediaTypes?: string[];
     onTypeChange: (type: 'all' | 'image' | 'video') => void;
   }
@@ -13,6 +13,7 @@
     { value: 'all', label: $t('all') },
     { value: 'image', label: $t('photos'), assetType: 'IMAGE' },
     { value: 'video', label: $t('videos'), assetType: 'VIDEO' },
+    { value: 'live-photo', label: $t('live_photo'), assetType: 'IMAGE' },
   ]);
 
   let options = $derived(
