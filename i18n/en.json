@@ -3673,5 +3673,7 @@
   "explore_random_range_years_1_3": "1-3 years ago",
   "explore_random_range_years_3_5": "3-5 years ago",
   "explore_random_range_years_5_10": "5-10 years ago",
-  "explore_random_range_older_10": "More than 10 years ago"
+  "explore_random_range_older_10": "More than 10 years ago",
+  "skip_videos_in_slideshow": "Skip videos in slideshow",
+  "skip_motion_photos_in_slideshow": "Skip motion photos in slideshow"
 }
