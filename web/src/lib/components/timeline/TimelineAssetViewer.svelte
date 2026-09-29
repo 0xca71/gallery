@@ -1,7 +1,11 @@
 <script lang="ts">
   import { lazyComponent } from '$lib/utils/lazy-component.svelte';
   import type { Action } from '$lib/components/asset-viewer/actions/action';
-  import type { AssetCursor } from '$lib/components/asset-viewer/AssetViewer.svelte';
+  import type {
+    AssetCursor,
+    SlideshowRandomAssetResolver,
+    SlideshowStepAssetResolver,
+  } from '$lib/components/asset-viewer/AssetViewer.svelte';
   import { AssetAction } from '$lib/constants';
   import { assetViewerManager } from '$lib/managers/asset-viewer-manager.svelte';
   import { assetCacheManager } from '$lib/managers/AssetCacheManager.svelte';
@@ -18,6 +22,7 @@
   import { type AlbumResponseDto, type AssetResponseDto, type PersonResponseDto, getAssetInfo } from '@immich/sdk';
   import { onDestroy, onMount } from 'svelte';
   import { t } from 'svelte-i18n';
+  import { SvelteSet } from 'svelte/reactivity';
 
   interface Props {
     timelineManager: TimelineManager;
@@ -100,6 +105,28 @@
 
     await navigate({ targetRoute: 'current', assetId: randomAsset.id });
     return { id: randomAsset.id };
+  };
+
+  const resolveSlideshowStepAsset: SlideshowStepAssetResolver = async (asset, order) => {
+    return order === 'previous' ? await getPreviousAsset(asset) : await getNextAsset(asset);
+  };
+
+  const resolveSlideshowRandomAsset: SlideshowRandomAssetResolver = async (isPlayable) => {
+    const triedAssetIds = new SvelteSet<string>();
+    const maxAttempts = Math.min(Math.max(timelineManager.assetCount, 10), 100);
+
+    for (let attempt = 0; attempt < maxAttempts && triedAssetIds.size < timelineManager.assetCount; attempt++) {
+      const randomAsset = await timelineManager.getRandomAsset();
+      if (!randomAsset || triedAssetIds.has(randomAsset.id)) {
+        continue;
+      }
+
+      triedAssetIds.add(randomAsset.id);
+      const candidate = await getAsset(randomAsset.id);
+      if (candidate && isPlayable(candidate)) {
+        return candidate;
+      }
+    }
   };
 
   const handleClose = async (assetId: string) => {
@@ -264,6 +291,8 @@
     }}
     onUndoDelete={handleUndoDelete}
     onRandom={handleRandom}
+    {resolveSlideshowStepAsset}
+    {resolveSlideshowRandomAsset}
     onRemoveFromAlbum={handleRemoveFromAlbum}
     onClose={handleClose}
   />
