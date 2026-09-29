@@ -30,6 +30,10 @@
 {#if assetViewerManager.isViewing && LazyAssetViewer.current}
   {@const AssetViewer = LazyAssetViewer.current}
   <Portal target="body">
-    <AssetViewer {cursor} showNavigation={viewerAssets.length > 1} onClose={() => assetViewerManager.showAssetViewer(false)} />
+    <AssetViewer
+      {cursor}
+      showNavigation={viewerAssets.length > 1}
+      onClose={() => assetViewerManager.showAssetViewer(false)}
+    />
   </Portal>
 {/if}

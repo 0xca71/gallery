@@ -376,7 +376,6 @@
     onAction?.(action);
   };
 
-
   $effect(() => {
     if (album && !album.isActivityEnabled && activityManager.commentCount === 0) {
       assetViewerManager.closeActivityPanel();

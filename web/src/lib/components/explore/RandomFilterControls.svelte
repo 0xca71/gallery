@@ -61,7 +61,8 @@
 
   {#if expanded}
     <div class="flex w-full flex-wrap items-end justify-end gap-3 pb-3">
-      <label class="text-sm">{$t('media_type')}
+      <label class="text-sm"
+        >{$t('media_type')}
         <select
           class="ms-2 rounded-sm border p-2 dark:bg-immich-dark-gray"
           bind:value={filter.mediaType}
@@ -74,7 +75,8 @@
         </select>
       </label>
 
-      <label class="text-sm">{$t('album')}
+      <label class="text-sm"
+        >{$t('album')}
         <select
           class="ms-2 max-w-56 rounded-sm border p-2 dark:bg-immich-dark-gray"
           bind:value={filter.albumId}
@@ -88,7 +90,8 @@
         </select>
       </label>
 
-      <label class="text-sm">{$t('date_range')}
+      <label class="text-sm"
+        >{$t('date_range')}
         <select
           class="ms-2 rounded-sm border p-2 dark:bg-immich-dark-gray"
           bind:value={filter.dateRange}
@@ -106,7 +109,8 @@
       </label>
 
       {#if filter.dateRange === 'custom'}
-        <label class="flex flex-col gap-1 text-sm">{$t('start_date')}
+        <label class="flex flex-col gap-1 text-sm"
+          >{$t('start_date')}
           <DatePicker
             value={asDateTime(filter.takenAfter)}
             maxDate={DateTime.now()}
@@ -116,7 +120,8 @@
             }}
           />
         </label>
-        <label class="flex flex-col gap-1 text-sm">{$t('end_date')}
+        <label class="flex flex-col gap-1 text-sm"
+          >{$t('end_date')}
           <DatePicker
             value={asDateTime(filter.takenBefore)}
             maxDate={DateTime.now()}

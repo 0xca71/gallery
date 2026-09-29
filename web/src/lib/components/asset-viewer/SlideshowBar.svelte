@@ -20,12 +20,7 @@
     onClose?: () => void;
   }
 
-  let {
-    assetType,
-    onNext = () => {},
-    onPrevious = () => {},
-    onClose = () => {},
-  }: Props = $props();
+  let { assetType, onNext = () => {}, onPrevious = () => {}, onClose = () => {} }: Props = $props();
 
   const { restartProgress, stopProgress, slideshowDelay, showProgressBar, slideshowNavigation, slideshowState } =
     slideshowStore;

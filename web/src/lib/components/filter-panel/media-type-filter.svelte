@@ -9,7 +9,9 @@
 
   let { selected, availableMediaTypes, onTypeChange }: Props = $props();
 
-  let allOptions = $derived<Array<{ value: 'all' | 'image' | 'video' | 'live-photo'; label: string; assetType?: string }>>([
+  let allOptions = $derived<
+    Array<{ value: 'all' | 'image' | 'video' | 'live-photo'; label: string; assetType?: string }>
+  >([
     { value: 'all', label: $t('all') },
     { value: 'image', label: $t('photos'), assetType: 'IMAGE' },
     { value: 'video', label: $t('videos'), assetType: 'VIDEO' },
