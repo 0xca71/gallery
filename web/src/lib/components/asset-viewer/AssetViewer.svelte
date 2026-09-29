@@ -106,6 +106,8 @@
     slideshowState,
     slideshowRepeat,
     slideshowAutoplay,
+    slideshowSkipVideos,
+    slideshowSkipMotionPhotos,
   } = slideshowStore;
   const stackThumbnailSize = 60;
   const stackSelectedThumbnailSize = 65;
@@ -120,6 +122,8 @@
 
   let isPlayingOriginalVideo = $state($alwaysLoadOriginalVideo);
   let slideshowStartAssetId = $state<string>();
+  const wheelZoomSpeedDivisor = 300;
+  const wheelZoomSpeedLimit = 0.35;
 
   const setPlayOriginalVideo = (value: boolean) => {
     isPlayingOriginalVideo = value;
@@ -168,6 +172,12 @@
 
   onMount(() => {
     syncAssetViewerOpenClass(true);
+    const wheelAbortController = new AbortController();
+    assetViewerHtmlElement?.addEventListener('wheel', handleAssetViewerWheel, {
+      capture: true,
+      passive: false,
+      signal: wheelAbortController.signal,
+    });
     const slideshowStateUnsubscribe = slideshowState.subscribe((value) => {
       if (value === SlideshowState.PlaySlideshow) {
         slideshowHistory.reset();
@@ -188,6 +198,7 @@
     });
 
     return () => {
+      wheelAbortController.abort();
       slideshowStateUnsubscribe();
       slideshowNavigationUnsubscribe();
     };
@@ -305,25 +316,11 @@
     if (!$slideshowAutoplay) {
       $slideshowState = SlideshowState.PauseSlideshow;
     }
-    try {
-      await assetViewerHtmlElement?.requestFullscreen?.();
-    } catch (error) {
-      handleError(error, $t('errors.unable_to_enter_fullscreen'));
-      $slideshowState = SlideshowState.StopSlideshow;
-    }
   };
 
   const handleStopSlideshow = async () => {
-    try {
-      if (document.fullscreenElement) {
-        await document.exitFullscreen();
-      }
-    } catch (error) {
-      handleError(error, $t('errors.unable_to_exit_fullscreen'));
-    } finally {
-      $stopSlideshowProgress = true;
-      $slideshowState = SlideshowState.None;
-    }
+    $stopSlideshowProgress = true;
+    $slideshowState = SlideshowState.None;
   };
 
   const handleStackedAssetMouseEvent = (isMouseOver: boolean, stackedAsset: AssetResponseDto) => {
@@ -379,7 +376,6 @@
     onAction?.(action);
   };
 
-  let isFullScreen = $derived(!!fullscreenElement);
 
   $effect(() => {
     if (album && !album.isActivityEnabled && activityManager.commentCount === 0) {
@@ -495,6 +491,74 @@
       navigateAsset('previous');
     }
   };
+
+  const handleWheelNavigation = (event: WheelEvent) => {
+    if (event.ctrlKey || event.metaKey || Math.abs(event.deltaX) > Math.abs(event.deltaY) || event.deltaY === 0) {
+      return;
+    }
+    event.stopPropagation();
+    event.preventDefault();
+    navigateAsset(event.deltaY > 0 ? 'next' : 'previous');
+  };
+
+  const handlePhotoViewerWheelZoom = (event: WheelEvent) => {
+    if (viewerKind !== 'PhotoViewer' || event.ctrlKey || event.metaKey) {
+      return;
+    }
+    event.stopPropagation();
+    event.preventDefault();
+    assetViewerManager.cancelZoomAnimation();
+
+    const zoomDelta = Math.max(
+      -wheelZoomSpeedLimit,
+      Math.min(wheelZoomSpeedLimit, -event.deltaY / wheelZoomSpeedDivisor),
+    );
+    const nextZoom = Math.max(1, Math.min(10, assetViewerManager.zoom + zoomDelta));
+    if (nextZoom === assetViewerManager.zoom) {
+      return;
+    }
+
+    assetViewerManager.zoomState = {
+      ...assetViewerManager.zoomState,
+      currentZoom: nextZoom < 1.01 ? 1 : nextZoom,
+    };
+  };
+
+  const handleAssetViewerWheel = (event: WheelEvent) => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement) || !target.closest('[data-viewer-content]')) {
+      return;
+    }
+    if (target.closest('[data-overlay-interactive]')) {
+      return;
+    }
+    if ($slideshowState === SlideshowState.PlaySlideshow) {
+      handleWheelNavigation(event);
+      return;
+    }
+    if (viewerKind !== 'PhotoViewer' || assetViewerManager.isShowEditor || assetViewerManager.isFaceEditMode) {
+      return;
+    }
+    if (event.altKey) {
+      handlePhotoViewerWheelZoom(event);
+      return;
+    }
+    handleWheelNavigation(event);
+  };
+
+  $effect(() => {
+    if ($slideshowState !== SlideshowState.PlaySlideshow) {
+      return;
+    }
+    const shouldSkip =
+      ($slideshowSkipVideos && asset.type === AssetTypeEnum.Video) ||
+      ($slideshowSkipMotionPhotos && !!asset.livePhotoVideoId);
+    if (!shouldSkip) {
+      return;
+    }
+    const direction = $slideshowNavigation === SlideshowNavigation.AscendingOrder ? 'previous' : 'next';
+    untrack(() => navigateAsset(direction));
+  });
 </script>
 
 <CommandPaletteDefaultProvider name={$t('assets')} actions={[Tag, TagPeople]} />
@@ -537,9 +601,7 @@
   {#if $slideshowState !== SlideshowState.None}
     <div class="absolute inset-s-0 top-0 flex w-full justify-start">
       <SlideshowBar
-        {isFullScreen}
         assetType={previewStackedAsset?.type ?? asset.type}
-        onSetToFullScreen={() => assetViewerHtmlElement?.requestFullscreen?.()}
         onPrevious={() => navigateAsset('previous')}
         onNext={() => navigateAsset('next')}
         onClose={() => ($slideshowState = SlideshowState.StopSlideshow)}
