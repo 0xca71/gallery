@@ -10,6 +10,7 @@ import { OpenTelemetryModuleOptions } from 'nestjs-otel/lib/interfaces/index.js'
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { VectorExtension } from 'src/types.js';
+import type { S3StorageConfig } from 'src/backends/s3-storage.backend.js';
 import { IWorker, citiesFile } from 'src/constants.js';
 import { Telemetry } from 'src/decorators.js';
 import { EnvSchema } from 'src/dtos/env.dto.js';
@@ -33,6 +34,13 @@ export interface EnvData {
   logLevel?: LogLevel;
   logFormat?: LogFormat;
   peopleStatistics: boolean;
+
+  backup: {
+    s3: Pick<S3StorageConfig, 'bucket' | 'region' | 'endpoint' | 'accessKeyId' | 'secretAccessKey'> & {
+      enabled: boolean;
+      prefix: string;
+    };
+  };
 
   buildMetadata: {
     build?: string;
@@ -272,6 +280,18 @@ const getEnv = (): EnvData => {
     logLevel: dto.IMMICH_LOG_LEVEL,
     logFormat: dto.IMMICH_LOG_FORMAT || LogFormat.Console,
     peopleStatistics: dto.IMMICH_PEOPLE_STATISTICS_ENABLED ?? false,
+
+    backup: {
+      s3: {
+        enabled: dto.IMMICH_BACKUP_S3_ENABLED ?? false,
+        bucket: dto.IMMICH_BACKUP_S3_BUCKET || '',
+        region: dto.IMMICH_BACKUP_S3_REGION || 'us-east-1',
+        endpoint: dto.IMMICH_BACKUP_S3_ENDPOINT,
+        accessKeyId: dto.IMMICH_BACKUP_S3_ACCESS_KEY_ID,
+        secretAccessKey: dto.IMMICH_BACKUP_S3_SECRET_ACCESS_KEY,
+        prefix: dto.IMMICH_BACKUP_S3_PREFIX ?? 'database',
+      },
+    },
 
     buildMetadata: {
       build: dto.IMMICH_BUILD,

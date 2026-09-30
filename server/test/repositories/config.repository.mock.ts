@@ -9,6 +9,14 @@ export const envData: EnvData = {
   logFormat: LogFormat.Console,
 
   buildMetadata: {},
+  backup: {
+    s3: {
+      enabled: false,
+      bucket: '',
+      region: 'us-east-1',
+      prefix: 'database',
+    },
+  },
   bull: {
     config: {
       connection: {},

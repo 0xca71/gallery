@@ -1,12 +1,15 @@
 import { BadRequestException } from '@nestjs/common';
 import { DateTime } from 'luxon';
 import { Duplex, PassThrough, Readable } from 'node:stream';
+import type { MockInstance } from 'vitest';
+import { S3StorageBackend } from 'src/backends/s3-storage.backend.js';
 import { StorageCore } from 'src/cores/storage.core.js';
 import { SystemConfig, defaults } from 'src/dtos/config.dto.js';
 import { ImmichWorker, JobStatus, StorageFolder } from 'src/enum.js';
 import { MaintenanceHealthRepository } from 'src/maintenance/maintenance-health.repository.js';
 import { DatabaseBackupService } from 'src/services/database-backup.service.js';
 import { systemConfigStub } from 'test/fixtures/system-config.stub.js';
+import { mockEnvData } from 'test/repositories/config.repository.mock.js';
 import { AutoMocked, ServiceMocks, automock, getMocks, mockDuplex, mockSpawn } from 'test/utils.js';
 
 describe(DatabaseBackupService.name, () => {
@@ -226,6 +229,117 @@ describe(DatabaseBackupService.name, () => {
       const result = await sut.handleBackupDatabase();
       expect(result).toBe(JobStatus.Success);
       expect(mocks.storage.rename).toHaveBeenCalled();
+    });
+
+    describe('S3 upload', () => {
+      let put: MockInstance<S3StorageBackend['put']>;
+      let stream: Readable;
+
+      beforeEach(() => {
+        put = vitest.spyOn(S3StorageBackend.prototype, 'put').mockResolvedValue();
+        stream = Readable.from('compressed backup');
+        mocks.storage.createReadStream.mockResolvedValue({ stream });
+      });
+
+      afterEach(() => {
+        put.mockRestore();
+      });
+
+      const enableBackupS3 = (prefix = 'database') => {
+        mocks.config.getEnv.mockReturnValue(
+          mockEnvData({
+            backup: {
+              s3: {
+                enabled: true,
+                bucket: 'backup-bucket',
+                region: 'auto',
+                endpoint: 'https://account.r2.cloudflarestorage.com',
+                accessKeyId: 'backup-key',
+                secretAccessKey: 'backup-secret',
+                prefix,
+              },
+            },
+          }),
+        );
+      };
+
+      it('should not upload when disabled', async () => {
+        await expect(sut.handleBackupDatabase()).resolves.toBe(JobStatus.Success);
+        expect(put).not.toHaveBeenCalled();
+        expect(mocks.storage.createReadStream).not.toHaveBeenCalled();
+      });
+
+      it.each([
+        { prefix: 'database', keyPrefix: 'database/' },
+        { prefix: '/database/', keyPrefix: 'database/' },
+        { prefix: 'gallery/database', keyPrefix: 'gallery/database/' },
+        { prefix: '', keyPrefix: '' },
+      ])(
+        'should upload the finalized backup using prefix "$prefix" and the original filename',
+        async ({ prefix, keyPrefix }) => {
+          enableBackupS3(prefix);
+          put.mockImplementation(async () => {
+            expect(mocks.storage.rename).toHaveBeenCalled();
+          });
+
+          await expect(sut.handleBackupDatabase()).resolves.toBe(JobStatus.Success);
+          const filePath = mocks.storage.createReadStream.mock.calls[0][0] as string;
+          const filename = filePath.split('/').at(-1);
+          const key = `${keyPrefix}${filename}`;
+
+          expect(mocks.storage.createReadStream).toHaveBeenCalledWith(filePath);
+          expect(put).toHaveBeenCalledWith(key, stream, { contentType: 'application/gzip' });
+          expect(stream.destroyed).toBe(true);
+          expect(mocks.storage.unlink).not.toHaveBeenCalled();
+        },
+      );
+
+      it('should keep the local backup and successful job status when upload fails', async () => {
+        enableBackupS3();
+        put.mockRejectedValue(new Error('R2 unavailable'));
+
+        await expect(sut.handleBackupDatabase()).resolves.toBe(JobStatus.Success);
+
+        expect(mocks.storage.rename).toHaveBeenCalled();
+        expect(mocks.storage.unlink).not.toHaveBeenCalled();
+        expect(stream.destroyed).toBe(true);
+        expect(mocks.logger.error).toHaveBeenCalledWith(
+          expect.stringMatching(/Database Backup S3 Upload Failure .*local backup retained.*R2 unavailable/),
+        );
+      });
+
+      it.each(['dump', 'rename'])('should not upload if the local backup fails at %s', async (step) => {
+        enableBackupS3();
+        if (step === 'dump') {
+          mocks.process.spawnDuplexStream.mockReturnValueOnce(mockDuplex()('pg_dump', 1, '', 'error'));
+        } else {
+          mocks.storage.rename.mockRejectedValue(new Error('rename failed'));
+        }
+
+        await expect(sut.handleBackupDatabase()).rejects.toThrow();
+        expect(put).not.toHaveBeenCalled();
+        expect(mocks.storage.createReadStream).not.toHaveBeenCalled();
+      });
+
+      it('should keep a successful local backup when reading it for upload fails', async () => {
+        enableBackupS3();
+        mocks.storage.createReadStream.mockRejectedValue(new Error('read failed'));
+        await expect(sut.handleBackupDatabase()).resolves.toBe(JobStatus.Success);
+        expect(put).not.toHaveBeenCalled();
+        expect(mocks.storage.unlink).not.toHaveBeenCalled();
+        expect(mocks.logger.error).toHaveBeenCalledWith(expect.stringContaining('read failed'));
+      });
+
+      it('should log missing bucket configuration without failing the local backup', async () => {
+        const env = mockEnvData({});
+        env.backup = { s3: { ...env.backup.s3, enabled: true } };
+        mocks.config.getEnv.mockReturnValue(env);
+
+        await expect(sut.handleBackupDatabase()).resolves.toBe(JobStatus.Success);
+        expect(put).not.toHaveBeenCalled();
+        expect(mocks.storage.createReadStream).not.toHaveBeenCalled();
+        expect(mocks.logger.error).toHaveBeenCalledWith(expect.stringContaining('IMMICH_BACKUP_S3_BUCKET is required'));
+      });
     });
 
     it('should fail if pg_dump fails', async () => {
