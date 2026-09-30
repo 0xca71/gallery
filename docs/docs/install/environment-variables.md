@@ -111,6 +111,36 @@ When `DB_URL` is defined, the `DB_HOSTNAME`, `DB_PORT`, `DB_USERNAME`, `DB_PASSW
 
 :::
 
+## Database Backup Uploads
+
+Gallery can upload each newly generated database backup to S3-compatible storage after the local `.sql.gz` file is saved successfully. This is disabled by default and uses separate settings from media storage; `IMMICH_STORAGE_BACKEND=s3` is not required.
+
+| Variable                             | Description                                                          |   Default   | Containers |
+| :----------------------------------- | :------------------------------------------------------------------- | :---------: | :--------- |
+| `IMMICH_BACKUP_S3_ENABLED`           | Upload successful local database backups to S3-compatible storage    |   `false`   | server     |
+| `IMMICH_BACKUP_S3_ENDPOINT`          | Custom endpoint URL (required for R2 and other custom S3 providers)  |             | server     |
+| `IMMICH_BACKUP_S3_BUCKET`            | Backup bucket name (required when uploads are enabled)               |             | server     |
+| `IMMICH_BACKUP_S3_REGION`            | Provider region; set to `auto` for Cloudflare R2                     | `us-east-1` | server     |
+| `IMMICH_BACKUP_S3_ACCESS_KEY_ID`     | Backup access key ID (set together with the secret key)              |             | server     |
+| `IMMICH_BACKUP_S3_SECRET_ACCESS_KEY` | Backup secret access key (set together with the access key ID)       |             | server     |
+| `IMMICH_BACKUP_S3_PREFIX`            | Object key prefix; an empty string uploads to the root of the bucket | `database`  | server     |
+
+For Cloudflare R2, add these settings to the server container's environment:
+
+```dotenv
+IMMICH_BACKUP_S3_ENABLED=true
+IMMICH_BACKUP_S3_ENDPOINT=https://<ACCOUNT_ID>.r2.cloudflarestorage.com
+IMMICH_BACKUP_S3_BUCKET=gallery-database-backups
+IMMICH_BACKUP_S3_REGION=auto
+IMMICH_BACKUP_S3_ACCESS_KEY_ID=your-r2-access-key
+IMMICH_BACKUP_S3_SECRET_ACCESS_KEY=your-r2-secret-key
+IMMICH_BACKUP_S3_PREFIX=database
+```
+
+Provide these variables to every server container that creates backups, including the microservices worker when workers run separately. Recreate the containers after changing the environment. If both backup credential variables are omitted, the existing S3 backend uses the AWS SDK's default credential chain; it does not inherit `IMMICH_S3_*` credentials.
+
+The uploaded object keeps the original filename, for example `database/immich-db-backup-20260930T020000-v5.7.0-pg14.10.sql.gz`. Scheduled backups must still be enabled in the existing database backup settings. Uploading does not remove the local file. Upload failures are logged and the local backup still counts as successful. Local backup retention continues to apply; Gallery does not list, restore, or delete remote backups. Use your storage provider's lifecycle rules if you need remote retention.
+
 ## Redis
 
 | Variable         | Description    | Default | Containers |

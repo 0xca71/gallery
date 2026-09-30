@@ -48,6 +48,13 @@ const resetEnv = () => {
     'IMMICH_S3_SECRET_ACCESS_KEY',
     'IMMICH_S3_PRESIGNED_URL_EXPIRY',
     'IMMICH_S3_SERVE_MODE',
+    'IMMICH_BACKUP_S3_ENABLED',
+    'IMMICH_BACKUP_S3_ENDPOINT',
+    'IMMICH_BACKUP_S3_BUCKET',
+    'IMMICH_BACKUP_S3_REGION',
+    'IMMICH_BACKUP_S3_ACCESS_KEY_ID',
+    'IMMICH_BACKUP_S3_SECRET_ACCESS_KEY',
+    'IMMICH_BACKUP_S3_PREFIX',
   ]) {
     delete process.env[env];
   }
@@ -344,6 +351,52 @@ describe('getEnv', () => {
       process.env.IMMICH_TELEMETRY_INCLUDE = 'io, host, api';
       const { telemetry } = getEnv();
       expect(telemetry.metrics).toEqual(new Set([ImmichTelemetry.Api, ImmichTelemetry.Host, ImmichTelemetry.Io]));
+    });
+  });
+
+  describe('backup S3', () => {
+    it('should disable uploads by default', () => {
+      expect(getEnv().backup.s3).toEqual({
+        enabled: false,
+        bucket: '',
+        region: 'us-east-1',
+        endpoint: undefined,
+        accessKeyId: undefined,
+        secretAccessKey: undefined,
+        prefix: 'database',
+      });
+    });
+
+    it('should read backup S3 settings independently of media storage', () => {
+      process.env.IMMICH_S3_BUCKET = 'media-bucket';
+      process.env.IMMICH_S3_ACCESS_KEY_ID = 'media-key';
+      process.env.IMMICH_S3_SECRET_ACCESS_KEY = 'media-secret';
+      process.env.IMMICH_BACKUP_S3_ENABLED = 'true';
+      process.env.IMMICH_BACKUP_S3_ENDPOINT = 'https://account.r2.cloudflarestorage.com';
+      process.env.IMMICH_BACKUP_S3_BUCKET = 'backup-bucket';
+      process.env.IMMICH_BACKUP_S3_REGION = 'auto';
+      process.env.IMMICH_BACKUP_S3_ACCESS_KEY_ID = 'backup-key';
+      process.env.IMMICH_BACKUP_S3_SECRET_ACCESS_KEY = 'backup-secret';
+      process.env.IMMICH_BACKUP_S3_PREFIX = 'gallery/database';
+
+      const { backup, storage } = getEnv();
+      expect(storage.backend).toBe('disk');
+      expect(storage.s3.bucket).toBe('media-bucket');
+      expect(backup.s3).toEqual({
+        enabled: true,
+        bucket: 'backup-bucket',
+        region: 'auto',
+        endpoint: 'https://account.r2.cloudflarestorage.com',
+        accessKeyId: 'backup-key',
+        secretAccessKey: 'backup-secret',
+        prefix: 'gallery/database',
+      });
+    });
+
+    it('should honor false and an empty prefix', () => {
+      process.env.IMMICH_BACKUP_S3_ENABLED = 'false';
+      process.env.IMMICH_BACKUP_S3_PREFIX = '';
+      expect(getEnv().backup.s3).toMatchObject({ enabled: false, prefix: '' });
     });
   });
 

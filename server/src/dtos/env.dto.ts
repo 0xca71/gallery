@@ -37,6 +37,13 @@ const trustedProxiesSchema = z
 export const EnvSchema = z
   .object({
     IMMICH_API_METRICS_PORT: z.coerce.number().int().optional(),
+    IMMICH_BACKUP_S3_ENABLED: stringBool.optional(),
+    IMMICH_BACKUP_S3_ENDPOINT: z.string().optional(),
+    IMMICH_BACKUP_S3_BUCKET: z.string().optional(),
+    IMMICH_BACKUP_S3_REGION: z.string().optional(),
+    IMMICH_BACKUP_S3_ACCESS_KEY_ID: z.string().optional(),
+    IMMICH_BACKUP_S3_SECRET_ACCESS_KEY: z.string().optional(),
+    IMMICH_BACKUP_S3_PREFIX: z.string().optional(),
     IMMICH_BUILD_DATA: z.string().optional(),
     IMMICH_BUILD: z.string().optional(),
     IMMICH_BUILD_URL: z.string().optional(),

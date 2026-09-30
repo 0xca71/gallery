@@ -6,6 +6,7 @@ import { Duplex, PassThrough, Readable, Writable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { coerce, satisfies } from 'semver';
 import type { ArgOf } from 'src/repositories/event.repository.js';
+import { S3StorageBackend } from 'src/backends/s3-storage.backend.js';
 import { serverVersion } from 'src/constants.js';
 import { StorageCore } from 'src/cores/storage.core.js';
 import { OnEvent, OnJob } from 'src/decorators.js';
@@ -53,6 +54,7 @@ export class DatabaseBackupService {
   }
 
   private backupLock = false;
+  private backupS3Backend?: S3StorageBackend;
 
   @OnEvent({ name: 'ConfigInit', workers: [ImmichWorker.Microservices] })
   async onConfigInit({
@@ -92,7 +94,8 @@ export class DatabaseBackupService {
   @OnJob({ name: JobName.DatabaseBackup, queue: QueueName.BackupDatabase })
   async handleBackupDatabase(): Promise<JobStatus> {
     try {
-      await this.createDatabaseBackup();
+      const backupFilePath = await this.createDatabaseBackup();
+      await this.uploadDatabaseBackup(backupFilePath);
     } catch (error) {
       if (error instanceof UnsupportedPostgresError) {
         return JobStatus.Failed;
@@ -265,6 +268,36 @@ export class DatabaseBackupService {
 
     this.logger.log(`Database Backup Success`);
     return backupFilePath;
+  }
+
+  private async uploadDatabaseBackup(backupFilePath: string): Promise<void> {
+    const config = this.configRepository.getEnv().backup?.s3;
+    if (!config?.enabled) {
+      return;
+    }
+
+    const prefix = config.prefix.replaceAll(/^\/+|\/+$/g, '');
+    const key = [prefix, basename(backupFilePath)].filter(Boolean).join('/');
+    let stream: Readable | undefined;
+    try {
+      if (!config.bucket) {
+        throw new Error('IMMICH_BACKUP_S3_BUCKET is required when IMMICH_BACKUP_S3_ENABLED is true');
+      }
+      if (!!config.accessKeyId !== !!config.secretAccessKey) {
+        throw new Error('IMMICH_BACKUP_S3_ACCESS_KEY_ID and IMMICH_BACKUP_S3_SECRET_ACCESS_KEY must be set together');
+      }
+
+      this.backupS3Backend ??= new S3StorageBackend({ ...config, presignedUrlExpiry: 3600, serveMode: 'redirect' });
+      ({ stream } = await this.storageRepository.createReadStream(backupFilePath));
+      await this.backupS3Backend.put(key, stream, { contentType: 'application/gzip' });
+      this.logger.log(`Database Backup S3 Upload Success: ${key}`);
+    } catch (error) {
+      this.logger.error(
+        `Database Backup S3 Upload Failure (${key}); local backup retained at ${backupFilePath}: ${error}`,
+      );
+    } finally {
+      stream?.destroy();
+    }
   }
 
   async uploadBackup(file: Express.Multer.File): Promise<void> {
