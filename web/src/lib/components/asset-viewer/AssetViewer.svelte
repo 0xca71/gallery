@@ -1,5 +1,6 @@
 <script lang="ts">
   import { browser } from '$app/environment';
+  import { page } from '$app/state';
   import { focusTrap } from '$lib/actions/focus-trap';
   import { shortcuts } from '$lib/actions/shortcut';
   import type { Action, OnAction, PreAction } from '$lib/components/asset-viewer/actions/action';
@@ -184,6 +185,21 @@
     await navigate({ targetRoute: 'current', assetId: restoredAsset.id });
   };
 
+  const navigateToViewerAsset = async (targetAsset: AssetResponseDto | undefined | null) => {
+    if (!targetAsset) {
+      return false;
+    }
+
+    // Explore and Random render the viewer as an in-page overlay and have no asset-bearing route.
+    // Keep those surfaces on their page while changing the viewer's reactive current asset.
+    if (!page.route.id?.endsWith('/[[assetId=id]]')) {
+      assetViewerManager.setAsset(targetAsset);
+      return true;
+    }
+
+    return navigateToAsset(targetAsset);
+  };
+
   onMount(() => {
     syncAssetViewerOpenClass(true);
     const wheelAbortController = new AbortController();
@@ -305,7 +321,7 @@
     const order = $slideshowNavigation === SlideshowNavigation.AscendingOrder ? 'previous' : 'next';
     const nextPlayableAsset = await resolvePlayableSlideshowAsset(asset, order);
     if (nextPlayableAsset) {
-      await navigateToAsset(nextPlayableAsset);
+      await navigateToViewerAsset(nextPlayableAsset);
       $restartSlideshowProgress = true;
       return true;
     }
@@ -353,10 +369,12 @@
         }
       } else if ($slideshowState === SlideshowState.PlaySlideshow) {
         const nextPlayableAsset = await resolvePlayableSlideshowAsset(asset, order);
-        hasNext = await navigateToAsset(nextPlayableAsset);
+        hasNext = await navigateToViewerAsset(nextPlayableAsset);
       } else {
         hasNext =
-          order === 'previous' ? await navigateToAsset(cursor.previousAsset) : await navigateToAsset(cursor.nextAsset);
+          order === 'previous'
+            ? await navigateToViewerAsset(cursor.previousAsset)
+            : await navigateToViewerAsset(cursor.nextAsset);
       }
 
       if ($slideshowState !== SlideshowState.PlaySlideshow) {
