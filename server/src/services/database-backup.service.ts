@@ -276,7 +276,7 @@ export class DatabaseBackupService {
       return;
     }
 
-    const prefix = config.prefix.replace(/^\/+|\/+$/g, '');
+    const prefix = config.prefix.replaceAll(/^\/+|\/+$/g, '');
     const key = [prefix, basename(backupFilePath)].filter(Boolean).join('/');
     let stream: Readable | undefined;
     try {

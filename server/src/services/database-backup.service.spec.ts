@@ -37,6 +37,24 @@ describe(DatabaseBackupService.name, () => {
     );
   });
 
+  function enableBackupS3(prefix = 'database') {
+    mocks.config.getEnv.mockReturnValue(
+      mockEnvData({
+        backup: {
+          s3: {
+            enabled: true,
+            bucket: 'backup-bucket',
+            region: 'auto',
+            endpoint: 'https://account.r2.cloudflarestorage.com',
+            accessKeyId: 'backup-key',
+            secretAccessKey: 'backup-secret',
+            prefix,
+          },
+        },
+      }),
+    );
+  }
+
   it('should work', () => {
     expect(sut).toBeDefined();
   });
@@ -245,24 +263,6 @@ describe(DatabaseBackupService.name, () => {
         put.mockRestore();
       });
 
-      const enableBackupS3 = (prefix = 'database') => {
-        mocks.config.getEnv.mockReturnValue(
-          mockEnvData({
-            backup: {
-              s3: {
-                enabled: true,
-                bucket: 'backup-bucket',
-                region: 'auto',
-                endpoint: 'https://account.r2.cloudflarestorage.com',
-                accessKeyId: 'backup-key',
-                secretAccessKey: 'backup-secret',
-                prefix,
-              },
-            },
-          }),
-        );
-      };
-
       it('should not upload when disabled', async () => {
         await expect(sut.handleBackupDatabase()).resolves.toBe(JobStatus.Success);
         expect(put).not.toHaveBeenCalled();
@@ -278,11 +278,9 @@ describe(DatabaseBackupService.name, () => {
         'should upload the finalized backup using prefix "$prefix" and the original filename',
         async ({ prefix, keyPrefix }) => {
           enableBackupS3(prefix);
-          put.mockImplementation(async () => {
-            expect(mocks.storage.rename).toHaveBeenCalled();
-          });
 
           await expect(sut.handleBackupDatabase()).resolves.toBe(JobStatus.Success);
+          expect(mocks.storage.rename).toHaveBeenCalled();
           const filePath = mocks.storage.createReadStream.mock.calls[0][0] as string;
           const filename = filePath.split('/').at(-1);
           const key = `${keyPrefix}${filename}`;
