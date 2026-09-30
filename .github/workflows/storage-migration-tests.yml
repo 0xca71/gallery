@@ -1,9 +1,8 @@
 name: Storage Migration Tests
 
 on:
-  schedule:
-    - cron: '0 4 * * *'
-  workflow_dispatch: {}
+  workflow_dispatch:
+    # Disabled for personal-use CI; keep the file for easy re-enable.
 
 permissions: {}
 

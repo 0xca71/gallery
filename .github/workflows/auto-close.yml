@@ -1,8 +1,8 @@
 name: Auto-close PRs
 
 on:
-  pull_request_target: # zizmor: ignore[dangerous-triggers]
-    types: [labeled]
+  workflow_dispatch:
+    # Disabled for personal-use CI; keep the file for easy re-enable.
 
 permissions: {}
 

@@ -7,6 +7,7 @@ name: Gallery Build Mobile
 # Play-only dry run.
 
 on:
+  # Automatic mobile builds disabled for personal-use CI.
   workflow_dispatch:
     inputs:
       environment:
@@ -74,16 +75,6 @@ on:
         required: true
       FASTLANE_TEAM_ID:
         required: true
-  pull_request:
-    paths:
-      - 'mobile/**'
-      - '.github/workflows/gallery-build-mobile.yml'
-  push:
-    branches: [main]
-    paths:
-      - 'mobile/**'
-      - '.github/workflows/gallery-build-mobile.yml'
-
 concurrency:
   # Literal prefix — when called via workflow_call from Release Gallery,
   # ${{ github.workflow }} resolves to the caller's name and the group

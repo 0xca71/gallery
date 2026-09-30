@@ -1,6 +1,7 @@
 name: Merge translations
 
 on:
+  # Automatic translation merge disabled for personal-use CI.
   workflow_dispatch:
   workflow_call:
     secrets:

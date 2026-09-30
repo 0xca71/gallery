@@ -14,11 +14,7 @@ name: Release Mobile
 
 on:
   workflow_dispatch:
-    inputs:
-      version:
-        description: 'Version tag to stamp (e.g. v4.56.6)'
-        required: true
-        type: string
+    # Disabled for personal-use CI; keep the file for easy re-enable.
 
 concurrency:
   group: gallery-release-mobile

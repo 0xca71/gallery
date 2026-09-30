@@ -2,12 +2,7 @@ name: Gallery Mobile Smoke
 
 on:
   workflow_dispatch:
-    inputs:
-      ref:
-        description: 'Branch, tag, or SHA to test. Defaults to the triggering ref.'
-        required: false
-        type: string
-        default: ''
+    # Disabled for personal-use CI; keep the file for easy re-enable.
 
 concurrency:
   group: gallery-mobile-smoke-${{ github.ref }}

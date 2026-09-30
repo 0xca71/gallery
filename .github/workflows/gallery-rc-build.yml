@@ -12,6 +12,7 @@ name: Release Candidate Build
 # the target branch/tag/SHA).
 
 on:
+  # Automatic RC builds disabled for personal-use CI.
   workflow_dispatch:
     inputs:
       rc_tag:
