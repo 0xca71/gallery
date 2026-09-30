@@ -3,13 +3,16 @@ import {
   searchAssetStatistics,
   searchRandom,
   type AssetResponseDto,
-  type SearchFilter,
+  type RandomSearchDto,
+  type StatisticsSearchDto,
 } from '@immich/sdk';
 import { DateTime } from 'luxon';
 
 export const dateRanges = ['all', 'last_year', 'years_1_3', 'years_3_5', 'years_5_10', 'older_10'] as const;
 export type RandomDateRange = (typeof dateRanges)[number] | 'custom';
 export const dateRangeOptions = [...dateRanges, 'custom'] satisfies RandomDateRange[];
+
+type RandomSearchQuery = Pick<RandomSearchDto, 'albumIds' | 'takenAfter' | 'takenBefore' | 'type'>;
 
 export type RandomFilterState = {
   mediaType: 'all' | 'image' | 'video';
@@ -51,49 +54,54 @@ export function buildCustomDateRange(after: string, before: string) {
 export function buildRandomSearchFilter(
   state: RandomFilterState,
   now: DateTime<boolean> = DateTime.now(),
-): SearchFilter {
-  const filter: SearchFilter = {};
+): RandomSearchQuery {
+  const query: RandomSearchQuery = {};
   if (state.mediaType !== 'all') {
-    filter.type = { eq: state.mediaType === 'image' ? AssetTypeEnum.Image : AssetTypeEnum.Video };
+    query.type = state.mediaType === 'image' ? AssetTypeEnum.Image : AssetTypeEnum.Video;
   }
   if (state.albumId) {
-    filter.albumIds = { any: [state.albumId] };
+    query.albumIds = [state.albumId];
   }
   if (state.dateRange === 'custom') {
     const custom = buildCustomDateRange(state.takenAfter, state.takenBefore);
     if (custom) {
-      filter.takenAt = custom;
+      query.takenAfter = custom.gte;
+      query.takenBefore = custom.lt;
     }
-    return filter;
+    return query;
   }
 
   const ago = (years: number) => now.minus({ years }).toUTC().toISO()!;
   switch (state.dateRange) {
     case 'last_year': {
-      filter.takenAt = { gte: ago(1), lt: ago(0) };
+      query.takenAfter = ago(1);
+      query.takenBefore = ago(0);
       break;
     }
     case 'years_1_3': {
-      filter.takenAt = { gte: ago(3), lt: ago(1) };
+      query.takenAfter = ago(3);
+      query.takenBefore = ago(1);
       break;
     }
     case 'years_3_5': {
-      filter.takenAt = { gte: ago(5), lt: ago(3) };
+      query.takenAfter = ago(5);
+      query.takenBefore = ago(3);
       break;
     }
     case 'years_5_10': {
-      filter.takenAt = { gte: ago(10), lt: ago(5) };
+      query.takenAfter = ago(10);
+      query.takenBefore = ago(5);
       break;
     }
     case 'older_10': {
-      filter.takenAt = { lt: ago(10) };
+      query.takenBefore = ago(10);
       break;
     }
     default: {
       break;
     }
   }
-  return filter;
+  return query;
 }
 
 export const RANDOM_BATCH_SIZE = 200;
@@ -104,12 +112,13 @@ export function mergeUniqueAssets(assets: AssetResponseDto[], incoming: AssetRes
   return { assets: added.length > 0 ? [...assets, ...added] : assets, added: added.length };
 }
 
-export function loadRandomBatch(filter: SearchFilter, signal: AbortSignal, size = RANDOM_BATCH_SIZE) {
-  return searchRandom({ randomSearchDto: { size, filter } }, { signal });
+export function loadRandomBatch(query: RandomSearchQuery, signal: AbortSignal, size = RANDOM_BATCH_SIZE) {
+  return searchRandom({ randomSearchDto: { ...query, size } }, { signal });
 }
 
-export async function loadRandomTotal(filter: SearchFilter, signal: AbortSignal) {
-  const { total } = await searchAssetStatistics({ statisticsSearchDto: { filter } }, { signal });
+export async function loadRandomTotal(query: RandomSearchQuery, signal: AbortSignal) {
+  const statisticsQuery: Pick<StatisticsSearchDto, keyof RandomSearchQuery> = query;
+  const { total } = await searchAssetStatistics({ statisticsSearchDto: statisticsQuery }, { signal });
   return total;
 }
 

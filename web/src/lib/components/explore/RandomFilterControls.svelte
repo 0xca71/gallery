@@ -36,32 +36,8 @@
 </script>
 
 <div class="flex flex-wrap items-center justify-end gap-2">
-  <IconButton
-    shape="round"
-    color="secondary"
-    variant="ghost"
-    icon={mdiTune}
-    aria-label={$t('filters')}
-    aria-expanded={expanded}
-    onclick={() => {
-      expanded = !expanded;
-      if (expanded) {
-        void loadAlbums();
-      }
-    }}
-  />
-  <IconButton
-    shape="round"
-    color="secondary"
-    variant="ghost"
-    icon={mdiShuffle}
-    aria-label={$t('shuffle')}
-    disabled={loading}
-    onclick={onrefresh}
-  />
-
   {#if expanded}
-    <div class="flex w-full flex-wrap items-end justify-end gap-3 pb-3">
+    <div class="flex flex-wrap items-center gap-2">
       <label class="text-sm"
         >{$t('media_type')}
         <select
@@ -110,7 +86,7 @@
       </label>
 
       {#if filter.dateRange === 'custom'}
-        <label class="flex flex-col gap-1 text-sm"
+        <label class="flex items-center gap-1 text-sm"
           >{$t('start_date')}
           <DatePicker
             value={asDateTime(filter.takenAfter)}
@@ -121,7 +97,7 @@
             }}
           />
         </label>
-        <label class="flex flex-col gap-1 text-sm"
+        <label class="flex items-center gap-1 text-sm"
           >{$t('end_date')}
           <DatePicker
             value={asDateTime(filter.takenBefore)}
@@ -135,4 +111,28 @@
       {/if}
     </div>
   {/if}
+
+  <IconButton
+    shape="round"
+    color="secondary"
+    variant="ghost"
+    icon={mdiTune}
+    aria-label={$t('filters')}
+    aria-expanded={expanded}
+    onclick={() => {
+      expanded = !expanded;
+      if (expanded) {
+        void loadAlbums();
+      }
+    }}
+  />
+  <IconButton
+    shape="round"
+    color="secondary"
+    variant="ghost"
+    icon={mdiShuffle}
+    aria-label={$t('shuffle')}
+    disabled={loading}
+    onclick={onrefresh}
+  />
 </div>
