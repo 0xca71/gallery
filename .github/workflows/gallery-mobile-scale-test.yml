@@ -11,11 +11,8 @@ name: Gallery Mobile Scale Test
 # specs/2026-04-08-mobile-shared-space-drift-sync-scale-notes.md.
 
 on:
-  schedule:
-    # 03:27 UTC every day. Offset from the hour so it doesn't pile on with
-    # other nightly jobs.
-    - cron: '27 3 * * *'
   workflow_dispatch:
+    # Disabled for personal-use CI; keep the file for easy re-enable.
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

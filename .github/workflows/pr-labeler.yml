@@ -1,6 +1,7 @@
 name: 'Pull Request Labeler'
 on:
-  - pull_request_target # zizmor: ignore[dangerous-triggers] no attacker inputs are used here
+  workflow_dispatch:
+    # Disabled for personal-use CI; keep the file for easy re-enable.
 
 permissions: {}
 

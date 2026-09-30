@@ -2,10 +2,7 @@ name: Custom Docker
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
-      - 'feat/**'
+    # Disabled for personal-use CI; keep the file for easy re-enable.
 
 concurrency:
   group: custom-docker-${{ github.ref }}

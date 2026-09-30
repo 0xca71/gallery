@@ -1,16 +1,7 @@
 name: CLI Build
 on:
-  push:
-    branches: [main, 'release/*']
-    paths:
-      - 'packages/cli/**'
-      - '.github/workflows/cli.yml'
-  pull_request:
-    paths:
-      - 'packages/cli/**'
-      - '.github/workflows/cli.yml'
-  release:
-    types: [published]
+  workflow_dispatch:
+    # Disabled for personal-use CI; keep the file for easy re-enable.
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

@@ -1,6 +1,8 @@
 name: Build Mobile
 
 on:
+  workflow_dispatch:
+    # Automatic mobile builds disabled for personal-use CI.
   workflow_call:
     inputs:
       ref:
@@ -32,10 +34,6 @@ on:
         required: true
       FASTLANE_TEAM_ID:
         required: true
-  pull_request:
-  push:
-    branches: [main, 'release/*']
-
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
