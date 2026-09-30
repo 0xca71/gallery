@@ -131,6 +131,9 @@ export const getSearchMediaTitle = (mediaType: MediaType) => {
     case MediaType.Video: {
       return $t('video');
     }
+    case MediaType.LivePhoto: {
+      return $t('live_photo');
+    }
     default: {
       return;
     }

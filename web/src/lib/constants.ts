@@ -303,6 +303,7 @@ export enum MediaType {
   All = 'all',
   Image = 'image',
   Video = 'video',
+  LivePhoto = 'live-photo',
 }
 
 export enum ProgressBarStatus {

@@ -60,6 +60,7 @@ export const Route = {
 
   // explore
   explore: () => '/explore',
+  random: () => '/random',
   places: () => '/places',
 
   // folders

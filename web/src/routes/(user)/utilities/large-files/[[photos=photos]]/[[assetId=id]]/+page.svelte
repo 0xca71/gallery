@@ -1,6 +1,10 @@
 <script lang="ts">
   import { lazyComponent } from '$lib/utils/lazy-component.svelte';
   import type { Action } from '$lib/components/asset-viewer/actions/action';
+  import type {
+    SlideshowRandomAssetResolver,
+    SlideshowStepAssetResolver,
+  } from '$lib/components/asset-viewer/AssetViewer.svelte';
   import UserPageLayout from '$lib/components/layouts/UserPageLayout.svelte';
   import OnEvents from '$lib/components/OnEvents.svelte';
   import LargeAssetData from './LargeAssetData.svelte';
@@ -55,6 +59,20 @@
     await navigate({ targetRoute: 'current', assetId: asset.id });
   };
 
+  const resolveSlideshowStepAsset: SlideshowStepAssetResolver = (asset, order) => {
+    return order === 'previous' ? getPreviousAsset(assets, asset) : getNextAsset(assets, asset);
+  };
+
+  const resolveSlideshowRandomAsset: SlideshowRandomAssetResolver = (isPlayable) => {
+    const playableAssets = assets.filter((asset) => isPlayable(asset));
+    if (playableAssets.length === 0) {
+      return;
+    }
+
+    const index = Math.floor(Math.random() * playableAssets.length);
+    return playableAssets[index];
+  };
+
   const assetCursor = $derived({
     current: assetViewerManager.asset!,
     nextAsset: getNextAsset(assets, assetViewerManager.asset),
@@ -90,6 +108,8 @@
         cursor={assetCursor}
         showNavigation={assets.length > 1}
         {onRandom}
+        {resolveSlideshowStepAsset}
+        {resolveSlideshowRandomAsset}
         {preAction}
         onClose={() => {
           assetViewerManager.showAssetViewer(false);

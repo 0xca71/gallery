@@ -38,7 +38,9 @@ test.describe('Photo Viewer', () => {
 
     const { width, height } = page.viewportSize()!;
     await page.mouse.move(width / 2, height / 2);
+    await page.keyboard.down('Alt');
     await page.mouse.wheel(0, -1);
+    await page.keyboard.up('Alt');
 
     await originalResponse;
 
@@ -56,7 +58,9 @@ test.describe('Photo Viewer', () => {
 
     const { width, height } = page.viewportSize()!;
     await page.mouse.move(width / 2, height / 2);
+    await page.keyboard.down('Alt');
     await page.mouse.wheel(0, -1);
+    await page.keyboard.up('Alt');
 
     await fullsizeResponse;
 

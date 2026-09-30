@@ -1,12 +1,9 @@
 name: Docker
 
+# Disabled for automatic runs in this standalone custom fork.
+# Use custom-docker.yml for the server image; keep this upstream workflow available manually.
 on:
   workflow_dispatch:
-  push:
-    branches: [main, 'release/*']
-  pull_request:
-  release:
-    types: [published]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

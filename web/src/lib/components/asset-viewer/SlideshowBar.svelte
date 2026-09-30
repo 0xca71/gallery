@@ -7,29 +7,20 @@
   import { SlideshowNavigation, SlideshowState, slideshowStore } from '$lib/stores/slideshow.store';
   import { AssetTypeEnum } from '@immich/sdk';
   import { IconButton, modalManager } from '@immich/ui';
-  import { mdiChevronLeft, mdiChevronRight, mdiClose, mdiCog, mdiFullscreen, mdiPause, mdiPlay } from '@mdi/js';
+  import { mdiChevronLeft, mdiChevronRight, mdiClose, mdiCog, mdiPause, mdiPlay } from '@mdi/js';
   import { onDestroy, onMount } from 'svelte';
   import { useSwipe } from 'svelte-gestures';
   import { t } from 'svelte-i18n';
   import { fly } from 'svelte/transition';
 
   interface Props {
-    isFullScreen: boolean;
     assetType: AssetTypeEnum;
     onNext?: () => void;
     onPrevious?: () => void;
     onClose?: () => void;
-    onSetToFullScreen?: () => void;
   }
 
-  let {
-    isFullScreen,
-    assetType,
-    onNext = () => {},
-    onPrevious = () => {},
-    onClose = () => {},
-    onSetToFullScreen = () => {},
-  }: Props = $props();
+  let { assetType, onNext = () => {}, onPrevious = () => {}, onClose = () => {} }: Props = $props();
 
   const { restartProgress, stopProgress, slideshowDelay, showProgressBar, slideshowNavigation, slideshowState } =
     slideshowStore;
@@ -110,31 +101,8 @@
   };
 
   const onShowSettings = async () => {
-    if (document.fullscreenElement) {
-      await document.exitFullscreen();
-    }
     await modalManager.show(SlideshowSettingsModal);
   };
-
-  onMount(() => {
-    function exitFullscreenHandler() {
-      const doc = document as Document & {
-        webkitIsFullScreen?: boolean;
-      };
-
-      if (!document.fullscreenElement && !doc.webkitIsFullScreen) {
-        onClose();
-      }
-    }
-
-    document.addEventListener('fullscreenchange', exitFullscreenHandler);
-    document.addEventListener('webkitfullscreenchange', exitFullscreenHandler);
-
-    return () => {
-      document.removeEventListener('fullscreenchange', exitFullscreenHandler);
-      document.removeEventListener('webkitfullscreenchange', exitFullscreenHandler);
-    };
-  });
 
   const { swipe, onswipe, onswipedown } = useSwipe(
     () => {},
@@ -229,16 +197,6 @@
       onclick={onShowSettings}
       aria-label={$t('slideshow_settings')}
     />
-    {#if !isFullScreen}
-      <IconButton
-        variant="ghost"
-        shape="round"
-        color="secondary"
-        icon={mdiFullscreen}
-        onclick={onSetToFullScreen}
-        aria-label={$t('set_slideshow_to_fullscreen')}
-      />
-    {/if}
   </div>
 {/if}
 
