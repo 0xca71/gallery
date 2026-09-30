@@ -25,8 +25,8 @@ name: PR Release Candidate Cleanup
 # only PR-derived input is the PR number, an integer.
 
 on:
-  pull_request_target: # zizmor: ignore[dangerous-triggers] nothing from the PR is checked out or executed
-    types: [closed]
+  workflow_dispatch:
+    # Disabled for personal-use CI; keep the file for easy re-enable.
 
 concurrency:
   group: pr-rc-cleanup-${{ github.event.pull_request.number }}

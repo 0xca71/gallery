@@ -13,8 +13,8 @@ name: PR Release Candidate
 # Server-only unless `rc-ml` is present. Same-repo PRs only (fork PRs can't push GHCR).
 
 on:
-  pull_request:
-    types: [labeled, synchronize]
+  workflow_dispatch:
+    # Disabled for personal-use CI; keep the file for easy re-enable.
 
 concurrency:
   # Concurrency is evaluated at workflow level, BEFORE any job `if:` gate — so a run

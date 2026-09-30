@@ -22,20 +22,7 @@ name: Pre-release Gallery Server
 
 on:
   workflow_dispatch:
-    inputs:
-      version:
-        description: 'Pre-release version tag (e.g. v5.0.0-rc.0). Must be v<N>.<N>.<N>-rc.<N>.'
-        required: true
-        type: string
-      commit:
-        description: 'Commit SHA to release up to (default: HEAD of the triggering ref). Must be an ancestor of the ref.'
-        required: false
-        type: string
-      build_ml_rocm:
-        description: 'Build & publish the ROCm ML image (gallery-ml:<rc>-rocm) on the self-hosted `gallery-rocm` runner. Uncheck to skip (e.g. runner offline).'
-        required: false
-        type: boolean
-        default: true
+    # Disabled for personal-use CI; keep the file for easy re-enable.
 
 concurrency:
   group: gallery-prerelease-${{ inputs.version }}

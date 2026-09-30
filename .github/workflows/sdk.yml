@@ -1,8 +1,8 @@
 name: Update Immich SDK
 
 on:
-  release:
-    types: [published]
+  workflow_dispatch:
+    # Disabled for personal-use CI; keep the file for easy re-enable.
 
 permissions: {}
 
