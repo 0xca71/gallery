@@ -108,11 +108,8 @@ describe('TemporalPicker component', () => {
       props: { timeBuckets: buckets, sortOrder: 'desc' },
     });
 
-    const yearButtons = getByTestId('year-grid').querySelectorAll('[data-testid^="year-btn-"]');
-    expect([...yearButtons].map((button) => button.getAttribute('data-testid'))).toEqual([
-      'year-btn-2023',
-      'year-btn-2022',
-    ]);
+    const yearButtons = getByTestId('year-grid').querySelectorAll<HTMLButtonElement>('[data-testid^="year-btn-"]');
+    expect([...yearButtons].map((button) => button.dataset.testid)).toEqual(['year-btn-2023', 'year-btn-2022']);
   });
 
   it('should render custom range inputs above year grid', () => {

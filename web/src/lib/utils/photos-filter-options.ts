@@ -115,9 +115,8 @@ export function buildPhotosTimelineOptions(filters: FilterState, userId: string)
  * month in the selected year has its baseline count.
  */
 export function buildPhotosPickerBucketOptions(filters: FilterState, userId: string): Record<string, unknown> {
-  const { selectedYear: _, selectedMonth: __, ...pickerFilters } = filters;
   return {
-    ...buildPhotosTimelineOptions(pickerFilters, userId),
+    ...buildPhotosTimelineOptions({ ...filters, selectedYear: undefined, selectedMonth: undefined }, userId),
     bucketSize: TimeBucketSize.Month,
   };
 }

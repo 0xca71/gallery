@@ -76,11 +76,7 @@
     mapSmartSearchFacetsToFilterSuggestions,
   } from '$lib/utils/space-search';
   import { getAltText } from '$lib/utils/thumbnail-util';
-  import {
-    getTimelineBucketZoomTarget,
-    type ActivatableTimelineBucket,
-    getTimelineManagerTimeBuckets,
-  } from '$lib/utils/timeline-zoom-navigation';
+  import { getTimelineBucketZoomTarget, type ActivatableTimelineBucket } from '$lib/utils/timeline-zoom-navigation';
   import { getTimelineTopVisibleAnchor } from '$lib/managers/timeline-manager/timeline-anchor';
   import { toTimelineAsset } from '$lib/utils/timeline-util';
   import {
@@ -178,8 +174,6 @@
       }
     | undefined;
 
-  const timelineBuckets = $derived(getTimelineManagerTimeBuckets(timelineManager));
-
   // The timeline is grouped by the current filter, so after selecting a year/month its buckets
   // contain only that slice. Keep the temporal picker on an independent baseline bucket query so
   // the other months retain their counts and remain available for direct switching.
@@ -193,12 +187,7 @@
     }
 
     const controller = new AbortController();
-    const request = getTimeBuckets?.(options, { signal: controller.signal });
-    if (!request || typeof request.then !== 'function') {
-      return;
-    }
-
-    void request
+    void getTimeBuckets(options, { signal: controller.signal })
       .then((buckets) => {
         pickerBuckets = buckets.map(({ timeBucket, count }) => ({ timeBucket, count }));
       })

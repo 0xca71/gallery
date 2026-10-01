@@ -1,4 +1,4 @@
-import { AssetTypeEnum } from '@immich/sdk';
+import { AssetTypeEnum, TimeBucketSize } from '@immich/sdk';
 import '@testing-library/jest-dom';
 import { fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import { tick, type Component } from 'svelte';
@@ -293,6 +293,7 @@ describe('Photos page search URL state', () => {
       hasAssetsNotInAlbum: true,
     });
     sdkMock.getSearchSuggestions.mockResolvedValue([]);
+    sdkMock.getTimeBuckets.mockResolvedValue([]);
   });
 
   it('renders search results from q without a local search input', () => {
@@ -356,6 +357,18 @@ describe('Photos page search URL state', () => {
       keepFocus: true,
       noScroll: true,
     });
+  });
+
+  it('loads baseline picker buckets without narrowing them to the selected month', async () => {
+    mockPage.url = new URL('https://gallery.test/photos?year=2024&month=7&country=Japan');
+
+    renderPage();
+
+    await waitFor(() => expect(sdkMock.getTimeBuckets).toHaveBeenCalled());
+    const [options] = sdkMock.getTimeBuckets.mock.calls[0];
+    expect(options).toMatchObject({ userId: MY_USER_ID, country: 'Japan', bucketSize: TimeBucketSize.Month });
+    expect(options).not.toHaveProperty('takenAfter');
+    expect(options).not.toHaveProperty('takenBefore');
   });
 
   it('clears typed filter URL params and q when clearing all active filters', async () => {
@@ -1370,6 +1383,7 @@ describe('Photos page — SpaceAddAssets timeline reload (#1041)', () => {
     mockRegisterSearchablePageFilters.mockReturnValue(vi.fn());
     sessionStorage.clear();
     resetTimelineMountSeq();
+    sdkMock.getTimeBuckets.mockResolvedValue([]);
   });
 
   it('remounts the timeline when assets are added to a space hidden from my timeline', async () => {
