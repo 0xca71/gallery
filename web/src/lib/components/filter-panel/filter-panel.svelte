@@ -40,6 +40,9 @@
     config: FilterPanelConfig;
     timeBuckets: Array<{ timeBucket: string; count: number }>;
     filters?: FilterState;
+    /** Sort order for the temporal picker's year cards. Kept separate from filter state so callers
+     * can opt into the surface's browse order without changing generic filter-panel behavior. */
+    temporalSortOrder?: FilterState['sortOrder'];
     personNames?: Map<string, string>;
     tagNames?: Map<string, string>;
     onFiltersChange?: (filters: FilterState) => void;
@@ -58,6 +61,7 @@
     config,
     timeBuckets,
     filters = $bindable(createFilterState()),
+    temporalSortOrder = 'asc',
     personNames,
     tagNames,
     onFiltersChange,
@@ -835,6 +839,7 @@
                     dateBefore={filters.dateBefore}
                     selectedYear={filters.selectedYear}
                     selectedMonth={filters.selectedMonth}
+                    sortOrder={temporalSortOrder}
                     onCustomRangeChange={handleCustomDateRangeChange}
                     onYearSelect={handleYearSelect}
                     onMonthSelect={handleMonthSelect}

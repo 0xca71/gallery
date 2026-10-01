@@ -1,8 +1,9 @@
-import { AssetOrder, AssetTypeEnum, AssetVisibility, Type } from '@immich/sdk';
+import { AssetOrder, AssetTypeEnum, AssetVisibility, TimeBucketSize, Type } from '@immich/sdk';
 import { describe, expect, it } from 'vitest';
 import { createFilterState } from '$lib/components/filter-panel/filter-panel';
 import {
   buildPhotosTimelineOptions,
+  buildPhotosPickerBucketOptions,
   getPhotosPersonFilterId,
   getPhotosPersonFilterThumbnailUrl,
   handlePhotosRemoveFilter,
@@ -286,6 +287,41 @@ describe('buildPhotosTimelineOptions', () => {
       expect(options).not.toHaveProperty('withPartners');
       expect(options).not.toHaveProperty('withSharedSpaces');
     });
+  });
+});
+
+describe('buildPhotosPickerBucketOptions', () => {
+  it('keeps baseline month counts when a year or month is selected', () => {
+    const filters = {
+      ...createFilterState(),
+      selectedYear: 2024,
+      selectedMonth: 7,
+      country: 'Japan',
+    };
+
+    const options = buildPhotosPickerBucketOptions(filters, MY_USER_ID);
+
+    expect(options).toMatchObject({
+      userId: MY_USER_ID,
+      country: 'Japan',
+      bucketSize: TimeBucketSize.Month,
+    });
+    expect(options).not.toHaveProperty('takenAfter');
+    expect(options).not.toHaveProperty('takenBefore');
+  });
+
+  it('preserves an explicit custom date range', () => {
+    const filters = {
+      ...createFilterState(),
+      dateAfter: '2024-01-01',
+      dateBefore: '2024-12-31',
+    };
+
+    const options = buildPhotosPickerBucketOptions(filters, MY_USER_ID);
+
+    expect(options.takenAfter).toBe('2024-01-01T00:00:00.000Z');
+    expect(options.takenBefore).toBe('2025-01-01T00:00:00.000Z');
+    expect(options.bucketSize).toBe(TimeBucketSize.Month);
   });
 });
 

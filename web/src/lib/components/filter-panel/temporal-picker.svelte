@@ -12,6 +12,7 @@
     dateBefore?: string;
     selectedYear?: number;
     selectedMonth?: number;
+    sortOrder?: 'asc' | 'desc' | 'relevance';
     onCustomRangeChange?: (dateAfter?: string, dateBefore?: string) => void;
     onYearSelect?: (year: number | undefined) => void;
     onMonthSelect?: (year: number, month: number | undefined) => void;
@@ -23,12 +24,13 @@
     dateBefore,
     selectedYear,
     selectedMonth,
+    sortOrder = 'asc',
     onCustomRangeChange,
     onYearSelect,
     onMonthSelect,
   }: Props = $props();
 
-  let years = $derived(aggregateYears(timeBuckets));
+  let years = $derived(aggregateYears(timeBuckets, sortOrder));
   let months = $derived(selectedYear === undefined ? [] : getMonthsForYear(timeBuckets, selectedYear));
   let fromValue = $state('');
   let toValue = $state('');
@@ -192,8 +194,9 @@
     <div class="grid grid-cols-4 gap-1.5" data-testid="month-grid">
       {#each months as m (m.month)}
         {@const maxMonthCount = Math.max(...months.map((mo) => mo.count), 1)}
-        {@const monthVolume = Math.round((m.count / maxMonthCount) * 100)}
         {@const isSelected = selectedMonth === m.month}
+        {@const monthVolume =
+          selectedMonth === undefined ? Math.round((m.count / maxMonthCount) * 100) : isSelected ? 100 : 0}
         <button
           type="button"
           class="flex flex-col items-center rounded-xl border p-2 transition-all duration-150 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none

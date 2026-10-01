@@ -1,4 +1,10 @@
-import { AssetOrder, AssetTypeEnum, AssetVisibility, type FilterSuggestionsPersonDto } from '@immich/sdk';
+import {
+  AssetOrder,
+  AssetTypeEnum,
+  AssetVisibility,
+  TimeBucketSize,
+  type FilterSuggestionsPersonDto,
+} from '@immich/sdk';
 import type { FilterState } from '$lib/components/filter-panel/filter-panel';
 import { applyTextFilters, buildFilterContext } from '$lib/components/filter-panel/filter-panel';
 import { createUrl } from '$lib/utils';
@@ -97,6 +103,22 @@ export function buildPhotosTimelineOptions(filters: FilterState, userId: string)
   }
 
   return base;
+}
+
+/**
+ * Bucket query backing the Photos temporal picker.
+ *
+ * The selected year/month is a narrowing predicate for the timeline, but it must not narrow the
+ * picker itself. Otherwise selecting July leaves the picker with only July's bucket, so all other
+ * month counts disappear and there is no enabled month to switch to. Keep an explicit custom date
+ * range, which is independent of the year/month picker, and request month-sized buckets so every
+ * month in the selected year has its baseline count.
+ */
+export function buildPhotosPickerBucketOptions(filters: FilterState, userId: string): Record<string, unknown> {
+  return {
+    ...buildPhotosTimelineOptions({ ...filters, selectedYear: undefined, selectedMonth: undefined }, userId),
+    bucketSize: TimeBucketSize.Month,
+  };
 }
 
 export function getPhotosPersonFilterThumbnailUrl(
