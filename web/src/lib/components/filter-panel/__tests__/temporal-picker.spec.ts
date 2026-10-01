@@ -26,6 +26,11 @@ describe('temporal-utils', () => {
     expect(years[1]).toEqual({ year: 2021, count: 200, volumePercent: 29 });
   });
 
+  it('should order years newest first when requested', () => {
+    const years = aggregateYears(buckets, 'desc');
+    expect(years.map(({ year }) => year)).toEqual([2021, 2020]);
+  });
+
   it('should calculate relative volume (max year = 100%)', () => {
     const years = aggregateYears(buckets);
     expect(years[0].volumePercent).toBe(100);
@@ -96,6 +101,18 @@ describe('TemporalPicker component', () => {
     });
     expect(getByTestId('year-grid')).toBeTruthy();
     expect(queryByTestId('month-grid')).toBeNull();
+  });
+
+  it('should render year cards in the requested order', () => {
+    const { getByTestId } = render(TemporalPicker, {
+      props: { timeBuckets: buckets, sortOrder: 'desc' },
+    });
+
+    const yearButtons = getByTestId('year-grid').querySelectorAll('[data-testid^="year-btn-"]');
+    expect([...yearButtons].map((button) => button.getAttribute('data-testid'))).toEqual([
+      'year-btn-2023',
+      'year-btn-2022',
+    ]);
   });
 
   it('should render custom range inputs above year grid', () => {
@@ -381,6 +398,29 @@ describe('TemporalPicker component', () => {
     });
     await fireEvent.click(getByTestId('month-btn-6'));
     expect(spy).toHaveBeenCalledWith(2023, undefined);
+  });
+
+  it('should keep other month counts and switch directly from the selected month', async () => {
+    const spy = vi.fn();
+    const monthlyBuckets = [
+      { timeBucket: '2024-01-01', count: 446 },
+      { timeBucket: '2024-07-01', count: 517 },
+      { timeBucket: '2024-08-01', count: 38 },
+    ];
+    const { getByTestId } = render(TemporalPicker, {
+      props: { timeBuckets: monthlyBuckets, selectedYear: 2024, selectedMonth: 7, onMonthSelect: spy },
+    });
+
+    expect(getByTestId('month-btn-1').textContent).toContain('446');
+    expect(getByTestId('month-btn-8').textContent).toContain('38');
+
+    const inactiveBar = getByTestId('month-btn-8').querySelector('.h-full');
+    const selectedBar = getByTestId('month-btn-7').querySelector('.h-full');
+    expect(inactiveBar).toHaveStyle({ width: '0%' });
+    expect(selectedBar).toHaveStyle({ width: '100%' });
+
+    await fireEvent.click(getByTestId('month-btn-8'));
+    expect(spy).toHaveBeenCalledWith(2024, 8);
   });
 
   it('should not call onMonthSelect for months with zero count', async () => {

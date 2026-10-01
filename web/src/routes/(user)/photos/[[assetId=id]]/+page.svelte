@@ -64,6 +64,7 @@
   } from '$lib/utils/actions';
   import { openFileUploadDialog } from '$lib/utils/file-uploader';
   import {
+    buildPhotosPickerBucketOptions,
     buildPhotosTimelineOptions,
     getPhotosPersonFilterThumbnailUrl,
     getPhotosPersonFilterId,
@@ -87,6 +88,7 @@
     AssetTypeEnum,
     AssetVisibility,
     getFilterSuggestions,
+    getTimeBuckets,
     getSearchSuggestions,
     searchSmartFacets,
     SearchSuggestionType,
@@ -177,7 +179,39 @@
     | undefined;
 
   const timelineBuckets = $derived(getTimelineManagerTimeBuckets(timelineManager));
-  const smartFacetBuckets = $derived(showSearchResults ? (smartFacets?.timeBuckets ?? []) : timelineBuckets);
+
+  // The timeline is grouped by the current filter, so after selecting a year/month its buckets
+  // contain only that slice. Keep the temporal picker on an independent baseline bucket query so
+  // the other months retain their counts and remain available for direct switching.
+  let pickerBuckets = $state<Array<{ timeBucket: string; count: number }>>([]);
+  const pickerBucketOptions = $derived(buildPhotosPickerBucketOptions(filters, authManager.user.id));
+
+  $effect(() => {
+    const options = pickerBucketOptions;
+    if (showSearchResults) {
+      return;
+    }
+
+    const controller = new AbortController();
+    const request = getTimeBuckets?.(options, { signal: controller.signal });
+    if (!request || typeof request.then !== 'function') {
+      return;
+    }
+
+    void request
+      .then((buckets) => {
+        pickerBuckets = buckets.map(({ timeBucket, count }) => ({ timeBucket, count }));
+      })
+      .catch((error: unknown) => {
+        if (!controller.signal.aborted) {
+          console.error('Failed to fetch Photos filter buckets:', error);
+        }
+      });
+
+    return () => controller.abort();
+  });
+
+  const smartFacetBuckets = $derived(showSearchResults ? (smartFacets?.timeBuckets ?? []) : pickerBuckets);
   const smartFacetTotal = $derived(showSearchResults ? smartFacets?.total : undefined);
 
   const loadPhotoFilterSuggestions = async (nextFilters: FilterState) => {
@@ -622,6 +656,7 @@
         externalToggle
         config={filterConfig}
         timeBuckets={smartFacetBuckets}
+        temporalSortOrder={filters.sortOrder}
         storageKey="gallery-filter-visible-sections-photos"
         hidden={isTimelineEmpty}
         {personNames}
