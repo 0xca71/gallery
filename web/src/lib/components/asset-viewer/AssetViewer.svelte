@@ -44,6 +44,7 @@
   import type { SwipeCustomEvent } from 'svelte-gestures';
   import { t } from 'svelte-i18n';
   import { fly } from 'svelte/transition';
+  import AssetViewerFilmstrip, { type FilmstripAsset } from './AssetViewerFilmstrip.svelte';
   import Thumbnail from '../assets/thumbnail/Thumbnail.svelte';
   import ActivityStatus from './ActivityStatus.svelte';
   import ActivityViewer from './ActivityViewer.svelte';
@@ -72,6 +73,7 @@
   export type SlideshowRandomAssetResolver = (
     isPlayable: (asset: AssetResponseDto) => boolean,
   ) => AssetResponseDto | undefined | Promise<AssetResponseDto | undefined>;
+  export type FilmstripAssetResolver = (asset: FilmstripAsset) => void | Promise<void>;
 
   interface Props {
     cursor: AssetCursor;
@@ -92,6 +94,8 @@
     spaceId?: string;
     /** Shared-space surface + the caller's write capability on it — see `Timeline` (#889). */
     space?: { id: string; canWrite: boolean };
+    filmstripAssets?: FilmstripAsset[];
+    onFilmstripAssetSelect?: FilmstripAssetResolver;
   }
 
   let {
@@ -112,6 +116,8 @@
     resolveSlideshowRandomAsset,
     spaceId,
     space,
+    filmstripAssets = [],
+    onFilmstripAssetSelect,
   }: Props = $props();
 
   const {
@@ -136,12 +142,41 @@
   let fullscreenElement = $state<Element>();
 
   let isPlayingOriginalVideo = $state($alwaysLoadOriginalVideo);
+  let filmstripVisible = $state(false);
+  let filmstripHideTimer: ReturnType<typeof setTimeout> | undefined;
   let slideshowStartAssetId = $state<string>();
   const wheelZoomSpeedDivisor = 300;
   const wheelZoomSpeedLimit = 0.35;
 
   const setPlayOriginalVideo = (value: boolean) => {
     isPlayingOriginalVideo = value;
+  };
+
+  const revealFilmstrip = () => {
+    if (filmstripAssets.length < 2 || $slideshowState !== SlideshowState.None) {
+      return;
+    }
+
+    filmstripVisible = true;
+    if (filmstripHideTimer) {
+      clearTimeout(filmstripHideTimer);
+    }
+    filmstripHideTimer = setTimeout(() => {
+      filmstripVisible = false;
+      filmstripHideTimer = undefined;
+    }, 4000);
+  };
+
+  const selectFilmstripAsset: FilmstripAssetResolver = async (targetAsset) => {
+    revealFilmstrip();
+    if (onFilmstripAssetSelect) {
+      await onFilmstripAssetSelect(targetAsset);
+      return;
+    }
+
+    if ('type' in targetAsset) {
+      await navigateToViewerAsset(targetAsset);
+    }
   };
 
   const refreshStack = async () => {
@@ -243,6 +278,9 @@
     assetViewerManager.resetPanelState();
     syncAssetViewerOpenClass(false);
     preloadManager.destroy();
+    if (filmstripHideTimer) {
+      clearTimeout(filmstripHideTimer);
+    }
   });
 
   const closeViewer = () => {
@@ -748,7 +786,18 @@
   {/if}
 
   <!-- Asset Viewer -->
-  <div data-viewer-content class="relative z-[-1] col-span-4 col-start-1 row-span-full row-start-1">
+  <div
+    data-viewer-content
+    class="relative z-[-1] col-span-4 col-start-1 row-span-full row-start-1"
+    role="presentation"
+    tabindex="-1"
+    onclick={revealFilmstrip}
+    onkeydown={(event) => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        revealFilmstrip();
+      }
+    }}
+  >
     {#if viewerKind === 'StackVideoViewer'}
       <VideoViewer
         asset={previewStackedAsset!}
@@ -820,6 +869,15 @@
       <SlideshowMetadataOverlay {asset} />
     {/if}
   </div>
+
+  {#if filmstripVisible && filmstripAssets.length > 1 && !assetViewerManager.isShowEditor && !assetViewerManager.isFaceEditMode}
+    <AssetViewerFilmstrip
+      assets={filmstripAssets}
+      currentAssetId={asset.id}
+      onAssetSelect={selectFilmstripAsset}
+      onInteract={revealFilmstrip}
+    />
+  {/if}
 
   {#if $slideshowState === SlideshowState.None && showNavigation && !assetViewerManager.isShowEditor && !assetViewerManager.isFaceEditMode && nextAsset}
     <div class="col-span-1 col-start-4 row-span-full row-start-1 my-auto justify-self-end">
