@@ -43,6 +43,7 @@
     imageClass?: ClassValue;
     brokenAssetClass?: ClassValue;
     dimmed?: boolean;
+    preload?: boolean;
     albumUsers?: UserResponseDto[];
     onClick?: (asset: TimelineAsset) => void;
     onPreview?: (asset: TimelineAsset) => void;
@@ -71,6 +72,7 @@
     imageClass = '',
     brokenAssetClass = '',
     dimmed = false,
+    preload = true,
   }: Props = $props();
 
   let usingMobileDevice = $derived(mediaQueryManager.pointerCoarse);
@@ -252,6 +254,7 @@
         widthStyle="{width}px"
         heightStyle="{height}px"
         curve={selected}
+        {preload}
         onComplete={(errored) => {
           const rect = element?.getBoundingClientRect();
           skipFade = !rect || rect.bottom < 0 || rect.top > window.innerHeight;
