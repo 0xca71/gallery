@@ -69,6 +69,10 @@ export function buildRecentlyAddedFilterConfig(
   };
 
   return {
+    locationScopeKey: () => {
+      const search = activeSearch();
+      return JSON.stringify(['recently-added', search?.query.trim(), search?.language]);
+    },
     // Derived from the canonical list (#802) so this view cannot drift from the others. `'text'`
     // renders as `<TextFilter>`, editing the description / originalFileName / ocr metadata
     // filters — those already round-trip through the URL and through
@@ -92,6 +96,15 @@ export function buildRecentlyAddedFilterConfig(
       return mapSuggestions(await getFilterSuggestions({}));
     },
     providers: {
+      states: async (country, filterContext) => {
+        const context = activeSearch();
+        if (!context) {
+          return getSearchSuggestions({ $type: SearchSuggestionType.State, country, ...filterContext });
+        }
+        // Smart-search facets currently expose countries/cities but no state facet. Keep the
+        // ordinary timeline path exact and leave the state branch empty in query mode.
+        return [];
+      },
       cities: async (country, filterContext) => {
         const context = activeSearch();
         if (!context) {
@@ -99,7 +112,12 @@ export function buildRecentlyAddedFilterConfig(
         }
         // Scope by the LIVE filters (mirroring Photos' `filters: { ...filters, country }`), not by
         // the panel's FilterContext — see the module design note above.
-        const facets = await fetchFacets(context, { ...context.filters, country });
+        const facets = await fetchFacets(context, {
+          ...context.filters,
+          country,
+          state: filterContext?.state,
+          city: undefined,
+        });
         return facets.cities;
       },
       cameraModels: async (make, filterContext) => {
