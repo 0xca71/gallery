@@ -1,33 +1,20 @@
 <script lang="ts">
-  import type { FilterContext } from './filter-panel';
-
   import { Icon } from '@immich/ui';
-  import { mdiMagnify } from '@mdi/js';
-  import { untrack } from 'svelte';
+  import { mdiChevronDown, mdiChevronRight, mdiMagnify } from '@mdi/js';
+  import { onDestroy, untrack } from 'svelte';
   import { t } from 'svelte-i18n';
+  import type { FilterContext } from './filter-panel';
 
   interface Props {
     countries: string[];
     selectedCity?: string;
     selectedCountry?: string;
-    /**
-     * A state/province/region narrowing, which this panel can DISPLAY and CLEAR but not browse:
-     * there is no state list to pick from, so the only way one arrives is a contextual filter
-     * clicked in the asset viewer, typed search, or a shared link.
-     *
-     * It still has to be honoured here, because city / state / country are ONE filter and one chip
-     * (`getActiveFilterCount` counts them once): without this the state was invisible in the panel,
-     * unremovable from it, and silently AND-ed onto the next country or city clicked — which nearly
-     * always returns nothing.
-     */
     selectedState?: string;
     context?: FilterContext;
+    /** Includes the surface, permission scope and smart-search query, even if countries stay the same. */
+    scopeKey?: string;
+    onStateFetch?: (country: string, context?: FilterContext) => Promise<string[]>;
     onCityFetch: (country: string, context?: FilterContext) => Promise<string[]>;
-    /**
-     * `state` is the LAST parameter, and omitting it clears the state — every country/city click
-     * replaces the whole location group, so those call sites pass two arguments and get that for
-     * free.
-     */
     onSelectionChange: (country?: string, city?: string, state?: string) => void;
     emptyText?: string;
   }
@@ -38,329 +25,368 @@
     selectedCountry,
     selectedState,
     context,
+    scopeKey,
+    onStateFetch,
     onCityFetch,
     onSelectionChange,
     emptyText,
   }: Props = $props();
 
+  const SHOW_COUNT = 10;
+  const MIN_SEARCH_LENGTH = 2;
+  const MAX_CONCURRENT_REQUESTS = 4;
   let searchQuery = $state('');
-  let showAll = $state(false);
-  let expandedCityLists = $state<Record<string, boolean>>({});
-  let cityCache = $state<Record<string, string[]>>({});
-  let loadingCitiesByCountry = $state<Record<string, boolean>>({});
-  let cityFetchErrors = $state<Record<string, boolean>>({});
-  let latestCityFetchIds = $state<Record<string, number>>({});
-  let cityFetchSequence = 0;
-  let cityCacheKey = $state('');
+  let showAllCountries = $state(false);
+  let showAllChildren = $state<Record<string, boolean>>({});
+  let expandedCountry = $state<string>();
+  let expandedStates = $state<Record<string, string | undefined>>({});
+  let expandedAllCities = $state<Record<string, boolean>>({});
+  let manualCountries = $state<Record<string, boolean>>({});
+  let cache = $state<Record<string, string[]>>({});
+  let pending = $state<Record<string, boolean>>({});
+  let errors = $state<Record<string, boolean>>({});
+  let cacheKey = $state('');
+  let generation = 0;
+  let activeRequests = 0;
+  let disposed = false;
+  let queue: Array<() => void> = [];
 
-  const COUNTRY_SHOW_COUNT = 10;
-  const CITY_SHOW_COUNT = 10;
-  const MIN_CITY_SEARCH_LENGTH = 2;
+  const stateKey = (country: string) => JSON.stringify(['states', country]);
+  const cityKey = (country: string, state?: string) => JSON.stringify(['cities', country, state ?? null]);
+  let query = $derived(searchQuery.trim().toLowerCase());
+  let searchChildren = $derived(query.length >= MIN_SEARCH_LENGTH);
+  const matches = (value: string) => value.toLowerCase().includes(query);
 
-  let normalizedSearchQuery = $derived(searchQuery.trim().toLowerCase());
-  let shouldFetchCitiesForSearch = $derived(normalizedSearchQuery.length >= MIN_CITY_SEARCH_LENGTH);
-  let hasPendingCitySearchFetches = $derived.by(() => {
-    if (!shouldFetchCitiesForSearch) {
-      return false;
-    }
+  function drain() {
+    while (!disposed && activeRequests < MAX_CONCURRENT_REQUESTS && queue.length > 0) queue.shift()!();
+  }
 
-    return countries.some(
-      (country) => loadingCitiesByCountry[country] || (!Object.hasOwn(cityCache, country) && !cityFetchErrors[country]),
-    );
+  function ensure(kind: 'states' | 'cities', country: string, state?: string, retry = false) {
+    const key = kind === 'states' ? stateKey(country) : cityKey(country, state);
+    if (Object.hasOwn(cache, key) || pending[key] || (errors[key] && !retry)) return;
+    const requestGeneration = generation;
+    const fetcher = kind === 'states' ? onStateFetch : onCityFetch;
+    const requestContext = state ? { ...context, state } : context;
+    pending = { ...pending, [key]: true };
+    errors = { ...errors, [key]: false };
+    queue.push(() => {
+      activeRequests++;
+      void Promise.resolve()
+        .then(() => fetcher?.(country, requestContext) ?? [])
+        .then((values) => {
+          if (disposed || generation !== requestGeneration) return;
+          cache = { ...cache, [key]: [...new Set(values.filter(Boolean))] };
+          pending = { ...pending, [key]: false };
+        })
+        .catch(() => {
+          if (disposed || generation !== requestGeneration) return;
+          pending = { ...pending, [key]: false };
+          errors = { ...errors, [key]: true };
+        })
+        .finally(() => {
+          activeRequests--;
+          drain();
+        });
+    });
+    drain();
+  }
+
+  onDestroy(() => {
+    disposed = true;
+    queue = [];
   });
 
-  // Clear search when countries list changes (e.g. temporal filter refetch)
-  let previousCountriesLength = 0;
   $effect(() => {
-    const currentLength = countries.length;
-    if (previousCountriesLength > 0 && currentLength !== previousCountriesLength) {
-      searchQuery = '';
-      showAll = false;
-    }
-    previousCountriesLength = currentLength;
-  });
-
-  $effect(() => {
-    const nextKey = JSON.stringify({ countries, context });
-    if (cityCacheKey && nextKey !== cityCacheKey) {
-      cityFetchSequence += 1;
-      cityCache = {};
-      loadingCitiesByCountry = {};
-      cityFetchErrors = {};
-      latestCityFetchIds = {};
-      expandedCityLists = {};
-      cities = [];
-    }
-    cityCacheKey = nextKey;
-  });
-
-  let filteredCountries = $derived.by(() => {
-    if (!normalizedSearchQuery) {
-      return countries;
-    }
-
-    return countries.filter((country) => {
-      const countryMatches = country.toLowerCase().includes(normalizedSearchQuery);
-      const cityMatches =
-        shouldFetchCitiesForSearch &&
-        (cityCache[country] ?? []).some((city) => city.toLowerCase().includes(normalizedSearchQuery));
-      return countryMatches || cityMatches || selectedCountry === country;
+    // Countries are the result of the same suggestion request and may arrive after URL hydration;
+    // they are not a cache boundary themselves. Context/scope changes are the actual query changes.
+    const nextKey = JSON.stringify({ context, scopeKey });
+    untrack(() => {
+      if (cacheKey && cacheKey !== nextKey) {
+        generation++;
+        queue = [];
+        cache = {};
+        pending = {};
+        errors = {};
+        showAllChildren = {};
+      }
+      cacheKey = nextKey;
     });
   });
 
-  /**
-   * The truncated head of the country list, with the SELECTED country hoisted into it.
-   *
-   * Everything below a country — its cities, and the state row — renders inside that country's
-   * block, so a selected country that falls outside the first ten takes the whole selection off
-   * screen with it. Same reasoning (and same hoist) as the selected tag and the selected person.
-   */
-  let visibleCountries = $derived.by(() => {
-    if (searchQuery.trim() || showAll) {
-      return filteredCountries;
-    }
-
-    const head = filteredCountries.slice(0, COUNTRY_SHOW_COUNT);
-    if (!selectedCountry || head.includes(selectedCountry) || !filteredCountries.includes(selectedCountry)) {
-      return head;
-    }
-
-    return [selectedCountry, ...filteredCountries.filter((country) => country !== selectedCountry)].slice(
-      0,
-      COUNTRY_SHOW_COUNT,
-    );
+  // Default expansion is UI state only; a manual fold survives selection/context refetches.
+  $effect(() => {
+    const single = countries.length === 1 ? countries[0] : undefined;
+    untrack(() => {
+      if (single && manualCountries[single] === undefined) expandedCountry = single;
+    });
   });
 
-  let remainingCount = $derived(Math.max(0, filteredCountries.length - visibleCountries.length));
-
-  let expandedCountry = $state<string | undefined>(undefined);
-  let cities = $state<string[]>([]);
-
-  // Orphaned country: selected but not in current results
-  let orphanedCountry = $derived(selectedCountry && !countries.includes(selectedCountry) ? selectedCountry : undefined);
-
-  // Reveal the level the selection lives on. A state counts: its row renders inside the country's
-  // expanded block, so a collapsed country would hide it exactly like it hid a selected city.
+  // Reveal URL/contextual selections once when the selection changes, never on manual folding.
   $effect(() => {
-    if (!(selectedCountry && (selectedCity || selectedState)) || expandedCountry === selectedCountry) {
-      return;
-    }
-
-    expandedCountry = selectedCountry;
-    expandedCityLists = { ...expandedCityLists, [selectedCountry]: false };
-  });
-
-  function ensureCities(country: string) {
-    if (Object.hasOwn(cityCache, country) || loadingCitiesByCountry[country]) {
-      return;
-    }
-
-    const requestedCountry = country;
-    const _context = context;
-    const requestId = ++cityFetchSequence;
-
-    latestCityFetchIds = { ...latestCityFetchIds, [requestedCountry]: requestId };
-    loadingCitiesByCountry = { ...loadingCitiesByCountry, [requestedCountry]: true };
-    cityFetchErrors = { ...cityFetchErrors, [requestedCountry]: false };
-    if (expandedCountry === requestedCountry) {
-      cities = [];
-    }
-
-    void onCityFetch(requestedCountry, _context)
-      .then((result) => {
-        if (latestCityFetchIds[requestedCountry] !== requestId) {
-          return;
-        }
-
-        cityCache = { ...cityCache, [requestedCountry]: result };
-        loadingCitiesByCountry = { ...loadingCitiesByCountry, [requestedCountry]: false };
-        cityFetchErrors = { ...cityFetchErrors, [requestedCountry]: false };
-
-        if (expandedCountry === requestedCountry) {
-          cities = result;
-        }
-
-        // Cascade child auto-clear: if selected city is not in new results, clear it
-        if (
-          selectedCountry === requestedCountry &&
-          selectedCity &&
-          result.length > 0 &&
-          !result.includes(selectedCity)
-        ) {
-          onSelectionChange(requestedCountry, undefined);
-        }
-      })
-      .catch(() => {
-        if (latestCityFetchIds[requestedCountry] !== requestId) {
-          return;
-        }
-
-        loadingCitiesByCountry = { ...loadingCitiesByCountry, [requestedCountry]: false };
-        cityFetchErrors = { ...cityFetchErrors, [requestedCountry]: true };
-        if (expandedCountry === requestedCountry) {
-          cities = [];
-        }
-      });
-  }
-
-  $effect(() => {
-    if (expandedCountry) {
-      cities = cityCache[expandedCountry] ?? [];
-      untrack(() => ensureCities(expandedCountry!));
-    } else {
-      cities = [];
-    }
+    const country = selectedCountry;
+    const state = selectedState;
+    const city = selectedCity;
+    untrack(() => {
+      if (!country || (!state && !city)) return;
+      expandedCountry = country;
+      if (state && city) expandedStates = { ...expandedStates, [country]: state };
+      if (!state && city) {
+        expandedAllCities = { ...expandedAllCities, [country]: true };
+      }
+    });
+    if (country && city && !state) ensure('cities', country);
   });
 
   $effect(() => {
-    if (selectedCountry) {
-      untrack(() => ensureCities(selectedCountry));
+    cacheKey;
+    if (!expandedCountry || !countries.includes(expandedCountry)) return;
+    const country = expandedCountry;
+    const state = expandedStates[country];
+    const allCities = expandedAllCities[country];
+    const legacy = !onStateFetch;
+    untrack(() => {
+      ensure('states', country);
+      if (state) ensure('cities', country, state);
+      if (allCities || legacy) ensure('cities', country);
+    });
+  });
+
+  // Suggestion responses can replace the country list after URL state has already hydrated. The
+  // cache generation is reset with that scope change, so explicitly requeue the visible city.
+  $effect(() => {
+    const country = selectedCountry;
+    const city = selectedCity;
+    const state = selectedState;
+    cacheKey;
+    if (country && city && countries.includes(country) && !selectedState) {
+      untrack(() => ensure('cities', country));
+    }
+    if (country && state && !onStateFetch) {
+      untrack(() => ensure('cities', country));
     }
   });
 
+  // Search is debounced. Country-wide cities locate matching countries; only those countries
+  // need per-state city requests to resolve the hierarchy. All requests share a bounded queue.
   $effect(() => {
-    if (!shouldFetchCitiesForSearch || !cityCacheKey) {
-      return;
-    }
-
+    cacheKey;
+    if (!searchChildren) return;
+    const currentQuery = query;
     const currentCountries = countries;
-    const timeout = setTimeout(() => {
-      untrack(() => {
-        for (const country of currentCountries) {
-          ensureCities(country);
-        }
-      });
-    }, 150);
-
+    const timeout = setTimeout(
+      () =>
+        untrack(() => {
+          if (query !== currentQuery) return;
+          for (const country of currentCountries) {
+            ensure('states', country);
+            ensure('cities', country);
+          }
+        }),
+      150,
+    );
     return () => clearTimeout(timeout);
   });
 
-  function getFilteredCities(country: string): string[] {
-    const cachedCities = cityCache[country] ?? (expandedCountry === country ? cities : []);
-    if (!normalizedSearchQuery) {
-      return cachedCities;
-    }
-
-    const countryMatches = country.toLowerCase().includes(normalizedSearchQuery);
-    const filtered =
-      expandedCountry === country && countryMatches
-        ? cachedCities
-        : shouldFetchCitiesForSearch
-          ? cachedCities.filter((city) => city.toLowerCase().includes(normalizedSearchQuery))
-          : [];
-
-    if (selectedCountry === country && selectedCity && !filtered.includes(selectedCity)) {
-      return [...filtered, selectedCity];
-    }
-
-    return filtered;
-  }
-
-  function getVisibleCities(country: string): string[] {
-    const filtered = getFilteredCities(country);
-    if (expandedCityLists[country]) {
-      return filtered;
-    }
-
-    const visible = filtered.slice(0, CITY_SHOW_COUNT);
-    if (
-      selectedCountry === country &&
-      selectedCity &&
-      filtered.includes(selectedCity) &&
-      !visible.includes(selectedCity)
-    ) {
-      return [...visible.slice(0, CITY_SHOW_COUNT - 1), selectedCity];
-    }
-
-    return visible;
-  }
-
-  function getRemainingCityCount(country: string): number {
-    return Math.max(0, getFilteredCities(country).length - getVisibleCities(country).length);
-  }
-
-  let cityOnlySelectionHasVisibleRow = $derived.by(() => {
-    if (!selectedCity || selectedCountry) {
-      return false;
-    }
-
-    for (const country of visibleCountries) {
-      const cityRowsVisible =
-        (expandedCountry === country || (normalizedSearchQuery && getVisibleCities(country).length > 0)) &&
-        !loadingCitiesByCountry[country];
-      if (cityRowsVisible && getVisibleCities(country).includes(selectedCity)) {
-        return true;
+  $effect(() => {
+    if (!searchChildren || !onStateFetch) return;
+    for (const country of countries) {
+      if ((cache[cityKey(country)] ?? []).some(matches)) {
+        for (const state of cache[stateKey(country)] ?? []) untrack(() => ensure('cities', country, state));
       }
     }
-
-    return false;
   });
 
-  function showAllCities(country: string) {
-    expandedCityLists = { ...expandedCityLists, [country]: true };
+  function isCitySelected(country: string, city: string, state?: string) {
+    return selectedCity === city && (!selectedCountry || selectedCountry === country) && selectedState === state;
   }
 
-  function handleCountryClick(country: string) {
-    if (selectedCountry === country && !selectedCity) {
-      expandedCountry = undefined;
-      onSelectionChange(undefined, undefined);
-    } else {
-      expandedCountry = country;
-      expandedCityLists = { ...expandedCityLists, [country]: false };
-      onSelectionChange(country, undefined);
-    }
+  function statesFor(country: string) {
+    const values = cache[stateKey(country)] ?? [];
+    const selected = selectedCountry === country ? selectedState : undefined;
+    const available = selected && !values.includes(selected) ? [...values, selected] : values;
+    if (!query || (expandedCountry === country && matches(country))) return available;
+    return available.filter(
+      (state) =>
+        state === selected ||
+        (searchChildren && (matches(state) || (cache[cityKey(country, state)] ?? []).some(matches))),
+    );
   }
 
-  // Both selection handlers below pass two arguments, which drops any state: see the
-  // `onSelectionChange` prop docs — a new country or city REPLACES the location group.
-  function handleCityClick(city: string, country: string) {
-    if (selectedCity === city && !selectedCountry) {
-      // City-only filters can come from typed search syntax. Clicking the selected
-      // city should clear that city filter rather than turning it into country-only.
-      onSelectionChange(undefined, undefined);
-    } else if (selectedCity === city) {
-      // Deselect city, keep country
-      onSelectionChange(country, undefined);
-    } else {
-      // Select city (auto-fills country)
-      onSelectionChange(country, city);
+  function citiesFor(country: string, state?: string) {
+    const values = cache[cityKey(country, state)] ?? [];
+    const selected = selectedCountry === country && selectedState === state ? selectedCity : undefined;
+    const filtered =
+      !query || (expandedCountry === country && matches(country)) || (state && matches(state))
+        ? values
+        : searchChildren
+          ? values.filter(matches)
+          : [];
+    // Keep a URL-restored city visible while its country has fallen out of the current facet set,
+    // but wait for the scoped provider when the country is present so we do not render a lone city
+    // before its siblings have loaded.
+    return selected && !filtered.includes(selected) && (!countries.includes(country) || values.length > 0)
+      ? [...filtered, selected]
+      : filtered;
+  }
+
+  function limited(values: string[], key: string, selected?: string) {
+    if (showAllChildren[key]) return values;
+    const head = values.slice(0, SHOW_COUNT);
+    return selected && values.includes(selected) && !head.includes(selected)
+      ? [...head.slice(0, SHOW_COUNT - 1), selected]
+      : head;
+  }
+
+  let filteredCountries = $derived(
+    countries.filter(
+      (country) =>
+        !query ||
+        matches(country) ||
+        selectedCountry === country ||
+        (searchChildren && (statesFor(country).length > 0 || (cache[cityKey(country)] ?? []).some(matches))),
+    ),
+  );
+  let visibleCountries = $derived.by(() => {
+    if (query || showAllCountries) return filteredCountries;
+    const head = filteredCountries.slice(0, SHOW_COUNT);
+    return selectedCountry && filteredCountries.includes(selectedCountry) && !head.includes(selectedCountry)
+      ? [selectedCountry, ...filteredCountries.filter((country) => country !== selectedCountry)].slice(0, SHOW_COUNT)
+      : head;
+  });
+  let pendingSearch = $derived(
+    searchChildren &&
+      countries.some((country) =>
+        [stateKey(country), cityKey(country)].some(
+          (key) => pending[key] || (!Object.hasOwn(cache, key) && !errors[key]),
+        ),
+      ),
+  );
+  let orphanedCountry = $derived(selectedCountry && !countries.includes(selectedCountry) ? selectedCountry : undefined);
+  let cityOnlyHasRow = $derived(
+    !selectedCountry &&
+      !selectedState &&
+      !!selectedCity &&
+      visibleCountries.some(
+        (country) => (expandedCountry === country || searchChildren) && citiesFor(country).includes(selectedCity!),
+      ),
+  );
+
+  function change(country?: string, city?: string, state?: string) {
+    if (state === undefined) onSelectionChange(country, city);
+    else onSelectionChange(country, city, state);
+  }
+
+  function selectCountry(country: string) {
+    expandedCountry = country;
+    manualCountries = { ...manualCountries, [country]: false };
+    ensure('states', country);
+    if (!onStateFetch) ensure('cities', country);
+    change(selectedCountry === country && !selectedCity && !selectedState ? undefined : country);
+  }
+
+  function selectState(country: string | undefined, state: string) {
+    change(
+      country,
+      undefined,
+      selectedCountry === country && selectedState === state && !selectedCity ? undefined : state,
+    );
+  }
+
+  function selectCity(country: string | undefined, city: string, state?: string) {
+    const selected =
+      selectedCity === city && (!selectedCountry || country === selectedCountry) && selectedState === state;
+    change(selected && !selectedCountry ? undefined : country, selected ? undefined : city, state);
+  }
+
+  function toggleCountry(country: string) {
+    const expand = expandedCountry !== country;
+    manualCountries = { ...manualCountries, [country]: expand };
+    expandedCountry = expand ? country : undefined;
+    if (expand) {
+      ensure('states', country, undefined, true);
+      if (!onStateFetch) ensure('cities', country, undefined, true);
     }
   }
 </script>
 
-<!--
-  The active state/province. Always ticked and always the deepest selection — this panel has no state
-  list to browse, so the row exists to SHOW the filter and to take it off again. Clicking it keeps
-  the country, matching what clicking a selected city does.
--->
-{#snippet stateRow(state: string, country: string | undefined)}
+{#snippet indicator(selected: boolean)}
+  <div
+    class="flex size-4 shrink-0 items-center justify-center rounded-full border-2 {selected
+      ? 'border-immich-primary bg-immich-primary dark:border-immich-dark-primary dark:bg-immich-dark-primary'
+      : 'border-gray-300 dark:border-gray-600'}"
+  >
+    {#if selected}<div class="size-1.5 rounded-full bg-white dark:bg-black"></div>{/if}
+  </div>
+{/snippet}
+
+{#snippet expandButton(label: string, expanded: boolean, testId: string, onclick: () => void)}
   <button
     type="button"
-    class="-mx-2 flex items-center gap-2 rounded-lg px-2 py-1.5 text-sm font-medium hover:bg-subtle {country
-      ? 'ml-5 w-[calc(100%-1.25rem+1rem)]'
-      : 'w-[calc(100%+1rem)]'}"
-    onclick={() => onSelectionChange(country, undefined, undefined)}
-    aria-pressed="true"
-    data-testid="location-state-{state}"
+    class="shrink-0 rounded-lg p-1.5 text-gray-500 hover:bg-subtle dark:text-gray-300"
+    aria-label={`${$t(expanded ? 'collapse' : 'expand')} ${label}`}
+    aria-expanded={expanded}
+    {onclick}
+    data-testid={testId}
   >
-    <div
-      class="flex size-4 shrink-0 items-center justify-center rounded-full border-2 border-immich-primary bg-immich-primary dark:border-immich-dark-primary dark:bg-immich-dark-primary"
-    >
-      <div class="size-1.5 rounded-full bg-white dark:bg-black"></div>
-    </div>
-    <span class="flex-1 truncate text-left">{state}</span>
+    <Icon icon={expanded ? mdiChevronDown : mdiChevronRight} size="16" />
   </button>
 {/snippet}
 
+{#snippet stateButton(country: string | undefined, state: string)}
+  {@const selected = selectedState === state && selectedCountry === country && !selectedCity}
+  <button
+    type="button"
+    class="flex min-w-0 flex-1 items-center gap-2 rounded-lg px-2 py-1.5 text-sm hover:bg-subtle {selected
+      ? 'font-medium'
+      : 'text-gray-500 dark:text-gray-300'}"
+    onclick={() => selectState(country, state)}
+    aria-pressed={selected}
+    data-testid="location-state-{state}"
+  >
+    {@render indicator(selected)}<span class="flex-1 truncate text-left">{state}</span>
+  </button>
+{/snippet}
+
+{#snippet cityList(country: string, state?: string)}
+  {@const key = cityKey(country, state)}
+  {@const values = citiesFor(country, state)}
+  {@const visible = limited(
+    values,
+    key,
+    selectedCountry === country && selectedState === state ? selectedCity : undefined,
+  )}
+  {#each visible as city (city)}
+    {@const selected = isCitySelected(country, city, state)}
+    <button
+      type="button"
+      class="-mx-2 flex w-[calc(100%+1rem)] items-center gap-2 rounded-lg px-2 py-1.5 text-sm hover:bg-subtle {state
+        ? 'ml-10'
+        : 'ml-5'} {selected ? 'font-medium' : 'text-gray-500 dark:text-gray-300'}"
+      onclick={() => selectCity(country, city, state)}
+      aria-pressed={selected}
+      data-testid={state ? `location-city-${country}-${state}-${city}` : `location-city-${city}`}
+    >
+      {@render indicator(selected)}<span class="flex-1 truncate text-left">{city}</span>
+    </button>
+  {/each}
+  {#if values.length > visible.length}
+    <button
+      type="button"
+      class="ml-5 py-1 text-xs font-medium text-immich-primary dark:text-immich-dark-primary"
+      onclick={() => (showAllChildren = { ...showAllChildren, [key]: true })}
+      data-testid={state ? `location-city-show-more-${country}-${state}` : `location-city-show-more-${country}`}
+    >
+      {$t('filter_show_more', { values: { count: values.length - visible.length } })}
+    </button>
+  {/if}
+{/snippet}
+
 <div data-testid="location-filter">
-  <!-- `selectedState` counts as something to render: an active filter must never be reachable only
-       through the chip, or it cannot be removed from here. -->
-  {#if countries.length === 0 && !orphanedCountry && !selectedState}
+  {#if countries.length === 0 && !selectedCountry && !selectedState && !selectedCity}
     <p class="text-sm text-gray-400 dark:text-gray-500" data-testid="location-empty">
       {emptyText ?? $t('filter_no_locations_found')}
     </p>
   {:else}
-    <!-- Search input -->
     <div class="relative mb-2">
       <div class="pointer-events-none absolute top-1/2 left-2 -translate-y-1/2 text-gray-400 dark:text-gray-500">
         <Icon icon={mdiMagnify} size="14" />
@@ -370,152 +396,125 @@
         class="immich-form-input h-8 w-full rounded-lg pr-2 pl-7 text-sm"
         placeholder={$t('filter_search_locations')}
         bind:value={searchQuery}
-        oninput={() => {
-          showAll = false;
-        }}
+        oninput={() => (showAllCountries = false)}
         data-testid="location-search-input"
       />
     </div>
 
-    <!-- Orphaned country (selected but no longer in suggestions) -->
     {#if orphanedCountry}
-      {@const isCountryTicked = !selectedCity && !selectedState}
       <button
         type="button"
         class="-mx-2 flex w-[calc(100%+1rem)] items-center gap-2 rounded-lg px-2 py-1.5 text-sm font-medium opacity-50 hover:bg-subtle"
-        onclick={() => handleCountryClick(orphanedCountry!)}
-        aria-pressed="true"
+        onclick={() => selectCountry(orphanedCountry!)}
+        aria-pressed={!selectedState && !selectedCity}
         data-testid="location-country-{orphanedCountry}"
       >
-        <div
-          class="flex size-4 shrink-0 items-center justify-center rounded-full border-2 {isCountryTicked
-            ? 'border-immich-primary bg-immich-primary dark:border-immich-dark-primary dark:bg-immich-dark-primary'
-            : 'border-gray-300 dark:border-gray-600'}"
+        {@render indicator(!selectedState && !selectedCity)}<span class="flex-1 truncate text-left"
+          >{orphanedCountry}</span
         >
-          {#if isCountryTicked}
-            <div class="size-1.5 rounded-full bg-white dark:bg-black"></div>
-          {/if}
-        </div>
-        <span class="flex-1 truncate text-left">{orphanedCountry}</span>
       </button>
-      {#if selectedState}
-        {@render stateRow(selectedState, orphanedCountry)}
+      {#if selectedState}<div class="ml-5">{@render stateButton(orphanedCountry, selectedState)}</div>{/if}
+      {#if selectedCity && Object.hasOwn(cache, cityKey(orphanedCountry, selectedState))}
+        {@render cityList(orphanedCountry, selectedState)}
       {/if}
     {/if}
-
-    <!-- A state with no country at all (only reachable by URL) has no country block to sit in. -->
-    {#if selectedState && !selectedCountry}
-      {@render stateRow(selectedState, undefined)}
-    {/if}
-
-    {#if selectedCity && !selectedCountry && !cityOnlySelectionHasVisibleRow}
+    {#if selectedState && !selectedCountry}{@render stateButton(undefined, selectedState)}{/if}
+    {#if selectedCity && !selectedCountry && !cityOnlyHasRow}
       <button
         type="button"
         class="-mx-2 flex w-[calc(100%+1rem)] items-center gap-2 rounded-lg px-2 py-1.5 text-sm font-medium hover:bg-subtle"
-        onclick={() => onSelectionChange(undefined, undefined)}
+        onclick={() => selectCity(undefined, selectedCity!, selectedState)}
         aria-pressed="true"
         data-testid="location-city-{selectedCity}"
       >
-        <div
-          class="flex size-4 shrink-0 items-center justify-center rounded-full border-2 border-immich-primary bg-immich-primary dark:border-immich-dark-primary dark:bg-immich-dark-primary"
-        >
-          <div class="size-1.5 rounded-full bg-white dark:bg-black"></div>
-        </div>
-        <span class="flex-1 truncate text-left">{selectedCity}</span>
+        {@render indicator(true)}<span class="flex-1 truncate text-left">{selectedCity}</span>
       </button>
     {/if}
-
-    <!-- Empty search results -->
-    {#if filteredCountries.length === 0 && searchQuery.trim() && !hasPendingCitySearchFetches}
+    {#if query && filteredCountries.length === 0 && !pendingSearch}
       <p class="text-sm text-gray-400 dark:text-gray-500" data-testid="location-no-results">
         {$t('filter_no_matching_locations')}
       </p>
     {/if}
 
     {#each visibleCountries as country (country)}
-      {@const isCountrySelected = selectedCountry === country}
-      {@const visibleCities = getVisibleCities(country)}
-      <!-- The dot marks the DEEPEST narrowing, so a selected state takes it off the country exactly
-           as a selected city does — a ticked country beside a ticked state would read as "the whole
-           country", which is not what is being filtered. -->
-      {@const isCountryTicked = isCountrySelected && !selectedCity && !selectedState}
-      <!-- Country row -->
-      <button
-        type="button"
-        class="-mx-2 flex w-[calc(100%+1rem)] items-center gap-2 rounded-lg px-2 py-1.5 text-sm hover:bg-subtle {isCountrySelected
-          ? 'font-medium'
-          : 'text-gray-500 dark:text-gray-300'}"
-        onclick={() => handleCountryClick(country)}
-        data-testid="location-country-{country}"
-      >
-        <!-- Radio indicator -->
-        <div
-          class="flex size-4 shrink-0 items-center justify-center rounded-full border-2 {isCountryTicked
-            ? 'border-immich-primary bg-immich-primary dark:border-immich-dark-primary dark:bg-immich-dark-primary'
-            : 'border-gray-300 dark:border-gray-600'}"
+      {@const selected = selectedCountry === country && !selectedCity && !selectedState}
+      {@const expanded = expandedCountry === country}
+      <div class="-mx-2 flex items-center">
+        <button
+          type="button"
+          class="flex min-w-0 flex-1 items-center gap-2 rounded-lg px-2 py-1.5 text-sm hover:bg-subtle {selected
+            ? 'font-medium'
+            : 'text-gray-500 dark:text-gray-300'}"
+          onclick={() => selectCountry(country)}
+          aria-pressed={selected}
+          data-testid="location-country-{country}"
         >
-          {#if isCountryTicked}
-            <div class="size-1.5 rounded-full bg-white dark:bg-black"></div>
-          {/if}
-        </div>
-
-        <!-- Label -->
-        <span class="flex-1 truncate text-left">{country}</span>
-      </button>
-
-      {#if selectedState && isCountrySelected}
-        {@render stateRow(selectedState, country)}
-      {/if}
-
-      <!-- Cities (indented when country is expanded) -->
-      {#if (expandedCountry === country || (normalizedSearchQuery && visibleCities.length > 0)) && !loadingCitiesByCountry[country]}
-        {#each visibleCities as city (city)}
-          {@const isCitySelected = selectedCity === city && (!selectedCountry || selectedCountry === country)}
-          <button
-            type="button"
-            class="-mx-2 ml-5 flex w-[calc(100%-1.25rem+1rem)] items-center gap-2 rounded-lg px-2 py-1.5 text-sm hover:bg-subtle {isCitySelected
-              ? 'font-medium'
-              : 'text-gray-500 dark:text-gray-300'}"
-            onclick={() => handleCityClick(city, country)}
-            data-testid="location-city-{city}"
-          >
-            <!-- Radio indicator -->
-            <div
-              class="flex size-4 shrink-0 items-center justify-center rounded-full border-2 {isCitySelected
-                ? 'border-immich-primary bg-immich-primary dark:border-immich-dark-primary dark:bg-immich-dark-primary'
-                : 'border-gray-300 dark:border-gray-600'}"
-            >
-              {#if isCitySelected}
-                <div class="size-1.5 rounded-full bg-white dark:bg-black"></div>
-              {/if}
-            </div>
-
-            <!-- Label -->
-            <span class="flex-1 truncate text-left">{city}</span>
-          </button>
+          {@render indicator(selected)}<span class="flex-1 truncate text-left">{country}</span>
+        </button>
+        {@render expandButton(country, expanded, `location-expand-country-${country}`, () => toggleCountry(country))}
+      </div>
+      {#if expanded || (searchChildren && statesFor(country).length > 0)}
+        {@const values = statesFor(country)}
+        {@const visible = limited(values, stateKey(country), selectedCountry === country ? selectedState : undefined)}
+        {#each visible as state (state)}
+          {@const stateExpanded = expandedStates[country] === state}
+          <div class="-mx-2 ml-5 flex items-center">
+            {@render stateButton(country, state)}
+            {@render expandButton(state, stateExpanded, `location-expand-state-${country}-${state}`, () => {
+              expandedStates = { ...expandedStates, [country]: stateExpanded ? undefined : state };
+              if (!stateExpanded) ensure('cities', country, state, true);
+            })}
+          </div>
+          {#if stateExpanded || (searchChildren && citiesFor(country, state).length > 0)}{@render cityList(
+              country,
+              state,
+            )}{/if}
         {/each}
-        {#if !expandedCityLists[country] && getRemainingCityCount(country) > 0}
+        {#if values.length > visible.length}
           <button
             type="button"
             class="ml-5 py-1 text-xs font-medium text-immich-primary dark:text-immich-dark-primary"
-            onclick={() => showAllCities(country)}
-            data-testid="location-city-show-more-{country}"
+            onclick={() => (showAllChildren = { ...showAllChildren, [stateKey(country)]: true })}
+            data-testid="location-state-show-more-{country}"
           >
-            {$t('filter_show_more', { values: { count: getRemainingCityCount(country) } })}
+            {$t('filter_show_more', { values: { count: values.length - visible.length } })}
           </button>
         {/if}
       {/if}
+      {#if selectedCountry === country && selectedState && !statesFor(country).includes(selectedState)}
+        <div class="ml-5">{@render stateButton(country, selectedState)}</div>
+      {/if}
+      {#if expanded && onStateFetch}
+        <!-- Suggestions cannot distinguish null-state cities. A country-wide list keeps those
+             cities reachable without inventing a province or issuing a request for every state. -->
+        <div class="ml-5 flex items-center gap-1 text-sm text-gray-500 dark:text-gray-300">
+          <span class="flex-1">{$t('filter_sheet_deep_places_all_cities')}</span>
+          {@render expandButton(
+            $t('filter_sheet_deep_places_all_cities'),
+            !!expandedAllCities[country],
+            `location-expand-cities-${country}`,
+            () => {
+              expandedAllCities = { ...expandedAllCities, [country]: !expandedAllCities[country] };
+              if (expandedAllCities[country]) ensure('cities', country, undefined, true);
+            },
+          )}
+        </div>
+      {/if}
+      {#if (expanded && (expandedAllCities[country] || statesFor(country).length === 0 || !onStateFetch)) || (searchChildren && citiesFor(country).length > 0)}
+        {@render cityList(country)}
+      {/if}
+      {#if !expanded && selectedCountry === country && selectedState && !searchChildren}
+        <div class="ml-5">{@render stateButton(country, selectedState)}</div>
+      {/if}
     {/each}
-
-    <!-- Show more link -->
-    {#if !showAll && remainingCount > 0 && !searchQuery.trim()}
+    {#if !query && !showAllCountries && filteredCountries.length > visibleCountries.length}
       <button
         type="button"
         class="py-1 text-xs font-medium text-immich-primary dark:text-immich-dark-primary"
-        onclick={() => (showAll = true)}
+        onclick={() => (showAllCountries = true)}
         data-testid="location-show-more"
       >
-        {$t('filter_show_more', { values: { count: remainingCount } })}
+        {$t('filter_show_more', { values: { count: filteredCountries.length - visibleCountries.length } })}
       </button>
     {/if}
   {/if}
