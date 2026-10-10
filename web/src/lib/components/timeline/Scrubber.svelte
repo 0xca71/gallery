@@ -615,7 +615,7 @@
           style:width="fit-content"
           class="pointer-events-none absolute w-8 truncate rounded-full bg-immich-primary/90 px-4 py-2 text-sm font-semibold text-white select-none hover:cursor-pointer dark:bg-gray-500"
         >
-          {scrollHoverLabel}
+          {hoverLabel ?? scrollHoverLabel}
         </p>
       {/if}
     </div>
