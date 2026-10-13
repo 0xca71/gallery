@@ -35,42 +35,6 @@ const minimalWorkflow = [
   '      - run: echo ghcr.io/open-noodle/gallery-ml:${RC_TAG}',
 ].join('\n');
 
-const mobileSmokeWorkflow = [
-  'on:',
-  '  workflow_dispatch:',
-  '    inputs:',
-  '      ref:',
-  'jobs:',
-  '  smoke:',
-  '    steps:',
-  '      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd',
-  '      - uses: ./.github/actions/apply-branding',
-  '      - uses: immich-app/devtools/actions/use-mise@7b8610a904d57da241e4ddba17fa62b62b15aed4',
-  '      - run: mise //mobile:install:ci',
-  '      - run: mise //mobile:codegen',
-  '      - run: mise //mobile:analyze',
-  '      - run: mise //mobile:test',
-  '      - run: flutter build apk --debug',
-].join('\n');
-
-const mlSmokeWorkflow = [
-  'name: Gallery ML Smoke',
-  '',
-  'on:',
-  '  workflow_dispatch:',
-  '    inputs:',
-  '      ref:',
-  'jobs:',
-  '  smoke:',
-  '    steps:',
-  '      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd',
-  '        with:',
-  '          ref: ${{ inputs.ref || github.sha }}',
-  '      - uses: ./.github/actions/apply-branding',
-  '      - uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2',
-  '      - run: machine-learning/scripts/gallery-ml-smoke.sh',
-].join('\n');
-
 const ownershipManifest: Manifest = {
   version: 1,
   metadata: {
@@ -120,7 +84,7 @@ describe('classifyConfidenceSurfaces', () => {
 });
 
 describe('renderRequiredConfidenceChecks', () => {
-  it('renders matched-file reasons and exact remote commands for risky batches', () => {
+  it('renders local confidence checks for risky batches', () => {
     const details = renderRequiredConfidenceChecks(
       classifyConfidenceSurfaces([
         'mobile/lib/routing/router.dart',
@@ -130,10 +94,6 @@ describe('renderRequiredConfidenceChecks', () => {
       '176',
       {
         makeTargets: new Set(['gallery-branding-check', 'gallery-ml-smoke']),
-        workflows: new Set([
-          'gallery-mobile-smoke.yml',
-          'gallery-ml-smoke.yml',
-        ]),
       },
     );
 
@@ -143,15 +103,9 @@ describe('renderRequiredConfidenceChecks', () => {
     expect(details).toContain(
       'make gallery-ml-smoke (required by docker: server/Dockerfile, machine-learning/Dockerfile; ml: machine-learning/Dockerfile)',
     );
-    expect(details).toContain(
-      'gh workflow run gallery-mobile-smoke.yml --ref rebase/upstream-batch-176 (required by mobile: mobile/lib/routing/router.dart)',
-    );
-    expect(details).toContain(
-      'gh workflow run gallery-ml-smoke.yml --ref rebase/upstream-batch-176 (required by docker: server/Dockerfile, machine-learning/Dockerfile; ml: machine-learning/Dockerfile)',
-    );
   });
 
-  it('renders planned checks and workflows when targets and workflows are missing', () => {
+  it('renders planned checks when targets are missing', () => {
     const details = renderRequiredConfidenceChecks(
       classifyConfidenceSurfaces([
         'mobile/lib/routing/router.dart',
@@ -168,15 +122,9 @@ describe('renderRequiredConfidenceChecks', () => {
     expect(details).toContain(
       'planned Slice 5 check: make gallery-ml-smoke (target missing; required by docker: server/Dockerfile, machine-learning/Dockerfile; ml: machine-learning/Dockerfile)',
     );
-    expect(details).toContain(
-      'planned Slice 4 workflow: gallery-mobile-smoke.yml (workflow missing; required by mobile: mobile/lib/routing/router.dart)',
-    );
-    expect(details).toContain(
-      'planned Slice 5 workflow: gallery-ml-smoke.yml (workflow missing; required by docker: server/Dockerfile, machine-learning/Dockerfile; ml: machine-learning/Dockerfile)',
-    );
   });
 
-  it('emits available local commands while keeping missing future workflows planned', () => {
+  it('emits available local commands', () => {
     const results = runRebaseConfidenceAudits({
       upstreamTouchedFiles: [
         'mobile/lib/routing/router.dart',
@@ -188,8 +136,6 @@ describe('renderRequiredConfidenceChecks', () => {
       workflowTexts: {
         '.github/workflows/gallery-rc-build.yml': minimalWorkflow,
         '.github/workflows/gallery-release-server-only.yml': minimalWorkflow,
-        '.github/workflows/gallery-release-mobile.yml': minimalWorkflow,
-        '.github/workflows/gallery-build-mobile.yml': minimalWorkflow,
       },
     });
     const details = results.find(
@@ -203,22 +149,10 @@ describe('renderRequiredConfidenceChecks', () => {
       'planned Slice 3 check: make gallery-branding-check (target missing; required by docker: server/Dockerfile, machine-learning/Dockerfile)',
     );
     expect(details).toContain(
-      'gh workflow run gallery-mobile-smoke.yml --ref rebase/upstream-batch-176 (required by mobile: mobile/lib/routing/router.dart)',
-    );
-    expect(details).toContain(
       'make gallery-ml-smoke (required by docker: server/Dockerfile, machine-learning/Dockerfile; ml: machine-learning/Dockerfile)',
-    );
-    expect(details).toContain(
-      'gh workflow run gallery-ml-smoke.yml --ref rebase/upstream-batch-176 (required by docker: server/Dockerfile, machine-learning/Dockerfile; ml: machine-learning/Dockerfile)',
     );
     expect(details).not.toContain(
       'planned Slice 5 check: make gallery-ml-smoke (target missing; required by docker: server/Dockerfile, machine-learning/Dockerfile; ml: machine-learning/Dockerfile)',
-    );
-    expect(details).not.toContain(
-      'planned Slice 4 workflow: gallery-mobile-smoke.yml (workflow missing; required by mobile: mobile/lib/routing/router.dart)',
-    );
-    expect(details).not.toContain(
-      'planned Slice 5 workflow: gallery-ml-smoke.yml (workflow missing; required by docker: server/Dockerfile, machine-learning/Dockerfile; ml: machine-learning/Dockerfile)',
     );
   });
 
@@ -255,174 +189,6 @@ describe('validateGalleryWorkflowText', () => {
     );
 
     expect(result.ok).toBe(true);
-  });
-
-  it('passes for the mobile smoke workflow structure', () => {
-    const result = validateGalleryWorkflowText(
-      'gallery-mobile-smoke.yml',
-      mobileSmokeWorkflow,
-      {
-        requireDispatch: true,
-        requiredDispatchInputs: ['ref'],
-        requireBranding: true,
-        brandingBeforeMarkers: [
-          'mise //mobile:codegen',
-          'mise //mobile:analyze',
-          'mise //mobile:test',
-          'flutter build apk --debug',
-        ],
-        requiredWorkflowReferences: [
-          'immich-app/devtools/actions/use-mise',
-          'mise //mobile:install:ci',
-          'mise //mobile:codegen',
-          'mise //mobile:analyze',
-          'mise //mobile:test',
-          'flutter build apk --debug',
-        ],
-      },
-    );
-
-    expect(result.ok).toBe(true);
-  });
-
-  it('passes for the ML smoke workflow structure', () => {
-    const result = validateGalleryWorkflowText(
-      'gallery-ml-smoke.yml',
-      mlSmokeWorkflow,
-      {
-        requireDispatch: true,
-        requiredDispatchInputs: ['ref'],
-        requireBranding: true,
-        brandingBeforeMarkers: ['machine-learning/scripts/gallery-ml-smoke.sh'],
-        requiredWorkflowReferences: [
-          'docker/setup-buildx-action',
-          'machine-learning/scripts/gallery-ml-smoke.sh',
-        ],
-        requiredWorkflowName: 'Gallery ML Smoke',
-        requireRequestedRefCheckout: true,
-      },
-    );
-
-    expect(result.ok).toBe(true);
-  });
-
-  it('fails when the ML smoke workflow misses branding or the smoke script', () => {
-    const result = validateGalleryWorkflowText(
-      'gallery-ml-smoke.yml',
-      [
-        'on:',
-        '  workflow_dispatch:',
-        '    inputs:',
-        '      ref:',
-        'jobs:',
-        '  smoke:',
-        '    steps:',
-        '      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd',
-        '      - uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2',
-      ].join('\n'),
-      {
-        requireDispatch: true,
-        requiredDispatchInputs: ['ref'],
-        requireBranding: true,
-        brandingBeforeMarkers: ['machine-learning/scripts/gallery-ml-smoke.sh'],
-        requiredWorkflowReferences: [
-          'docker/setup-buildx-action',
-          'machine-learning/scripts/gallery-ml-smoke.sh',
-        ],
-        requiredWorkflowName: 'Gallery ML Smoke',
-        requireRequestedRefCheckout: true,
-      },
-    );
-
-    expect(result.ok).toBe(false);
-    expect(result.details).toContain(
-      'gallery-ml-smoke.yml is missing ./.github/actions/apply-branding',
-    );
-    expect(result.details).toContain(
-      'gallery-ml-smoke.yml is missing workflow reference machine-learning/scripts/gallery-ml-smoke.sh',
-    );
-  });
-
-  it('fails when the ML smoke workflow name is missing or wrong', () => {
-    const result = validateGalleryWorkflowText(
-      'gallery-ml-smoke.yml',
-      mlSmokeWorkflow.replace('name: Gallery ML Smoke', 'name: ML Smoke'),
-      {
-        requiredWorkflowName: 'Gallery ML Smoke',
-      },
-    );
-
-    expect(result.ok).toBe(false);
-    expect(result.details).toContain(
-      'gallery-ml-smoke.yml is missing workflow name Gallery ML Smoke',
-    );
-  });
-
-  it('fails when the ML smoke workflow does not check out the requested ref', () => {
-    const result = validateGalleryWorkflowText(
-      'gallery-ml-smoke.yml',
-      mlSmokeWorkflow.replace(
-        '          ref: ${{ inputs.ref || github.sha }}',
-        '',
-      ),
-      {
-        requireRequestedRefCheckout: true,
-      },
-    );
-
-    expect(result.ok).toBe(false);
-    expect(result.details).toContain(
-      'gallery-ml-smoke.yml is missing checkout ref: ${{ inputs.ref || github.sha }}',
-    );
-  });
-
-  it('fails when the mobile smoke workflow misses branding or generated drift checks', () => {
-    const result = validateGalleryWorkflowText(
-      'gallery-mobile-smoke.yml',
-      [
-        'on:',
-        '  workflow_dispatch:',
-        '    inputs:',
-        '      ref:',
-        'jobs:',
-        '  smoke:',
-        '    steps:',
-        '      - uses: immich-app/devtools/actions/use-mise@7b8610a904d57da241e4ddba17fa62b62b15aed4',
-        '      - run: flutter pub get',
-        '      - run: mise //mobile:codegen:dart',
-        '      - run: mise //mobile:analyze',
-        '      - run: mise //mobile:test',
-        '      - run: flutter build apk --debug',
-      ].join('\n'),
-      {
-        requireDispatch: true,
-        requiredDispatchInputs: ['ref'],
-        requireBranding: true,
-        brandingBeforeMarkers: ['flutter build apk --debug'],
-        requiredWorkflowReferences: [
-          'mise //mobile:codegen:translation',
-          'mise //mobile:codegen:pigeon',
-          'tj-actions/verify-changed-files',
-          'mobile/**/*.g.dart',
-          'mobile/**/*.gr.dart',
-          'mobile/**/*.drift.dart',
-        ],
-      },
-    );
-
-    expect(result.ok).toBe(false);
-    expect(result.details).toContain(
-      'gallery-mobile-smoke.yml is missing ./.github/actions/apply-branding',
-    );
-    expect(result.details).toContain(
-      'gallery-mobile-smoke.yml is missing workflow reference mise //mobile:codegen:translation',
-    );
-    expect(result.details).toContain(
-      'gallery-mobile-smoke.yml is missing workflow reference tj-actions/verify-changed-files',
-    );
-    expect(result.details).toContain(
-      'gallery-mobile-smoke.yml is missing workflow reference mobile/**/*.drift.dart',
-    );
   });
 
   it('fails when workflow dispatch is missing', () => {
@@ -505,59 +271,6 @@ describe('validateGalleryWorkflowText', () => {
     ]);
   });
 
-  it('fails when gallery-build-mobile branding appears after mobile build markers', () => {
-    const result = validateGalleryWorkflowText(
-      'gallery-build-mobile.yml',
-      [
-        'on:',
-        '  workflow_dispatch:',
-        'jobs:',
-        '  build:',
-        '    steps:',
-        '      - name: Build signed Android App Bundle',
-        '      - run: flutter build appbundle --release',
-        '      - uses: ./.github/actions/apply-branding',
-      ].join('\n'),
-      {
-        requireBranding: true,
-        brandingBeforeMarkers: [
-          'Build signed Android App Bundle',
-          'flutter build',
-        ],
-      },
-    );
-
-    expect(result.details).toEqual([
-      'gallery-build-mobile.yml must apply branding before Build signed Android App Bundle',
-      'gallery-build-mobile.yml must apply branding before flutter build',
-    ]);
-  });
-
-  it('fails when release-mobile stops delegating to the branded mobile build workflow', () => {
-    const result = validateGalleryWorkflowText(
-      'gallery-release-mobile.yml',
-      [
-        'on:',
-        '  workflow_dispatch:',
-        '    inputs:',
-        '      version:',
-        'jobs:',
-        '  build-mobile:',
-        '    steps:',
-        '      - run: flutter build appbundle --release',
-      ].join('\n'),
-      {
-        requireDispatch: true,
-        requiredDispatchInputs: ['version'],
-        requiredWorkflowReferences: ['gallery-build-mobile.yml'],
-      },
-    );
-
-    expect(result.details).toEqual([
-      'gallery-release-mobile.yml is missing workflow reference gallery-build-mobile.yml',
-    ]);
-  });
-
   it('reports path-specific failures for malformed workflow structure', () => {
     const result = validateGalleryWorkflowText(
       'gallery-build-mobile.yml',
@@ -600,8 +313,6 @@ describe('validateGalleryWorkflowText', () => {
       '/tmp/gallery-missing-workflows',
       {
         '.github/workflows/gallery-rc-build.yml': minimalWorkflow,
-        '.github/workflows/gallery-release-mobile.yml': minimalWorkflow,
-        '.github/workflows/gallery-build-mobile.yml': minimalWorkflow,
       },
     );
 
@@ -611,42 +322,6 @@ describe('validateGalleryWorkflowText', () => {
     );
     expect(result.details).toContain(
       '.github/workflows/gallery-release-server-only.yml is missing ./.github/actions/apply-branding',
-    );
-  });
-
-  it('requires the Gallery mobile smoke workflow in release workflow assertions', () => {
-    const result = runGalleryWorkflowAssertions(
-      '/tmp/gallery-missing-workflows',
-      {
-        '.github/workflows/gallery-rc-build.yml': minimalWorkflow,
-        '.github/workflows/gallery-release-server-only.yml': minimalWorkflow,
-        '.github/workflows/gallery-release-mobile.yml': minimalWorkflow,
-        '.github/workflows/gallery-build-mobile.yml': minimalWorkflow,
-        '.github/workflows/gallery-mobile-smoke.yml': '',
-      },
-    );
-
-    expect(result.ok).toBe(false);
-    expect(result.details).toContain(
-      '.github/workflows/gallery-mobile-smoke.yml is missing workflow_dispatch',
-    );
-  });
-
-  it('requires the Gallery ML smoke workflow in release workflow assertions', () => {
-    const result = runGalleryWorkflowAssertions(
-      '/tmp/gallery-missing-workflows',
-      {
-        '.github/workflows/gallery-rc-build.yml': minimalWorkflow,
-        '.github/workflows/gallery-release-server-only.yml': minimalWorkflow,
-        '.github/workflows/gallery-release-mobile.yml': minimalWorkflow,
-        '.github/workflows/gallery-build-mobile.yml': minimalWorkflow,
-        '.github/workflows/gallery-mobile-smoke.yml': mobileSmokeWorkflow,
-      },
-    );
-
-    expect(result.ok).toBe(false);
-    expect(result.details).toContain(
-      '.github/workflows/gallery-ml-smoke.yml is missing workflow_dispatch',
     );
   });
 
@@ -801,10 +476,6 @@ describe('runRebaseConfidenceAudits', () => {
       workflowTexts: {
         '.github/workflows/gallery-rc-build.yml': minimalWorkflow,
         '.github/workflows/gallery-release-server-only.yml': minimalWorkflow,
-        '.github/workflows/gallery-release-mobile.yml': minimalWorkflow,
-        '.github/workflows/gallery-build-mobile.yml': minimalWorkflow,
-        '.github/workflows/gallery-mobile-smoke.yml': mobileSmokeWorkflow,
-        '.github/workflows/gallery-ml-smoke.yml': mlSmokeWorkflow,
       },
     });
 
@@ -831,8 +502,6 @@ describe('runRebaseConfidenceAudits', () => {
       workflowTexts: {
         '.github/workflows/gallery-rc-build.yml': minimalWorkflow,
         '.github/workflows/gallery-release-server-only.yml': minimalWorkflow,
-        '.github/workflows/gallery-release-mobile.yml': minimalWorkflow,
-        '.github/workflows/gallery-build-mobile.yml': minimalWorkflow,
       },
       ownership: {
         manifest: ownershipManifest,
