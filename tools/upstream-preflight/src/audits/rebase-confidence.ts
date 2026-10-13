@@ -119,7 +119,7 @@ export function classifyConfidenceSurfaces(
 
 export function renderRequiredConfidenceChecks(
   matches: ConfidenceSurfaceMatch[],
-  batch = '<id>',
+  _batch = '<id>',
   availability: ConfidenceCheckAvailability = {
     makeTargets: new Set(),
   },
