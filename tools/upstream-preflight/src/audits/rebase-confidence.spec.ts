@@ -113,7 +113,7 @@ describe('renderRequiredConfidenceChecks', () => {
         'machine-learning/Dockerfile',
       ]),
       '176',
-      { makeTargets: new Set(), workflows: new Set() },
+      { makeTargets: new Set() },
     );
 
     expect(details).toContain(
