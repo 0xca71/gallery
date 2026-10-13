@@ -245,7 +245,8 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Run linter
-        run: pnpm lint
+        # Avoid Tailwind's synchronous worker timing out under ESLint multithreading.
+        run: pnpm lint --concurrency off
         if: ${{ !cancelled() }}
 
   web-unit-tests:
