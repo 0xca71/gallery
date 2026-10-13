@@ -160,7 +160,6 @@ export function renderRequiredConfidenceChecks(
     details.push(
       renderPlannedCheck(
         {
-          kind: 'make',
           name: 'gallery-ml-smoke',
           slice: 5,
           reason: reasonFor('docker', 'ml'),
