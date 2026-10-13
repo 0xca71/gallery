@@ -859,6 +859,8 @@
                     selectedCountry={filters.country}
                     selectedState={filters.state}
                     context={locationFilterContext}
+                    scopeKey={config.locationScopeKey?.()}
+                    onStateFetch={providers.states}
                     onCityFetch={async (country, ctx) => {
                       if (providers.cities) {
                         return providers.cities(country, ctx);

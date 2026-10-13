@@ -70,6 +70,7 @@ function toSuggestionRequest(filters: FilterState) {
 
 export function buildAlbumDetailFilterConfig(albumId: string): FilterPanelConfig {
   return {
+    locationScopeKey: () => JSON.stringify(['album', albumId]),
     sections: [...albumDetailSections],
     suggestionsProvider: async (filters) =>
       mapSuggestions(await getFilterSuggestions({ albumId, ...toSuggestionRequest(filters) })),
@@ -77,6 +78,8 @@ export function buildAlbumDetailFilterConfig(albumId: string): FilterPanelConfig
     // album scope.
     baselineProvider: async () => mapSuggestions(await getFilterSuggestions({ albumId })),
     providers: {
+      states: (country, context) =>
+        getSearchSuggestions({ $type: SearchSuggestionType.State, albumId, country, ...context }),
       cities: (country, context) =>
         getSearchSuggestions({ $type: SearchSuggestionType.City, albumId, country, ...context }),
       cameraModels: (make, context) =>
@@ -87,11 +90,13 @@ export function buildAlbumDetailFilterConfig(albumId: string): FilterPanelConfig
 
 export function buildAlbumAssetPickerFilterConfig(): FilterPanelConfig {
   return {
+    locationScopeKey: () => 'album-picker',
     sections: [...albumPickerSections],
     suggestionsProvider: async (filters) => mapSuggestions(await getFilterSuggestions(toSuggestionRequest(filters))),
     // #910: the picker is not scoped to anything, so the baseline is a plain, filter-free call.
     baselineProvider: async () => mapSuggestions(await getFilterSuggestions({})),
     providers: {
+      states: (country, context) => getSearchSuggestions({ $type: SearchSuggestionType.State, country, ...context }),
       cities: (country, context) => getSearchSuggestions({ $type: SearchSuggestionType.City, country, ...context }),
       cameraModels: (make, context) =>
         getSearchSuggestions({ $type: SearchSuggestionType.CameraModel, make, ...context }),

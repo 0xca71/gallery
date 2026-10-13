@@ -307,6 +307,13 @@
   }
 
   const normalProviders: NonNullable<FilterPanelConfig['providers']> = {
+    states: (country, context) =>
+      getSearchSuggestions({
+        $type: SearchSuggestionType.State,
+        country,
+        ...context,
+        ...(context?.isFavorite === undefined && { withSharedSpaces: true }),
+      }),
     cities: (country, context) =>
       getSearchSuggestions({
         $type: SearchSuggestionType.City,
@@ -325,6 +332,7 @@
 
   const filterConfig: FilterPanelConfig = {
     sections: [...ALL_FILTER_SECTIONS],
+    locationScopeKey: () => JSON.stringify(['photos', showSearchResults, committedQuery.trim(), $lang]),
     suggestionsProvider: async (nextFilters: FilterState) => {
       if (!showSearchResults) {
         return loadPhotoFilterSuggestions(nextFilters);
@@ -363,13 +371,15 @@
         const facets = await searchSmartFacets({
           smartSearchFacetsDto: buildSmartSearchFacetsParams({
             query,
-            filters: { ...filters, country },
+            filters: { ...filters, country, state: context?.state, city: undefined },
             withSharedSpaces: filters.isFavorite === undefined,
             language: $lang,
           }),
         });
         return facets.cities;
       },
+      // Smart facets have no state facet: never substitute whole-library suggestions here.
+      states: async (country, context) => (showSearchResults ? [] : (normalProviders.states?.(country, context) ?? [])),
       cameraModels: async (make, context) => {
         if (!showSearchResults) {
           return normalProviders.cameraModels?.(make, context) ?? [];

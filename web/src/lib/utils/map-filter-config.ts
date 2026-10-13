@@ -66,12 +66,20 @@ export function buildMapFilterConfig(spaceId?: string): FilterPanelConfig {
   };
 
   return {
+    locationScopeKey: () => JSON.stringify(['map', spaceId]),
     sections: [...ALL_FILTER_SECTIONS],
     suggestionsProvider,
     // #910: the baseline is the same call with the filter arguments dropped, keeping only scope.
     baselineProvider: async () =>
       mapSuggestions(await getFilterSuggestions({ ...(spaceId ? { spaceId } : { withSharedSpaces: true }) }), spaceId),
     providers: {
+      states: (country: string, context) =>
+        getSearchSuggestions({
+          $type: SearchSuggestionType.State,
+          country,
+          ...(spaceId ? { spaceId } : { withSharedSpaces: true }),
+          ...context,
+        }),
       cities: (country: string, context) =>
         getSearchSuggestions({
           $type: SearchSuggestionType.City,
