@@ -182,6 +182,7 @@ function renderPlannedCheck(
 
   return `planned Slice ${check.slice} check: ${command} (target missing; required by ${check.reason})`;
 }
+
 export function validateGalleryWorkflowText(
   workflowPath: string,
   text: string,
