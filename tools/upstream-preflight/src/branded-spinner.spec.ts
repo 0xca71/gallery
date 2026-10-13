@@ -29,6 +29,7 @@ const SWAPPED_SET = [
   'lib/modals/AlbumAddUsersModal.svelte',
   'lib/components/spaces/space-albums-list.svelte',
   'lib/components/spaces/space-search-results.svelte',
+  'lib/components/timeline/TimelineRandomButton.svelte',
   'lib/components/faces-page/AssignFaceSidePanel.svelte',
   'lib/components/faces-page/PersonSidePanel.svelte',
   'lib/components/asset-viewer/ImagePanoramaViewer.svelte',
