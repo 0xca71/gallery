@@ -64,6 +64,21 @@ describe(AssetController.name, () => {
     });
   });
 
+  describe('DELETE /assets/:id/live-photo', () => {
+    it('requires a valid photo id', async () => {
+      const { status } = await request(ctx.getHttpServer()).delete('/assets/123/live-photo');
+      expect(status).toBe(400);
+      expect(service.unlinkAndDeleteLivePhoto).not.toHaveBeenCalled();
+    });
+
+    it('routes a valid request to the unlink-and-delete operation', async () => {
+      const id = factory.uuid();
+      const { status } = await request(ctx.getHttpServer()).delete(`/assets/${id}/live-photo`);
+      expect(status).toBe(200);
+      expect(service.unlinkAndDeleteLivePhoto).toHaveBeenCalledWith(undefined, id);
+    });
+  });
+
   describe('GET /assets/:id', () => {
     it('should require a valid id', async () => {
       const { status, body } = await request(ctx.getHttpServer()).get(`/assets/123`);

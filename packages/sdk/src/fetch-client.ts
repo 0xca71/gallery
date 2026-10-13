@@ -6357,6 +6357,20 @@ export function editAsset({ id, assetEditsCreateDto }: {
     })));
 }
 /**
+ * Unlink and permanently delete a Live Photo video
+ */
+export function unlinkAndDeleteLivePhoto({ id }: {
+    id: string;
+}, opts?: Oazapfts.RequestOpts) {
+    return oazapfts.ok(oazapfts.fetchJson<{
+        status: 200;
+        data: AssetResponseDto;
+    }>(`/assets/${encodeURIComponent(id)}/live-photo`, {
+        ...opts,
+        method: "DELETE"
+    }));
+}
+/**
  * Get asset metadata
  */
 export function getAssetMetadata({ id }: {

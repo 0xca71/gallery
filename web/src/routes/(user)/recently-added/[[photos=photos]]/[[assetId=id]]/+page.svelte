@@ -48,6 +48,7 @@
     updateUnstackedAssetInTimeline,
     type OnLink,
     type OnUnlink,
+    type OnUnlinkAndDelete,
   } from '$lib/utils/actions';
   import { openFileUploadDialog } from '$lib/utils/file-uploader';
   import { withNameCapture } from '$lib/utils/filter-name-capture';
@@ -307,6 +308,11 @@
 
   const handleUnlink: OnUnlink = ({ still, motion }) => {
     timelineManager.upsertAssets([motion]);
+    timelineManager.upsertAssets([still]);
+  };
+
+  const handleUnlinkAndDelete: OnUnlinkAndDelete = ({ still, motionId }) => {
+    timelineManager.removeAssets([motionId]);
     timelineManager.upsertAssets([still]);
   };
 
@@ -590,6 +596,16 @@
             onLink={handleLink}
             onUnlink={handleUnlink}
           />
+          {#if assetMultiSelectManager.assets.length === 1}
+            <LinkLivePhotoAction
+              menuItem
+              unlink
+              deleteVideo
+              onLink={handleLink}
+              onUnlink={handleUnlink}
+              onUnlinkAndDelete={handleUnlinkAndDelete}
+            />
+          {/if}
         {/if}
         <ChangeDate menuItem />
         <ChangeDescription menuItem />

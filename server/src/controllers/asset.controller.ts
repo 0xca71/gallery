@@ -105,6 +105,19 @@ export class AssetController {
     return this.service.get(auth, id, spaceId) as Promise<AssetResponseDto>;
   }
 
+  @Delete(':id/live-photo')
+  @Authenticated({ permission: Permission.AssetDelete })
+  @HttpCode(HttpStatus.OK)
+  @Endpoint({
+    summary: 'Unlink and permanently delete a Live Photo video',
+    description:
+      'Keeps the photo and permanently deletes its associated video, including the source file for uploaded and external-library assets. Photo metadata is not rewritten.',
+    history: new HistoryBuilder().added('v3'),
+  })
+  unlinkAndDeleteLivePhoto(@Auth() auth: AuthDto, @Param() { id }: UUIDParamDto): Promise<AssetResponseDto> {
+    return this.service.unlinkAndDeleteLivePhoto(auth, id);
+  }
+
   @Put('copy')
   @Authenticated({ permission: Permission.AssetCopy })
   @HttpCode(HttpStatus.NO_CONTENT)

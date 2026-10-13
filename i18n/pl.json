@@ -3538,6 +3538,8 @@
   "unlimited": "Nieograniczony",
   "unlink_album_from_space": "Odłącz album od {space}",
   "unlink_album_from_space_confirmation": "Usunąć ten album z \"{space}\"? Pliki z tego albumu nie będą już widoczne w tym Space.",
+  "unlink_and_delete_motion_video": "Odłącz i usuń wideo",
+  "unlink_and_delete_motion_video_confirmation": "Czy chcesz zachować zdjęcie i trwale usunąć powiązane wideo oraz jego plik źródłowy? Tej czynności nie można cofnąć.",
   "unlink_motion_video": "Rozłącz ruchome wideo",
   "unlink_oauth": "Odłącz OAuth",
   "unlinked_oauth_account": "Odłączone konto OAuth",

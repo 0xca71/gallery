@@ -3471,6 +3471,8 @@
   "unlimited": "无限制",
   "unlink_album_from_space": "取消相簿与 {space} 的关联",
   "unlink_album_from_space_confirmation": "要将此相簿从“{space}”中移除吗？该相簿中的资源将不再显示在该 Space 中。",
+  "unlink_and_delete_motion_video": "解除关联并删除视频",
+  "unlink_and_delete_motion_video_confirmation": "保留照片并永久删除关联视频及其源文件？此操作无法撤销。",
   "unlink_motion_video": "取消链接动态视频",
   "unlink_oauth": "解绑 OAuth",
   "unlinked_oauth_account": "解绑 OAuth 账户",
