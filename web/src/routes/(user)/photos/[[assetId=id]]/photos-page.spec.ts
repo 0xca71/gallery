@@ -1,4 +1,5 @@
 import { AssetTypeEnum, TimeBucketSize } from '@immich/sdk';
+import { toastManager } from '@immich/ui';
 import '@testing-library/jest-dom';
 import { fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import { tick, type Component } from 'svelte';
@@ -9,6 +10,7 @@ import TestWrapper from '$lib/components/TestWrapper.svelte';
 import type { FilterState } from '$lib/components/filter-panel/filter-panel';
 import { eventManager } from '$lib/managers/event-manager.svelte';
 import { lang } from '$lib/stores/preferences.store';
+import { handleError } from '$lib/utils/handle-error';
 import { buildPhotosTimelineOptions } from '$lib/utils/photos-filter-options';
 import { storeTypedSearchNames } from '$lib/utils/typed-search/typed-search-name-cache';
 import { reactivePageMock as mockPage } from '@test-data/mocks/reactive-page.mock.svelte';
@@ -22,6 +24,7 @@ const {
   mockRegisterSelectionContext,
   mockRegisterSearchablePageFilters,
   mockOpenSearchPalette,
+  mockPickRandomTimelineAsset,
   readableFn,
 } = vi.hoisted(() => ({
   mockAssetMultiSelectManager: {
@@ -42,6 +45,7 @@ const {
   mockRegisterSelectionContext: vi.fn(),
   mockRegisterSearchablePageFilters: vi.fn(() => vi.fn()),
   mockOpenSearchPalette: vi.fn(),
+  mockPickRandomTimelineAsset: vi.fn(),
   // `memoryLaneTitle` and `getAltText` are `derived(t, ...)` stores *holding a function*, read by
   // the page as `$memoryLaneTitle(memory)` / `$getAltText(asset)`. As bare vi.fn()s they threw
   // `store_invalid_shape` the first time anything rendered the memories strip - which nothing did
@@ -56,6 +60,8 @@ const {
 }));
 
 vi.mock('$app/navigation', () => ({ goto: vi.fn().mockResolvedValue(undefined) }));
+vi.mock('$lib/utils/timeline-random-jump', () => ({ pickRandomTimelineAsset: mockPickRandomTimelineAsset }));
+vi.mock('$lib/utils/handle-error', () => ({ handleError: vi.fn() }));
 // The mock module and the spec import the SAME singleton, so assigning mockPage.url in a test is
 // what the page's $effect sees. A plain vi.hoisted object registers no signal for a Svelte 5
 // `$effect` reading `page.url.search` — without this reactive stand-in, a test that changes the URL
@@ -294,6 +300,112 @@ describe('Photos page search URL state', () => {
     });
     sdkMock.getSearchSuggestions.mockResolvedValue([]);
     sdkMock.getTimeBuckets.mockResolvedValue([]);
+  });
+
+  describe('random timeline jump', () => {
+    beforeEach(() => {
+      mockPage.reset('https://gallery.test/photos?rating=4&tags=tag-1&year=2024&sort=asc', {
+        routeId: '/(user)/photos/[[assetId=id]]',
+      });
+      mockPickRandomTimelineAsset.mockResolvedValue({ id: 'random-asset' });
+      vi.spyOn(toastManager, 'info').mockImplementation(() => {});
+    });
+
+    it('adds at to the existing filtered URL without opening the viewer', async () => {
+      renderPage();
+      await fireEvent.click(await screen.findByTestId('timeline-random-button'));
+
+      await waitFor(() => expect(goto).toHaveBeenCalledOnce());
+      const [destination, navigationOptions] = vi.mocked(goto).mock.calls[0];
+      const url = new URL(String(destination), mockPage.url);
+      expect(url.pathname).toBe('/photos');
+      expect(Object.fromEntries(url.searchParams)).toEqual({
+        rating: '4',
+        tags: 'tag-1',
+        year: '2024',
+        sort: 'asc',
+        at: 'random-asset',
+      });
+      expect(navigationOptions).toMatchObject({ forceNavigate: true, noScroll: true, keepFocus: true });
+    });
+
+    it.each(['year', 'month'])('switches %s grouping to All while preserving temporal filters', async (grouping) => {
+      renderPage();
+      await fireEvent.click(await screen.findByTestId(`timeline-grouping-${grouping}`));
+      await fireEvent.click(screen.getByTestId('timeline-random-button'));
+
+      await waitFor(() => expect(goto).toHaveBeenCalledOnce());
+      expect(screen.getByTestId('timeline-options')).toHaveTextContent('"grouping":"day"');
+      expect(screen.getByTestId('timeline-options')).toHaveTextContent('"takenAfter"');
+      expect(screen.getByTestId('timeline-anchor')).toHaveTextContent('null');
+    });
+
+    it('prevents duplicate requests and lets a single asset be located again at the same URL', async () => {
+      mockPage.url = new URL('https://gallery.test/photos?at=random-asset');
+      let resolveAsset!: (asset: { id: string }) => void;
+      mockPickRandomTimelineAsset.mockReturnValueOnce(new Promise((resolve) => (resolveAsset = resolve)));
+      renderPage();
+      const button = await screen.findByTestId('timeline-random-button');
+      await fireEvent.click(button);
+      await waitFor(() => expect(mockPickRandomTimelineAsset).toHaveBeenCalledOnce());
+      expect(button).toBeDisabled();
+      await fireEvent.click(button);
+      expect(mockPickRandomTimelineAsset).toHaveBeenCalledOnce();
+
+      resolveAsset({ id: 'random-asset' });
+      await waitFor(() => expect(button).toBeEnabled());
+      await fireEvent.click(button);
+      await waitFor(() => expect(goto).toHaveBeenCalledTimes(2));
+      expect(mockPickRandomTimelineAsset.mock.calls[0][1]).toBe('random-asset');
+      expect(vi.mocked(goto).mock.calls[1][1]).toMatchObject({ forceNavigate: true });
+    });
+
+    it('ignores an old random result when the filters change during loading', async () => {
+      let resolveAsset!: (asset: { id: string }) => void;
+      mockPickRandomTimelineAsset.mockReturnValue(new Promise((resolve) => (resolveAsset = resolve)));
+      renderPage();
+      await fireEvent.click(await screen.findByTestId('timeline-random-button'));
+      await waitFor(() => expect(mockPickRandomTimelineAsset).toHaveBeenCalledOnce());
+
+      mockPage.url = new URL('https://gallery.test/photos?rating=5');
+      await waitFor(() => expect(screen.getByTestId('timeline-random-button')).toBeEnabled());
+      resolveAsset({ id: 'old-asset' });
+      await tick();
+      expect(goto).not.toHaveBeenCalled();
+    });
+
+    it('reports empty filtered results without navigating', async () => {
+      mockPage.url = new URL('https://gallery.test/photos?tags=tag-no-match');
+      renderPage();
+      await fireEvent.click(await screen.findByTestId('timeline-random-button'));
+
+      await waitFor(() => expect(toastManager.info).toHaveBeenCalledOnce());
+      expect(mockPickRandomTimelineAsset).not.toHaveBeenCalled();
+      expect(goto).not.toHaveBeenCalled();
+    });
+
+    it('restores the button after a failed bucket load', async () => {
+      mockPickRandomTimelineAsset.mockRejectedValue(new Error('bucket unavailable'));
+      renderPage();
+      const button = await screen.findByTestId('timeline-random-button');
+      await fireEvent.click(button);
+
+      await waitFor(() => expect(handleError).toHaveBeenCalledOnce());
+      expect(button).toBeEnabled();
+      expect(goto).not.toHaveBeenCalled();
+    });
+
+    it('is hidden in keyword search and selection mode', () => {
+      mockPage.url = new URL('https://gallery.test/photos?q=nature');
+      const view = renderPage();
+      expect(screen.queryByTestId('timeline-random-button')).toBeNull();
+      view.unmount();
+
+      mockPage.url = new URL('https://gallery.test/photos');
+      mockAssetMultiSelectManager.selectionActive = true;
+      renderPage();
+      expect(screen.queryByTestId('timeline-random-button')).toBeNull();
+    });
   });
 
   it('renders search results from q without a local search input', () => {

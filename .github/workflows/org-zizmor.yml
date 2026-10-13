@@ -5,12 +5,37 @@ on:
   push:
     branches: [main]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
 jobs:
   zizmor:
-    name: Zizmor
-    uses: immich-app/devtools/.github/workflows/shared-zizmor.yml@f852dea251d00397830d83977184b6551e84589c # main
+    name: Zizmor / zizmor
+    runs-on: ubuntu-latest
     permissions:
-      actions: read
       contents: read
-      security-events: write
-    secrets: inherit
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@6ee6290f1cbc4156c0bdd66691b2c144ef8df19a # v7.4.0
+
+      - name: Audit GitHub Actions
+        # SARIF mode reports findings in the file; audit errors still fail this step.
+        run: uvx zizmor@1.30.1 --format=sarif . > results.sarif
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Save audit report
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: zizmor-report
+          path: results.sarif
+          if-no-files-found: error
+          retention-days: 7

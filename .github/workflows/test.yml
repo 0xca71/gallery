@@ -151,6 +151,9 @@ jobs:
 
       - name: Run ci-unit
         run: mise run //server:ci-unit
+        env:
+          # Type-aware server lint exceeds Node's default heap on the CI runner.
+          NODE_OPTIONS: --max-old-space-size=4096
 
   cli-unit-tests:
     name: Unit Test CLI
@@ -245,7 +248,8 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Run linter
-        run: pnpm lint
+        # Avoid Tailwind's synchronous worker timing out under ESLint multithreading.
+        run: pnpm lint --concurrency off
         if: ${{ !cancelled() }}
 
   web-unit-tests:

@@ -44,6 +44,8 @@
       months: empty ? [] : [{ yearMonth: { year: 2024, month: 4 }, assetsCount: 2 }],
       assetCount: empty || monthsOnly ? 0 : 2,
       isInitialized: true,
+      initTask: { waitUntilCompletion: () => Promise.resolve() },
+      isInitializedForOptions: () => true,
       // Stub is always "settled" for the current options, so empty ⇔ assetCount === 0.
       isEmptyForOptions: () => empty || monthsOnly,
       showAssetOwners: false,

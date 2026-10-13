@@ -79,6 +79,10 @@
   import { getTimelineBucketZoomTarget, type ActivatableTimelineBucket } from '$lib/utils/timeline-zoom-navigation';
   import { getTimelineTopVisibleAnchor } from '$lib/managers/timeline-manager/timeline-anchor';
   import { toTimelineAsset } from '$lib/utils/timeline-util';
+  import { withoutAtParam } from '$lib/utils/filter-target';
+  import { handleError } from '$lib/utils/handle-error';
+  import { navigate } from '$lib/utils/navigation';
+  import { pickRandomTimelineAsset } from '$lib/utils/timeline-random-jump';
   import {
     type AssetResponseDto,
     AssetTypeEnum,
@@ -90,14 +94,14 @@
     SearchSuggestionType,
     type SmartSearchFacetsResponseDto,
   } from '@immich/sdk';
-  import { ActionButton, CommandPaletteDefaultProvider, ImageCarousel, modalManager } from '@immich/ui';
+  import { ActionButton, CommandPaletteDefaultProvider, ImageCarousel, modalManager, toastManager } from '@immich/ui';
   import SearchAddAllToCollectionModal from '$lib/modals/SearchAddAllToCollectionModal.svelte';
   import { resolveFilterNames } from '$lib/utils/filter-name-resolution';
   import { filterStateToSearchTerms } from '$lib/utils/filter-search-terms';
   import type { SearchTerms } from '$lib/services/search.service';
   import { mdiDotsVertical } from '@mdi/js';
   import { DateTime } from 'luxon';
-  import { untrack } from 'svelte';
+  import { onDestroy, tick, untrack } from 'svelte';
   import { t } from 'svelte-i18n';
   import { SvelteMap } from 'svelte/reactivity';
 
@@ -149,6 +153,99 @@
     ...buildPhotosTimelineOptions(filters, authManager.user.id),
     grouping: timelineGrouping,
   });
+  let isRandomJumping = $state(false);
+  let randomJumpSequence = 0;
+  let activeRandomContext = '';
+  const randomContext = $derived(
+    JSON.stringify([
+      page.url.pathname,
+      withoutAtParam(page.url.search),
+      committedQuery,
+      { ...options, grouping: undefined },
+    ]),
+  );
+
+  $effect(() => {
+    if (!isRandomJumping) {
+      return;
+    }
+    if (
+      randomContext === activeRandomContext &&
+      timelineGrouping === 'day' &&
+      !showSearchResults &&
+      !assetMultiSelectManager.selectionActive &&
+      !assetViewerManager.isViewing
+    ) {
+      return;
+    }
+    randomJumpSequence++;
+    isRandomJumping = false;
+  });
+  onDestroy(() => randomJumpSequence++);
+
+  async function handleRandomJump() {
+    if (isRandomJumping || showSearchResults || assetMultiSelectManager.selectionActive || !timelineManager) {
+      return;
+    }
+
+    const sequence = ++randomJumpSequence;
+    const context = randomContext;
+    const manager = timelineManager;
+    const previousAssetId = page.url.searchParams.get('at');
+    activeRandomContext = context;
+    temporalAnchor = undefined;
+    timelineGrouping = 'day';
+    isRandomJumping = true;
+
+    const isCurrent = () =>
+      sequence === randomJumpSequence &&
+      context === randomContext &&
+      manager === timelineManager &&
+      timelineGrouping === 'day' &&
+      !showSearchResults &&
+      !assetMultiSelectManager.selectionActive &&
+      !assetViewerManager.isViewing;
+
+    try {
+      // Let Timeline apply day grouping/current filters before waiting for its bucket query.
+      await tick();
+      if (!isCurrent()) {
+        return;
+      }
+      await manager.initTask.waitUntilCompletion();
+      if (!isCurrent()) {
+        return;
+      }
+      if (!manager.isInitializedForOptions(options)) {
+        throw new Error('The filtered timeline is not ready');
+      }
+      if (manager.assetCount === 0) {
+        toastManager.info($t('no_results'));
+        return;
+      }
+
+      const asset = await pickRandomTimelineAsset(manager, previousAssetId, isCurrent);
+      if (!isCurrent()) {
+        return;
+      }
+      if (!asset) {
+        throw new Error('The random timeline asset could not be loaded');
+      }
+
+      await navigate(
+        { targetRoute: 'current', assetId: null, assetGridRouteSearchParams: { at: asset.id } },
+        { forceNavigate: true, noScroll: true, keepFocus: true },
+      );
+    } catch (error) {
+      if (isCurrent()) {
+        handleError(error, $t('errors.failed_to_load_assets'));
+      }
+    } finally {
+      if (sequence === randomJumpSequence) {
+        isRandomJumping = false;
+      }
+    }
+  }
   $effect(() => {
     filtersBeforePanelChange = filters;
   });
@@ -684,6 +781,7 @@
         class="mb-2"
         grouping={timelineGrouping}
         onGroupingChange={handleTimelineGroupingChange}
+        groupingDisabled={isRandomJumping}
         showGrouping={!showSearchResults && !assetMultiSelectManager.selectionActive}
         showFilters={hasActiveFilters}
         filters={photoFiltersBar}
@@ -692,6 +790,9 @@
         onExpandFilters={() => (filterCollapsed = false)}
         showSearchButton={!assetMultiSelectManager.selectionActive}
         onSearch={() => globalSearchManager.open()}
+        showRandomButton={!showSearchResults && !assetMultiSelectManager.selectionActive}
+        randomLoading={isRandomJumping}
+        onRandom={() => void handleRandomJump()}
       />
       {#if showSearchResults}
         <SmartSearchResults
