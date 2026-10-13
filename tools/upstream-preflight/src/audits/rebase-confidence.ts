@@ -47,15 +47,12 @@ export type StrictOwnershipConfidenceInput = {
 
 export type ConfidenceCheckAvailability = {
   makeTargets: ReadonlySet<string>;
-  workflows: ReadonlySet<string>;
 };
 
 type PlannedCheck = {
-  kind: 'make' | 'workflow';
   name: string;
   slice: number;
   reason: string;
-  command?: string;
 };
 
 const requestedRefCheckout = 'ref: ${{ inputs.ref || github.sha }}';
@@ -86,8 +83,6 @@ const surfaceGlobs: Record<ConfidenceSurface, string[]> = {
   release: [
     '.github/workflows/gallery-rc-build.yml',
     '.github/workflows/gallery-release-server-only.yml',
-    '.github/workflows/gallery-release-mobile.yml',
-    '.github/workflows/gallery-build-mobile.yml',
   ],
 };
 
@@ -109,50 +104,7 @@ const workflowAssertions: Record<string, WorkflowAssertionOptions> = {
     requireServerImage: true,
     requireMlImage: true,
   },
-  '.github/workflows/gallery-release-mobile.yml': {
-    requireDispatch: true,
-    requiredDispatchInputs: ['version'],
-    requiredWorkflowReferences: ['gallery-build-mobile.yml'],
-  },
-  '.github/workflows/gallery-build-mobile.yml': {
-    requireDispatch: true,
-    requiredDispatchInputs: ['environment', 'version', 'build_target'],
-    requireBranding: true,
-    brandingBeforeMarkers: ['Build signed Android App Bundle', 'flutter build'],
-  },
-  '.github/workflows/gallery-mobile-smoke.yml': {
-    requireDispatch: true,
-    requiredDispatchInputs: ['ref'],
-    requireBranding: true,
-    brandingBeforeMarkers: [
-      'mise //mobile:codegen',
-      'mise //mobile:analyze',
-      'mise //mobile:test',
-      'flutter build apk --debug',
-    ],
-    requiredWorkflowReferences: [
-      'immich-app/devtools/actions/use-mise',
-      'mise //mobile:install:ci',
-      'mise //mobile:codegen',
-      'mise //mobile:analyze',
-      'mise //mobile:test',
-      'flutter build apk --debug',
-    ],
-  },
-  '.github/workflows/gallery-ml-smoke.yml': {
-    requireDispatch: true,
-    requiredDispatchInputs: ['ref'],
-    requiredWorkflowName: 'Gallery ML Smoke',
-    requireRequestedRefCheckout: true,
-    requireBranding: true,
-    brandingBeforeMarkers: ['machine-learning/scripts/gallery-ml-smoke.sh'],
-    requiredWorkflowReferences: [
-      'docker/setup-buildx-action',
-      'machine-learning/scripts/gallery-ml-smoke.sh',
-    ],
-  },
 };
-
 export function classifyConfidenceSurfaces(
   files: string[],
 ): ConfidenceSurfaceMatch[] {
@@ -170,7 +122,6 @@ export function renderRequiredConfidenceChecks(
   batch = '<id>',
   availability: ConfidenceCheckAvailability = {
     makeTargets: new Set(),
-    workflows: new Set(),
   },
 ): string[] {
   if (matches.length === 0) {
@@ -197,7 +148,6 @@ export function renderRequiredConfidenceChecks(
     details.push(
       renderPlannedCheck(
         {
-          kind: 'make',
           name: 'gallery-branding-check',
           slice: 3,
           reason: reasonFor('branding', 'release', 'docker'),
@@ -219,35 +169,6 @@ export function renderRequiredConfidenceChecks(
       ),
     );
   }
-  if (bySurface.has('mobile') || bySurface.has('branding')) {
-    details.push(
-      renderPlannedCheck(
-        {
-          kind: 'workflow',
-          name: 'gallery-mobile-smoke.yml',
-          slice: 4,
-          reason: reasonFor('mobile', 'branding'),
-          command: `gh workflow run gallery-mobile-smoke.yml --ref rebase/upstream-batch-${batch}`,
-        },
-        availability,
-      ),
-    );
-  }
-  if (bySurface.has('ml') || bySurface.has('docker')) {
-    details.push(
-      renderPlannedCheck(
-        {
-          kind: 'workflow',
-          name: 'gallery-ml-smoke.yml',
-          slice: 5,
-          reason: reasonFor('docker', 'ml'),
-          command: `gh workflow run gallery-ml-smoke.yml --ref rebase/upstream-batch-${batch}`,
-        },
-        availability,
-      ),
-    );
-  }
-
   return details;
 }
 
@@ -255,22 +176,13 @@ function renderPlannedCheck(
   check: PlannedCheck,
   availability: ConfidenceCheckAvailability,
 ): string {
-  if (check.kind === 'make') {
-    const command = `make ${check.name}`;
-    if (availability.makeTargets.has(check.name)) {
-      return `${command} (required by ${check.reason})`;
-    }
-
-    return `planned Slice ${check.slice} check: ${command} (target missing; required by ${check.reason})`;
+  const command = `make ${check.name}`;
+  if (availability.makeTargets.has(check.name)) {
+    return `${command} (required by ${check.reason})`;
   }
 
-  if (availability.workflows.has(check.name)) {
-    return `${check.command} (required by ${check.reason})`;
-  }
-
-  return `planned Slice ${check.slice} workflow: ${check.name} (workflow missing; required by ${check.reason})`;
+  return `planned Slice ${check.slice} check: ${command} (target missing; required by ${check.reason})`;
 }
-
 export function validateGalleryWorkflowText(
   workflowPath: string,
   text: string,
@@ -483,7 +395,6 @@ function readConfidenceCheckAvailability(
 ): ConfidenceCheckAvailability {
   return {
     makeTargets: readMakeTargets(path.join(cwd, 'Makefile')),
-    workflows: readWorkflowFiles(path.join(cwd, '.github/workflows')),
   };
 }
 
@@ -498,12 +409,3 @@ function readMakeTargets(makefilePath: string): Set<string> {
   );
 }
 
-function readWorkflowFiles(workflowDir: string): Set<string> {
-  if (!fs.existsSync(workflowDir)) return new Set();
-
-  return new Set(
-    fs
-      .readdirSync(workflowDir)
-      .filter((entry) => entry.endsWith('.yml') || entry.endsWith('.yaml')),
-  );
-}
