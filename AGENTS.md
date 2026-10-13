@@ -248,9 +248,8 @@ Upstream Immich references are rewritten to Gallery at build time by `branding/a
 
 ## Releases & Deploys
 
-- **Release workflows** (manual `workflow_dispatch`, triggered from `main`): mobile and server release **independently** — no draft handoff, no auto-versioning (versions are always supplied manually).
-  - **Release Mobile** (`.github/workflows/gallery-release-mobile.yml`): takes a required `version`, builds + signs the Android AAB/APK and iOS IPA, uploads the AAB to Play internal and the IPA to TestFlight, keeps the APK as a workflow artifact, and records the built commit SHA in the run summary. Creates no GitHub Release or git tag.
-  - **Release Gallery Server** (`.github/workflows/gallery-release-server-only.yml`): takes a required `version` and an optional `commit` (defaults to branch HEAD; pass the SHA the mobile run recorded to ship a matching build). Builds + pushes `gallery-server` / `gallery-ml` / `gallery-ml:*-cuda`, moves the `vX.Y.Z` / `vX` / `release` tags, creates the GitHub Release, and flips the version endpoint self-hosted instances poll. See `specs/2026-05-18-decoupled-release-design.md`.
+- **Release workflows** (manual `workflow_dispatch`, triggered from `main`): server releases are maintained; iOS/Android App Actions have been removed (versions are supplied manually).
+  - **Release Gallery Server** (`.github/workflows/gallery-release-server-only.yml`): takes a required `version` and an optional `commit` (defaults to branch HEAD). Builds + pushes `gallery-server` / `gallery-ml` / `gallery-ml:*-cuda`, moves the `vX.Y.Z` / `vX` / `release` tags, creates the GitHub Release, and flips the version endpoint self-hosted instances poll. See `specs/2026-05-18-decoupled-release-design.md`.
 - **Deploy targets**: `demo.opennoodle.de` (demo), `docs.opennoodle.de` (Docusaurus). Each has a corresponding skill in `.claude/skills/` (see `/deploy-gallery-*` slash commands).
 - **RC builds**: `rc-personal` skill ships a tagged server image to the personal instance via a compose override — remember to remove the override after merge or release deploys will ship stale RC images.
 - **Automatic PR RC builds**: labelling a PR `rc` builds `ghcr.io/open-noodle/gallery-server:pr-<number>-rc.<n>` from the PR head on every push and keeps one sticky PR comment with tester instructions plus a history of earlier RCs; add `rc-ml` to also build `gallery-ml` under the same tag. **Tags are immutable** — `n` increments per build (resolved from the tags already in GHCR, never from the comment), so a tester can stay on or roll back to an earlier RC. There is no floating `pr-<number>` tag. All of a PR's RC images are deleted from GHCR when it closes. See `.github/workflows/gallery-pr-rc-comment.yml` and `gallery-pr-rc-cleanup.yml`.
@@ -258,7 +257,7 @@ Upstream Immich references are rewritten to Gallery at build time by `branding/a
 ## Internal Design Docs (`specs/`)
 
 `specs/` holds the fork's internal engineering record. It is deliberately **outside `docs/`** so it is
-neither published to `docs.opennoodle.de`, prettier-gated, nor a trigger for the Docs Build workflow.
+neither published to `docs.opennoodle.de` nor subject to published-doc formatting checks.
 
 ```
 specs/                      design docs — one per feature/decision, durable
@@ -287,6 +286,6 @@ doc that has gone stale loses nothing. A stale doc that stays costs every future
 ## Contributing & Docs
 
 - `CONTRIBUTING.md` and the README's Contributing section cover the dev-environment setup (`cp docker/example.env docker/.env`, `pnpm install`, `make dev`).
-- User-facing docs live in `docs/docs/` and are deployed to `docs.opennoodle.de`. Run prettier on any markdown under `docs/` before committing — CI Docs Build is strict. `specs/` is outside `docs/` precisely so it is _not_ prettier-gated and does not trigger the Docs Build workflow.
+- User-facing docs live in `docs/docs/` and are deployed to `docs.opennoodle.de`. Run prettier on any markdown under `docs/` before committing — check formatting locally. `specs/` is outside `docs/` precisely so it is _not_ prettier-gated and is not part of the published documentation.
 - Guides for switching to / from Gallery live under `docs/docs/guides/` — the switch-back-to-immich script is at `scripts/revert-to-immich/`.
 - The README's "What's Different from Upstream Immich" section must stay in feature parity with the marketing site (source of truth: `apps/marketing/src/data/features.ts` + `apps/marketing/src/pages/features/*.astro` in the `platform` repo) and mirror the grouping of the `noodle-gallery-vs-immich` comparison post. When a feature launches there (see the `launch-new-feature` skill), update this README too. Each feature links to `https://opennoodle.de/features/<marketing-slug>` and, where one exists, `https://docs.opennoodle.de/features/<docs-slug>` — note docs slugs can differ from marketing slugs (e.g. `dynamic-filters`→`dynamic-filter-suggestions`, `image-editing`/`video-trimming`→`editing`, `connected-libraries`→`libraries`, memories→`memories`, mobile apps→`mobile-app`).
