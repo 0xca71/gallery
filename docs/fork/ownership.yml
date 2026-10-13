@@ -310,8 +310,6 @@ features:
       - web/src/lib/modals/UserGroupModal.svelte
       - .github/workflows/gallery-*.yml
       - .github/workflows/storage-migration*.yml
-      - .github/workflows/docs-build.yml
-      - .github/workflows/docs-deploy.yml
       - server/src/schema/migrations-gallery/**
       - server/bin/sync-gallery-migrations.mjs
       - tools/upstream-preflight/**
