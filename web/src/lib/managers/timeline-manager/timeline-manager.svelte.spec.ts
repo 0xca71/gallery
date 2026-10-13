@@ -4,6 +4,7 @@ import {
   TimeBucketSize,
   type AssetResponseDto,
   type TimeBucketAssetResponseDto,
+  type TimeBucketsResponseDto,
 } from '@immich/sdk';
 import { Settings } from 'luxon';
 import { tick } from 'svelte';
@@ -141,6 +142,31 @@ describe('TimelineManager', () => {
     it('is not empty before any options have loaded', () => {
       const timelineManager = new TimelineManager();
       expect(timelineManager.isEmptyForOptions({ visibility: AssetVisibility.Timeline })).toBe(false);
+    });
+  });
+
+  describe('isInitializedForOptions', () => {
+    it('only accepts the filters and grouping whose bucket query has completed', async () => {
+      const timelineManager = new TimelineManager();
+      const loadedOptions = { visibility: AssetVisibility.Timeline, personIds: ['person-1'], grouping: 'day' as const };
+      sdkMock.getTimeBuckets.mockResolvedValue([{ timeBucket: '2024-01-01', count: 1 }]);
+
+      expect(timelineManager.isInitializedForOptions(loadedOptions)).toBe(false);
+      await timelineManager.updateOptions(loadedOptions);
+      expect(timelineManager.isInitializedForOptions(loadedOptions)).toBe(true);
+      expect(timelineManager.isInitializedForOptions({ ...loadedOptions, personIds: ['person-2'] })).toBe(false);
+      expect(timelineManager.isInitializedForOptions({ ...loadedOptions, grouping: 'year' })).toBe(false);
+
+      let finish!: (buckets: TimeBucketsResponseDto[]) => void;
+      sdkMock.getTimeBuckets.mockReturnValueOnce(new Promise((resolve) => (finish = resolve)));
+      const nextOptions = { ...loadedOptions, personIds: ['person-2'] };
+      const reload = timelineManager.updateOptions(nextOptions);
+      await Promise.resolve();
+      expect(timelineManager.isInitializedForOptions(nextOptions)).toBe(false);
+      finish([{ timeBucket: '2024-01-01', count: 2 }]);
+      await reload;
+      expect(timelineManager.isInitializedForOptions(nextOptions)).toBe(true);
+      timelineManager.destroy();
     });
   });
 

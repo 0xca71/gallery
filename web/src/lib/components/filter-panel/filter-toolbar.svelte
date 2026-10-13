@@ -2,6 +2,7 @@
   import FilterToggleButton from '$lib/components/filter-panel/filter-toggle-button.svelte';
   import ScopedSearchButton from '$lib/components/search/scoped-search-button.svelte';
   import TimelineGroupingControl from '$lib/components/timeline/TimelineGroupingControl.svelte';
+  import TimelineRandomButton from '$lib/components/timeline/TimelineRandomButton.svelte';
   import type { TimelineGrouping } from '$lib/managers/timeline-manager/types';
   import type { Snippet } from 'svelte';
   import { twMerge } from 'tailwind-merge';
@@ -23,6 +24,9 @@
     // icon that silently searched the whole library from inside them would be a lie.
     showSearchButton?: boolean;
     onSearch?: () => void;
+    showRandomButton?: boolean;
+    randomLoading?: boolean;
+    onRandom?: () => void;
   }
 
   let {
@@ -38,12 +42,16 @@
     onExpandFilters,
     showSearchButton = false,
     onSearch,
+    showRandomButton = false,
+    randomLoading = false,
+    onRandom,
   }: Props = $props();
 
   const searchButtonVisible = $derived(showSearchButton && onSearch !== undefined);
+  const randomButtonVisible = $derived(showRandomButton && onRandom !== undefined);
 </script>
 
-{#if showGrouping || showFilters || (showFilterButton && onExpandFilters) || searchButtonVisible}
+{#if showGrouping || showFilters || (showFilterButton && onExpandFilters) || searchButtonVisible || randomButtonVisible}
   <!--
     Root display is responsive-by-intent:
     - showFilters → `flex` (visible on ALL sizes, so the chip bar still shows on mobile)
@@ -95,11 +103,17 @@
       </div>
     {/if}
 
+    {#if randomButtonVisible}
+      <div class="hidden md:flex md:items-center" data-testid="filter-toolbar-random">
+        <TimelineRandomButton loading={randomLoading} onclick={() => onRandom?.()} />
+      </div>
+    {/if}
+
     {#if showFilters}
       <!-- The separator divides the leading controls from the chip bar, so it must follow whichever
            of them is present — the grouping pill OR the search button (search mode drops the pill
            but keeps the button). -->
-      {#if showGrouping || searchButtonVisible}
+      {#if showGrouping || searchButtonVisible || randomButtonVisible}
         <span
           class="hidden h-5 w-px shrink-0 bg-gray-200/70 md:block dark:bg-white/10"
           data-testid="filter-toolbar-separator"

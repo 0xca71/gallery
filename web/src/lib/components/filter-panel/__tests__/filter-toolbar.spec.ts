@@ -119,6 +119,47 @@ describe('FilterToolbar', () => {
   });
 
   // --- scoped search button (#1051) ---
+  describe('random jump button', () => {
+    it('only appears when opted in and sits after the scoped search button', async () => {
+      const onRandom = vi.fn();
+      render(FilterToolbar, {
+        grouping: 'day',
+        onGroupingChange: vi.fn(),
+        showSearchButton: true,
+        onSearch: vi.fn(),
+        showRandomButton: true,
+        onRandom,
+      });
+
+      const random = screen.getByTestId('timeline-random-button');
+      expect(
+        screen.getByTestId('scoped-search-button').compareDocumentPosition(random) & Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy();
+      await fireEvent.click(random);
+      expect(onRandom).toHaveBeenCalledOnce();
+    });
+
+    it('disables the button and displays loading feedback during a jump', () => {
+      render(FilterToolbar, {
+        grouping: 'day',
+        onGroupingChange: vi.fn(),
+        showRandomButton: true,
+        randomLoading: true,
+        onRandom: vi.fn(),
+      });
+
+      expect(screen.getByTestId('timeline-random-button')).toBeDisabled();
+      expect(screen.getByTestId('timeline-random-button')).toHaveAttribute('aria-busy', 'true');
+      expect(screen.getByTestId('loading-spinner')).toBeInTheDocument();
+    });
+
+    it('does not add random controls to other timeline toolbars by default', () => {
+      render(FilterToolbar, { grouping: 'day', onGroupingChange: vi.fn() });
+
+      expect(screen.queryByTestId('timeline-random-button')).toBeNull();
+    });
+  });
+
   //
   // The scoped search already worked from the nav bar; what it lacked was an affordance ON the
   // surface being searched. The button sits with the grouping pill, YouTube-channel style.

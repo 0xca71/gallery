@@ -399,12 +399,11 @@ export class TimelineManager extends VirtualScrollManager {
    * user is typing in. Gating on the loaded options closing that window.
    */
   isEmptyForOptions(options: TimelineManagerOptions): boolean {
-    return (
-      this.isInitialized &&
-      this.assetCount === 0 &&
-      this.#options !== TimelineManager.#INIT_OPTIONS &&
-      isEqual(this.#options, options)
-    );
+    return this.assetCount === 0 && this.isInitializedForOptions(options);
+  }
+
+  isInitializedForOptions(options: TimelineManagerOptions): boolean {
+    return this.isInitialized && this.#options !== TimelineManager.#INIT_OPTIONS && isEqual(this.#options, options);
   }
 
   async updateOptions(options: TimelineManagerOptions) {
