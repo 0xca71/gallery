@@ -58,12 +58,16 @@
   const matches = (value: string) => value.toLowerCase().includes(query);
 
   function drain() {
-    while (!disposed && activeRequests < MAX_CONCURRENT_REQUESTS && queue.length > 0) queue.shift()!();
+    while (!disposed && activeRequests < MAX_CONCURRENT_REQUESTS && queue.length > 0) {
+      queue.shift()!();
+    }
   }
 
   function ensure(kind: 'states' | 'cities', country: string, state?: string, retry = false) {
     const key = kind === 'states' ? stateKey(country) : cityKey(country, state);
-    if (Object.hasOwn(cache, key) || pending[key] || (errors[key] && !retry)) return;
+    if (Object.hasOwn(cache, key) || pending[key] || (errors[key] && !retry)) {
+      return;
+    }
     const requestGeneration = generation;
     const fetcher = kind === 'states' ? onStateFetch : onCityFetch;
     const requestContext = state ? { ...context, state } : context;
@@ -74,12 +78,16 @@
       void Promise.resolve()
         .then(() => fetcher?.(country, requestContext) ?? [])
         .then((values) => {
-          if (disposed || generation !== requestGeneration) return;
+          if (disposed || generation !== requestGeneration) {
+            return;
+          }
           cache = { ...cache, [key]: [...new Set(values.filter(Boolean))] };
           pending = { ...pending, [key]: false };
         })
         .catch(() => {
-          if (disposed || generation !== requestGeneration) return;
+          if (disposed || generation !== requestGeneration) {
+            return;
+          }
           pending = { ...pending, [key]: false };
           errors = { ...errors, [key]: true };
         })
@@ -117,7 +125,9 @@
   $effect(() => {
     const single = countries.length === 1 ? countries[0] : undefined;
     untrack(() => {
-      if (single && manualCountries[single] === undefined) expandedCountry = single;
+      if (single && manualCountries[single] === undefined) {
+        expandedCountry = single;
+      }
     });
   });
 
@@ -127,27 +137,38 @@
     const state = selectedState;
     const city = selectedCity;
     untrack(() => {
-      if (!country || (!state && !city)) return;
+      if (!country || (!state && !city)) {
+        return;
+      }
       expandedCountry = country;
-      if (state && city) expandedStates = { ...expandedStates, [country]: state };
+      if (state && city) {
+        expandedStates = { ...expandedStates, [country]: state };
+      }
       if (!state && city) {
         expandedAllCities = { ...expandedAllCities, [country]: true };
       }
     });
-    if (country && city && !state) ensure('cities', country);
+    if (country && city && !state) {
+      ensure('cities', country);
+    }
   });
 
   $effect(() => {
-    cacheKey;
-    if (!expandedCountry || !countries.includes(expandedCountry)) return;
+    if (!cacheKey || !expandedCountry || !countries.includes(expandedCountry)) {
+      return;
+    }
     const country = expandedCountry;
     const state = expandedStates[country];
     const allCities = expandedAllCities[country];
     const legacy = !onStateFetch;
     untrack(() => {
       ensure('states', country);
-      if (state) ensure('cities', country, state);
-      if (allCities || legacy) ensure('cities', country);
+      if (state) {
+        ensure('cities', country, state);
+      }
+      if (allCities || legacy) {
+        ensure('cities', country);
+      }
     });
   });
 
@@ -157,7 +178,9 @@
     const country = selectedCountry;
     const city = selectedCity;
     const state = selectedState;
-    cacheKey;
+    if (!cacheKey) {
+      return;
+    }
     if (country && city && countries.includes(country) && !selectedState) {
       untrack(() => ensure('cities', country));
     }
@@ -169,14 +192,17 @@
   // Search is debounced. Country-wide cities locate matching countries; only those countries
   // need per-state city requests to resolve the hierarchy. All requests share a bounded queue.
   $effect(() => {
-    cacheKey;
-    if (!searchChildren) return;
+    if (!cacheKey || !searchChildren) {
+      return;
+    }
     const currentQuery = query;
     const currentCountries = countries;
     const timeout = setTimeout(
       () =>
         untrack(() => {
-          if (query !== currentQuery) return;
+          if (query !== currentQuery) {
+            return;
+          }
           for (const country of currentCountries) {
             ensure('states', country);
             ensure('cities', country);
@@ -188,10 +214,14 @@
   });
 
   $effect(() => {
-    if (!searchChildren || !onStateFetch) return;
+    if (!searchChildren || !onStateFetch) {
+      return;
+    }
     for (const country of countries) {
-      if ((cache[cityKey(country)] ?? []).some(matches)) {
-        for (const state of cache[stateKey(country)] ?? []) untrack(() => ensure('cities', country, state));
+      if ((cache[cityKey(country)] ?? []).some((city) => matches(city))) {
+        for (const state of cache[stateKey(country)] ?? []) {
+          untrack(() => ensure('cities', country, state));
+        }
       }
     }
   });
@@ -204,11 +234,13 @@
     const values = cache[stateKey(country)] ?? [];
     const selected = selectedCountry === country ? selectedState : undefined;
     const available = selected && !values.includes(selected) ? [...values, selected] : values;
-    if (!query || (expandedCountry === country && matches(country))) return available;
+    if (!query || (expandedCountry === country && matches(country))) {
+      return available;
+    }
     return available.filter(
       (state) =>
         state === selected ||
-        (searchChildren && (matches(state) || (cache[cityKey(country, state)] ?? []).some(matches))),
+        (searchChildren && (matches(state) || (cache[cityKey(country, state)] ?? []).some((city) => matches(city)))),
     );
   }
 
@@ -219,7 +251,7 @@
       !query || (expandedCountry === country && matches(country)) || (state && matches(state))
         ? values
         : searchChildren
-          ? values.filter(matches)
+          ? values.filter((city) => matches(city))
           : [];
     // Keep a URL-restored city visible while its country has fallen out of the current facet set,
     // but wait for the scoped provider when the country is present so we do not render a lone city
@@ -230,7 +262,9 @@
   }
 
   function limited(values: string[], key: string, selected?: string) {
-    if (showAllChildren[key]) return values;
+    if (showAllChildren[key]) {
+      return values;
+    }
     const head = values.slice(0, SHOW_COUNT);
     return selected && values.includes(selected) && !head.includes(selected)
       ? [...head.slice(0, SHOW_COUNT - 1), selected]
@@ -243,11 +277,14 @@
         !query ||
         matches(country) ||
         selectedCountry === country ||
-        (searchChildren && (statesFor(country).length > 0 || (cache[cityKey(country)] ?? []).some(matches))),
+        (searchChildren &&
+          (statesFor(country).length > 0 || (cache[cityKey(country)] ?? []).some((city) => matches(city)))),
     ),
   );
   let visibleCountries = $derived.by(() => {
-    if (query || showAllCountries) return filteredCountries;
+    if (query || showAllCountries) {
+      return filteredCountries;
+    }
     const head = filteredCountries.slice(0, SHOW_COUNT);
     return selectedCountry && filteredCountries.includes(selectedCountry) && !head.includes(selectedCountry)
       ? [selectedCountry, ...filteredCountries.filter((country) => country !== selectedCountry)].slice(0, SHOW_COUNT)
@@ -272,15 +309,20 @@
   );
 
   function change(country?: string, city?: string, state?: string) {
-    if (state === undefined) onSelectionChange(country, city);
-    else onSelectionChange(country, city, state);
+    if (state === undefined) {
+      onSelectionChange(country, city);
+    } else {
+      onSelectionChange(country, city, state);
+    }
   }
 
   function selectCountry(country: string) {
     expandedCountry = country;
     manualCountries = { ...manualCountries, [country]: false };
     ensure('states', country);
-    if (!onStateFetch) ensure('cities', country);
+    if (!onStateFetch) {
+      ensure('cities', country);
+    }
     change(selectedCountry === country && !selectedCity && !selectedState ? undefined : country);
   }
 
@@ -304,7 +346,9 @@
     expandedCountry = expand ? country : undefined;
     if (expand) {
       ensure('states', country, undefined, true);
-      if (!onStateFetch) ensure('cities', country, undefined, true);
+      if (!onStateFetch) {
+        ensure('cities', country, undefined, true);
+      }
     }
   }
 </script>
@@ -462,7 +506,9 @@
             {@render stateButton(country, state)}
             {@render expandButton(state, stateExpanded, `location-expand-state-${country}-${state}`, () => {
               expandedStates = { ...expandedStates, [country]: stateExpanded ? undefined : state };
-              if (!stateExpanded) ensure('cities', country, state, true);
+              if (!stateExpanded) {
+                ensure('cities', country, state, true);
+              }
             })}
           </div>
           {#if stateExpanded || (searchChildren && citiesFor(country, state).length > 0)}{@render cityList(
@@ -495,7 +541,9 @@
             `location-expand-cities-${country}`,
             () => {
               expandedAllCities = { ...expandedAllCities, [country]: !expandedAllCities[country] };
-              if (expandedAllCities[country]) ensure('cities', country, undefined, true);
+              if (expandedAllCities[country]) {
+                ensure('cities', country, undefined, true);
+              }
             },
           )}
         </div>
