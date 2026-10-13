@@ -410,14 +410,10 @@ the batch touches high-risk surfaces:
 
 - `make gallery-branding-check` for branding, release, and Docker surfaces.
 - `make gallery-ml-smoke` for ML and Docker surfaces.
-- `gh workflow run gallery-mobile-smoke.yml --ref rebase/upstream-batch-NN` for
-  mobile or mobile-branding surfaces.
-- `gh workflow run gallery-ml-smoke.yml --ref rebase/upstream-batch-NN` for ML
-  and Docker surfaces.
+- Mobile and ML GitHub Actions smoke workflows have been removed; use the remaining local checks where relevant.
 
 The command verifies local/static requirements and prints dispatch commands; it
-does not prove those remote workflows are green. Dispatch and babysit any
-required workflow before claiming the batch is fully verified.
+does not prove those remote workflows are green. Run any applicable remaining checks before claiming the batch is fully verified.
 
 ## Generated Artifacts
 
