@@ -581,8 +581,10 @@ export class JobRepository {
       case JobName.StorageTemplateMigrationSingle: {
         return { jobId: item.data.id };
       }
-      case JobName.AssetEditSave: {
-        return { jobId: item.data.id, removeOnComplete: true, removeOnFail: true };
+      case JobName.AssetEditThumbnailGeneration: {
+        return item.data.editSaveOperationId
+          ? { jobId: item.data.editSaveOperationId, removeOnComplete: true, removeOnFail: true }
+          : null;
       }
       case JobName.AssetDelete: {
         return { delay: item.data.delay };

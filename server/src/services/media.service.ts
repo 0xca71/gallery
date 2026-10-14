@@ -208,7 +208,15 @@ export class MediaService extends BaseService {
   }
 
   @OnJob({ name: JobName.AssetEditThumbnailGeneration, queue: QueueName.Editor })
-  async handleAssetEditThumbnailGeneration({ id }: JobOf<JobName.AssetEditThumbnailGeneration>): Promise<JobStatus> {
+  async handleAssetEditThumbnailGeneration({
+    id,
+    editSaveOperationId,
+  }: JobOf<JobName.AssetEditThumbnailGeneration>): Promise<JobStatus> {
+    if (editSaveOperationId) {
+      const request = { id: editSaveOperationId, result: JobStatus.Skipped };
+      await this.eventRepository.emit('AssetEditSave', request);
+      return request.result;
+    }
     return this.databaseRepository.withAssetLock(id, async () => {
       if (await this.assetEditSaveRepository.isSaving(id, false)) {
         return JobStatus.Skipped;

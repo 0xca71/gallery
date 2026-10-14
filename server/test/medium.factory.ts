@@ -171,6 +171,12 @@ export class MediumTestContext<S extends ClassConstructor<typeof BaseService> = 
       if (options.mock.includes(dep)) {
         return newMockRepository(dep);
       }
+
+      // File coordination applies to existing services too. Keep these dependencies backed
+      // by the test database when older setups do not explicitly list them.
+      if (dep === DatabaseRepository || dep === AssetEditSaveRepository) {
+        return this.get(dep);
+      }
     }) as unknown as ClassConstructorsToInstances<BaseServiceDeps>;
   }
 
@@ -668,7 +674,13 @@ const newRealRepository = <T extends BaseServiceDeps[number]>(key: T, db: Kysely
     }
 
     case DatabaseRepository: {
-      return new key(db, LoggingRepository.create(), new ConfigRepository()) as InstanceType<T>;
+      const repository = new key(db, LoggingRepository.create(), new ConfigRepository());
+      const withAssetLock = repository.withAssetLock.bind(repository);
+      // Each medium worker owns a temporary database. Acquire real advisory locks there,
+      // rather than opening the configured application database's separate lock pool.
+      repository.withAssetLock = (id, callback, lockDatabase, wait) =>
+        withAssetLock(id, callback, lockDatabase ?? db, wait);
+      return repository as InstanceType<T>;
     }
 
     case EmailRepository: {
@@ -754,9 +766,11 @@ const newMockRepository = <T>(key: ClassConstructor<T>) => {
     }
 
     case DatabaseRepository: {
-      return automock(DatabaseRepository, {
+      const repository = automock(DatabaseRepository, {
         args: [undefined, { setContext: () => {} }, { getEnv: () => ({ database: { vectorExtension: '' } }) }],
       });
+      repository.withAssetLock.mockImplementation((_id, callback) => callback());
+      return repository;
     }
 
     case CronRepository: {

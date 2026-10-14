@@ -1,6 +1,6 @@
 import { exiftool } from 'exiftool-vendored';
 import { createHash } from 'node:crypto';
-import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
@@ -61,6 +61,9 @@ describe('image save worker on real files', () => {
       fileCreatedAt: new Date('2024-01-02T03:04:05Z'),
       width: 8,
       height: 6,
+      checksum: createHash('sha1')
+        .update(await readFile(originalPath))
+        .digest(),
     });
     const exif = AssetExifFactory.create({
       assetId: asset.id,
@@ -125,6 +128,26 @@ describe('image save worker on real files', () => {
     expect(await readFile(source.asset.originalPath)).toEqual(originalBytes);
     expect(await modificationTime(source.asset.originalPath)).toEqual(before.mtime);
     expect(operation.journal).toBeNull();
+  });
+
+  it('returns the real save status through its worker event', async () => {
+    const { sut, operation } = await setup(AssetEditSaveMode.Copy);
+    const request = { id: operation.id, result: JobStatus.Skipped };
+    await sut.onSaveRequest(request);
+    expect(request.result).toBe(JobStatus.Success);
+    expect(operation.status).toBe(AssetEditSaveStatus.Completed);
+  });
+
+  it('rejects changed managed content even when its modification time is preserved', async () => {
+    const { sut, source, operation, before } = await setup(AssetEditSaveMode.Overwrite);
+    const changed = await sharp({ create: { width: 8, height: 6, channels: 3, background: 'red' } })
+      .png()
+      .toBuffer();
+    await writeFile(source.asset.originalPath, changed);
+    await utimes(source.asset.originalPath, before.atime, before.mtime);
+    expect(await sut.handleSave({ id: operation.id })).toBe(JobStatus.Failed);
+    expect(operation.error).toBe('source_changed');
+    expect(await readFile(source.asset.originalPath)).toEqual(changed);
   });
 
   it('replaces the actual original path and cleans backup files after commit', async () => {

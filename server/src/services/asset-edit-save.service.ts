@@ -6,10 +6,11 @@ import { tmpdir } from 'node:os';
 import { dirname, extname, isAbsolute, join } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { promisify } from 'node:util';
-import type { JobItem, JobOf } from 'src/types.js';
+import type { ArgOf } from 'src/repositories/event.repository.js';
+import type { JobItem } from 'src/types.js';
 import { DiskStorageBackend } from 'src/backends/disk-storage.backend.js';
 import { StorageCore } from 'src/cores/storage.core.js';
-import { OnEvent, OnJob } from 'src/decorators.js';
+import { OnEvent } from 'src/decorators.js';
 import { mapAsset } from 'src/dtos/asset-response.dto.js';
 import { AuthDto } from 'src/dtos/auth.dto.js';
 import {
@@ -23,12 +24,12 @@ import {
 import {
   AssetFileType,
   AssetType,
+  ChecksumAlgorithm,
   Colorspace,
   ImmichWorker,
   JobName,
   JobStatus,
   Permission,
-  QueueName,
   StorageFolder,
 } from 'src/enum.js';
 import {
@@ -80,7 +81,12 @@ export class AssetEditSaveService extends BaseService {
 
   private async requeueSaves() {
     const operations = await this.assetEditSaveRepository.getInFlight();
-    await this.jobRepository.queueAll(operations.map(({ id }) => ({ name: JobName.AssetEditSave, data: { id } })));
+    await this.jobRepository.queueAll(
+      operations.map(({ id, assetId }) => ({
+        name: JobName.AssetEditThumbnailGeneration,
+        data: { id: assetId, editSaveOperationId: id },
+      })),
+    );
   }
 
   private validateSource(source?: AssetEditSaveSource): asserts source is AssetEditSaveSource {
@@ -139,7 +145,10 @@ export class AssetEditSaveService extends BaseService {
           throw new ConflictException('Idempotency key was used for a different save');
         }
         if (!terminalStatuses.has(existing.status)) {
-          await this.jobRepository.queue({ name: JobName.AssetEditSave, data: { id: existing.id } });
+          await this.jobRepository.queue({
+            name: JobName.AssetEditThumbnailGeneration,
+            data: { id: existing.assetId, editSaveOperationId: existing.id },
+          });
         }
         return asResponse(existing);
       }
@@ -157,7 +166,10 @@ export class AssetEditSaveService extends BaseService {
         }
       }
       const operation = await this.assetEditSaveRepository.create(auth.user.id, id, dto);
-      await this.jobRepository.queue({ name: JobName.AssetEditSave, data: { id: operation.id } });
+      await this.jobRepository.queue({
+        name: JobName.AssetEditThumbnailGeneration,
+        data: { id: operation.assetId, editSaveOperationId: operation.id },
+      });
       return asResponse(operation);
     });
   }
@@ -170,8 +182,12 @@ export class AssetEditSaveService extends BaseService {
     return asResponse(operation);
   }
 
-  @OnJob({ name: JobName.AssetEditSave, queue: QueueName.Editor })
-  async handleSave({ id }: JobOf<JobName.AssetEditSave>): Promise<JobStatus> {
+  @OnEvent({ name: 'AssetEditSave', workers: [ImmichWorker.Microservices] })
+  async onSaveRequest(request: ArgOf<'AssetEditSave'>) {
+    request.result = await this.handleSave({ id: request.id });
+  }
+
+  async handleSave({ id }: { id: string }): Promise<JobStatus> {
     let operation = await this.assetEditSaveRepository.get(id);
     if (!operation || terminalStatuses.has(operation.status)) {
       return JobStatus.Skipped;
@@ -269,6 +285,9 @@ export class AssetEditSaveService extends BaseService {
         throw new ConflictException('The original file changed outside Gallery');
       }
       const originalDigest = await this.hashFileHex(original.localPath);
+      if (asset.checksumAlgorithm === ChecksumAlgorithm.sha1File && originalDigest !== asset.checksum.toString('hex')) {
+        throw new ConflictException('Original image content changed before rendering');
+      }
       const output = join(workdir, `image.${format}`);
       validateSavedImageEdits(operation.edits, getDimensions(exif));
       const dimensions = await this.mediaRepository.renderSavedImage(

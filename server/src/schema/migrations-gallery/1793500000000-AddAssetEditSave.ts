@@ -21,8 +21,14 @@ export async function up(db: Kysely<any>): Promise<void> {
   );
   await sql`CREATE UNIQUE INDEX asset_edit_save_active_asset_idx ON asset_edit_save ("assetId")
     WHERE status IN ('queued', 'rendering', 'publishing', 'processing')`.execute(db);
+  // PostgreSQL rewrites IN to ANY with casts; keep the schema definition used by sql-tools.
+  const indexSql = `CREATE UNIQUE INDEX "asset_edit_save_active_asset_idx" ON "asset_edit_save" ("assetId") WHERE (status IN ('queued', 'rendering', 'publishing', 'processing'));`;
+  const override = { type: 'index', name: 'asset_edit_save_active_asset_idx', sql: indexSql };
+  await sql`INSERT INTO "migration_overrides" ("name", "value")
+    VALUES ('index_asset_edit_save_active_asset_idx', ${override}::jsonb)`.execute(db);
 }
 
 export async function down(db: Kysely<any>): Promise<void> {
+  await sql`DELETE FROM "migration_overrides" WHERE "name" = 'index_asset_edit_save_active_asset_idx'`.execute(db);
   await sql`DROP TABLE asset_edit_save`.execute(db);
 }

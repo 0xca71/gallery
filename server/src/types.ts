@@ -595,8 +595,7 @@ export type JobItem =
   | { name: JobName.IntegrityDeleteReports; data: IIntegrityDeleteReportsJob }
 
   // Editor
-  | { name: JobName.AssetEditThumbnailGeneration; data: IEntityJob }
-  | { name: JobName.AssetEditSave; data: IEntityJob }
+  | { name: JobName.AssetEditThumbnailGeneration; data: IEntityJob & { editSaveOperationId?: string } }
 
   // Storage Backend Migration
   | { name: JobName.StorageBackendMigrationQueueAll; data: IStorageMigrationQueueAllJob }
