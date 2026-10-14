@@ -4,6 +4,9 @@ import { MediaRepository } from 'src/repositories/media.repository.js';
 
 export const newMediaRepositoryMock = (): Mocked<RepositoryInterface<MediaRepository>> => {
   return {
+    renderSavedImage: vitest.fn(),
+    writeSavedImageMetadata: vitest.fn(),
+    normalizeSavedSidecar: vitest.fn(),
     generateThumbnail: vitest.fn().mockImplementation(() => Promise.resolve()),
     writeExif: vitest.fn().mockImplementation(() => Promise.resolve()),
     copyTagGroup: vitest.fn().mockImplementation(() => Promise.resolve()),

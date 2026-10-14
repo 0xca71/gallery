@@ -6,11 +6,27 @@ import 'package:ffi/ffi.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:immich_mobile/infrastructure/loaders/image_request.dart';
+import 'package:immich_mobile/domain/models/asset/base_asset.model.dart';
 import 'package:immich_mobile/platform/remote_image_api.g.dart';
 import 'package:immich_mobile/presentation/widgets/images/remote_image_provider.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+
+  test('uses the source file version in the full-image provider cache key', () {
+    RemoteFullImageProvider provider(DateTime modified) => RemoteFullImageProvider(
+      assetId: 'source',
+      thumbhash: 'same',
+      assetType: AssetType.image,
+      isAnimated: false,
+      updatedAt: modified,
+    );
+    final before = provider(DateTime.fromMillisecondsSinceEpoch(1));
+    final after = provider(DateTime.fromMillisecondsSinceEpoch(2));
+    expect(before, isNot(after));
+    expect(before.hashCode, isNot(after.hashCode));
+    expect(before, provider(DateTime.fromMillisecondsSinceEpoch(1)));
+  });
 
   const channel = BasicMessageChannel<Object?>(
     'dev.flutter.pigeon.immich_mobile.RemoteImageApi.requestImage',

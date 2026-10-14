@@ -33,6 +33,15 @@ describe('utils', () => {
   });
 
   describe(getAssetUrl.name, () => {
+    it('invalidates image URLs when the original changes even if the thumbhash stays identical', () => {
+      const asset = assetFactory.build({ thumbhash: 'same', fileModifiedAt: '2024-01-01T00:00:00Z' });
+      expect(getAssetUrl({ asset })).not.toBe(
+        getAssetUrl({ asset: { ...asset, fileModifiedAt: '2025-01-01T00:00:00Z' } }),
+      );
+      expect(getAssetUrl({ asset, forceOriginal: true })).not.toBe(
+        getAssetUrl({ asset: { ...asset, fileModifiedAt: '2025-01-01T00:00:00Z' }, forceOriginal: true }),
+      );
+    });
     it('should return thumbnail URL for static images', () => {
       const asset = assetFactory.build({
         originalPath: 'image.jpg',

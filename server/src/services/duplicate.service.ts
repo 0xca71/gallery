@@ -376,6 +376,15 @@ export class DuplicateService extends BaseService {
 
   @OnJob({ name: JobName.AssetDetectDuplicates, queue: QueueName.DuplicateDetection })
   async handleSearchDuplicates({ id }: JobOf<JobName.AssetDetectDuplicates>): Promise<JobStatus> {
+    return this.databaseRepository.withAssetLock(id, async () => {
+      if (await this.assetEditSaveRepository.isSaving(id, false)) {
+        return JobStatus.Skipped;
+      }
+      return this.handleSearchDuplicatesUnlocked({ id });
+    });
+  }
+
+  private async handleSearchDuplicatesUnlocked({ id }: JobOf<JobName.AssetDetectDuplicates>): Promise<JobStatus> {
     const { machineLearning } = await this.getConfig({ withCache: true });
     if (!isDuplicateDetectionEnabled(machineLearning)) {
       return JobStatus.Skipped;

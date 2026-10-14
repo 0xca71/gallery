@@ -6,6 +6,7 @@ import { AmapRepository } from 'src/repositories/amap.repository.js';
 import { ApiKeyRepository } from 'src/repositories/api-key.repository.js';
 import { AppMetricsRepository } from 'src/repositories/app-metrics.repository.js';
 import { AppRepository } from 'src/repositories/app.repository.js';
+import { AssetEditSaveRepository } from 'src/repositories/asset-edit-save.repository.js';
 import { AssetEditRepository } from 'src/repositories/asset-edit.repository.js';
 import { AssetFileRepository } from 'src/repositories/asset-file.repository.js';
 import { AssetJobRepository } from 'src/repositories/asset-job.repository.js';
@@ -76,6 +77,7 @@ export const repositories = [
   AppRepository,
   AssetRepository,
   AssetEditRepository,
+  AssetEditSaveRepository,
   AssetFileRepository,
   AssetJobRepository,
   ClassificationRepository,

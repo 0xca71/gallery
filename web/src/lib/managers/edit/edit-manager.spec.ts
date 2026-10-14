@@ -1,5 +1,14 @@
-import { editAsset, getAssetInfo, removeAssetEdits } from '@immich/sdk';
-import { toastManager } from '@immich/ui';
+import {
+  AssetEditSaveMode,
+  AssetEditSaveStatus,
+  editAsset,
+  getAssetInfo,
+  removeAssetEdits,
+  getAssetEditSaveCapabilities,
+  getAssetEditSave,
+  saveAssetEdits,
+} from '@immich/sdk';
+import { modalManager, toastManager } from '@immich/ui';
 import type { MessageFormatter } from 'svelte-i18n';
 import { EditManager } from '$lib/managers/edit/edit-manager.svelte';
 import { eventManager } from '$lib/managers/event-manager.svelte';
@@ -9,6 +18,7 @@ import { websocketMock } from '@test-data/mocks/websocket.mock';
 
 vi.mock('@immich/sdk');
 vi.mock('$lib/stores/websocket');
+vi.mock('$lib/modals/AssetEditSaveModal.svelte', () => ({ default: {} }));
 vi.mock('$lib/utils/i18n', () => ({
   getFormatter: vi.fn(),
   getPreferredLocale: vi.fn(),
@@ -151,6 +161,114 @@ describe('EditManager', () => {
 
       await promise;
       expect(editManager.isApplyingEdits).toBe(false);
+    });
+  });
+
+  describe('saveImageEdits', () => {
+    const operation = (
+      status: AssetEditSaveStatus,
+      resultAssetId: string | null = null,
+      error: string | null = null,
+    ) => ({
+      id: 'operation-id',
+      assetId: 'source-id',
+      resultAssetId,
+      mode: AssetEditSaveMode.Copy,
+      status,
+      error,
+    });
+    beforeEach(() => {
+      editManager.currentAsset = assetFactory.build({ id: 'source-id' });
+      vi.mocked(getAssetEditSaveCapabilities).mockResolvedValue({
+        canCopy: true,
+        canOverwrite: true,
+        overwriteUnavailableReason: null,
+        outputFormat: 'png',
+      });
+      vi.mocked(modalManager.show).mockResolvedValue(AssetEditSaveMode.Copy as never);
+      vi.mocked(saveAssetEdits).mockResolvedValue(operation(AssetEditSaveStatus.Queued));
+    });
+
+    it('cancels without starting a save or discarding the edits', async () => {
+      vi.mocked(modalManager.show).mockResolvedValue(null as never);
+      expect(await editManager.saveImageEdits()).toBe(false);
+      expect(saveAssetEdits).not.toHaveBeenCalled();
+      expect(editManager.hasAppliedEdits).toBe(false);
+    });
+
+    it('opens the independent result and publishes its update after a copy completes', async () => {
+      const result = assetFactory.build({ id: 'copy-id' });
+      vi.mocked(getAssetEditSave).mockResolvedValue(operation(AssetEditSaveStatus.Completed, result.id));
+      vi.mocked(getAssetInfo).mockResolvedValue(result);
+      expect(await editManager.saveImageEdits()).toBe(true);
+      expect(saveAssetEdits).toHaveBeenCalledWith({
+        id: 'source-id',
+        assetEditSaveCreateDto: expect.objectContaining({
+          mode: AssetEditSaveMode.Copy,
+          expectedVersion: editManager.currentAsset!.updatedAt,
+          edits: [],
+        }),
+      });
+      expect(editManager.resultAssetId).toBe('copy-id');
+      expect(eventManager.emit).toHaveBeenCalledWith('AssetUpdate', result);
+      expect(editManager.pendingRequest).toBeNull();
+    });
+
+    it('uses the overwrite choice and keeps the original identity', async () => {
+      vi.mocked(modalManager.show).mockResolvedValue(AssetEditSaveMode.Overwrite as never);
+      vi.mocked(getAssetEditSave).mockResolvedValue(operation(AssetEditSaveStatus.Completed, 'source-id'));
+      vi.mocked(getAssetInfo).mockResolvedValue(editManager.currentAsset!);
+      expect(await editManager.saveImageEdits()).toBe(true);
+      expect(saveAssetEdits).toHaveBeenCalledWith(
+        expect.objectContaining({
+          assetEditSaveCreateDto: expect.objectContaining({ mode: AssetEditSaveMode.Overwrite }),
+        }),
+      );
+      expect(editManager.resultAssetId).toBe('source-id');
+    });
+
+    it('reuses the idempotency key if the creation response is lost', async () => {
+      vi.mocked(saveAssetEdits)
+        .mockRejectedValueOnce(new Error('connection lost'))
+        .mockResolvedValueOnce(operation(AssetEditSaveStatus.Queued));
+      expect(await editManager.saveImageEdits()).toBe(false);
+      const first = vi.mocked(saveAssetEdits).mock.calls[0][0];
+      vi.mocked(getAssetEditSave).mockResolvedValue(operation(AssetEditSaveStatus.Completed, 'copy-id'));
+      vi.mocked(getAssetInfo).mockResolvedValue(assetFactory.build({ id: 'copy-id' }));
+      expect(await editManager.saveImageEdits()).toBe(true);
+      expect(vi.mocked(saveAssetEdits).mock.calls[1][0]).toEqual(first);
+      expect(modalManager.show).toHaveBeenCalledTimes(1);
+    });
+
+    it('resumes status polling after a disconnect without creating another file', async () => {
+      vi.mocked(getAssetEditSave)
+        .mockRejectedValueOnce(new Error('connection lost'))
+        .mockResolvedValueOnce(operation(AssetEditSaveStatus.Completed, 'copy-id'));
+      vi.mocked(getAssetInfo).mockResolvedValue(assetFactory.build({ id: 'copy-id' }));
+      expect(await editManager.saveImageEdits()).toBe(false);
+      expect(editManager.pendingSave?.operationId).toBe('operation-id');
+      expect(await editManager.saveImageEdits()).toBe(true);
+      expect(saveAssetEdits).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([AssetEditSaveStatus.Failed, AssetEditSaveStatus.Conflict])(
+      'keeps edits after a %s save',
+      async (status) => {
+        vi.mocked(getAssetEditSave).mockResolvedValue(operation(status, null, 'source_changed'));
+        expect(await editManager.saveImageEdits()).toBe(false);
+        expect(editManager.hasAppliedEdits).toBe(false);
+        expect(editManager.pendingSave).toBeNull();
+        expect(toastManager.danger).toHaveBeenCalledWith('editor_save_failed_source_changed');
+      },
+    );
+
+    it('keeps the operation handle when recovery retains the original backup', async () => {
+      vi.mocked(getAssetEditSave).mockResolvedValue(
+        operation(AssetEditSaveStatus.Publishing, null, 'recovery_required'),
+      );
+      expect(await editManager.saveImageEdits()).toBe(false);
+      expect(editManager.pendingSave?.operationId).toBe('operation-id');
+      expect(toastManager.danger).toHaveBeenCalledWith('editor_save_recovery_required');
     });
   });
 });

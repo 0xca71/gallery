@@ -46,6 +46,13 @@ const deleteBlockEnd = sql.indexOf(');', deleteBlockStart) + 2;
 const deleteBlock = sql.slice(deleteBlockStart, deleteBlockEnd);
 
 describe('revert-to-immich.sql', () => {
+  it('retains in-flight image save recovery until it is safe to switch back', () => {
+    const guard = sql.indexOf("IF to_regclass('public.asset_edit_save') IS NOT NULL");
+    const drop = sql.indexOf('DROP TABLE IF EXISTS "asset_edit_save" CASCADE');
+    expect(guard).toBeGreaterThan(0);
+    expect(drop).toBeGreaterThan(guard);
+    expect(guardBlock).toContain("'asset_edit_save'");
+  });
   it('drops every fork table with CASCADE', () => {
     const missing = forkTables.filter((t) => !sql.includes(`DROP TABLE IF EXISTS "${t}" CASCADE`));
     expect(missing).toEqual([]);

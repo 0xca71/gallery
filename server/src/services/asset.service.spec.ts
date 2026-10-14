@@ -1692,6 +1692,16 @@ describe(AssetService.name, () => {
   });
 
   describe('handleAssetDeletion', () => {
+    it('retains and retries a deletion while a file save is queued', async () => {
+      const id = newUuid();
+      mocks.assetEditSave.isSaving.mockResolvedValue(true);
+      await expect(sut.handleAssetDeletion({ id, deleteOnDisk: true })).resolves.toBe(JobStatus.Skipped);
+      expect(mocks.job.queue).toHaveBeenCalledWith({
+        name: JobName.AssetDelete,
+        data: { id, deleteOnDisk: true, delay: 2000 },
+      });
+      expect(mocks.assetJob.getForAssetDeletion).not.toHaveBeenCalled();
+    });
     it.each([false, true])('deletes the video source and sidecar (external=%s)', async (external) => {
       const asset = AssetFactory.from({
         type: AssetType.Video,

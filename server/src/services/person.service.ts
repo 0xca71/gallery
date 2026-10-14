@@ -943,6 +943,15 @@ export class PersonService extends BaseService {
 
   @OnJob({ name: JobName.AssetDetectFaces, queue: QueueName.FaceDetection })
   async handleDetectFaces({ id, force }: JobOf<JobName.AssetDetectFaces>): Promise<JobStatus> {
+    return this.databaseRepository.withAssetLock(id, async () => {
+      if (await this.assetEditSaveRepository.isSaving(id, false)) {
+        return JobStatus.Skipped;
+      }
+      return this.handleDetectFacesUnlocked({ id, force });
+    });
+  }
+
+  private async handleDetectFacesUnlocked({ id, force }: JobOf<JobName.AssetDetectFaces>): Promise<JobStatus> {
     const { machineLearning } = await this.getConfig({ withCache: true });
     if (!isFacialRecognitionEnabled(machineLearning)) {
       return JobStatus.Skipped;

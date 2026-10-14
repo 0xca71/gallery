@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable } from '@nestjs/common';
 import { ExifDateTime, WriteTags, exiftool } from 'exiftool-vendored';
 import ffmpeg, { FfprobeData, FfprobeStream } from 'fluent-ffmpeg';
 import { camelCase, upperFirst } from 'lodash-es';
@@ -18,8 +18,9 @@ import type {
   VideoInfo,
   VideoPacketInfo,
 } from 'src/types.js';
+import type { SavedImageFormat } from 'src/utils/asset-edit-save.js';
 import { ORIENTATION_TO_SHARP_ROTATION } from 'src/constants.js';
-import { Exif } from 'src/database.js';
+import { Exif, LockableProperty } from 'src/database.js';
 import { AssetEditActionItem } from 'src/dtos/editing.dto.js';
 import {
   AacProfile,
@@ -36,6 +37,7 @@ import {
   RawExtractedFormat,
 } from 'src/enum.js';
 import { LoggingRepository } from 'src/repositories/logging.repository.js';
+import { mergeTimeZone } from 'src/utils/date.js';
 import { handlePromiseError } from 'src/utils/misc.js';
 import { createAffineMatrix } from 'src/utils/transform.js';
 
@@ -151,6 +153,156 @@ export class MediaRepository {
 
   decodeImage(input: string | Buffer, options: DecodeToBufferOptions) {
     return this.getImageDecodingPipeline(input, options).raw().toBuffer({ resolveWithObject: true });
+  }
+
+  /** Render from the full original, never from a cached preview or embedded RAW thumbnail. */
+  async renderSavedImage(
+    input: string,
+    output: string,
+    edits: AssetEditActionItem[],
+    format: SavedImageFormat,
+    expected?: ImageDimensions,
+    overwrite = false,
+  ) {
+    const header = await sharp(input).metadata();
+    if (
+      ['gif', 'svg'].includes(header.format ?? '') ||
+      (header.pages ?? 1) > 1 ||
+      (overwrite && header.format !== format)
+    ) {
+      throw new BadRequestException('unsupported_format');
+    }
+    let decoded = await this.decodeImage(input, { colorspace: Colorspace.Srgb, processInvalidImages: false });
+    if (expected && (decoded.info.width !== expected.width || decoded.info.height !== expected.height)) {
+      throw new BadRequestException('Full original image could not be decoded at the expected dimensions');
+    }
+    const crop = edits.find((edit) => edit.action === 'crop');
+    if (crop) {
+      decoded = await sharp(decoded.data, { raw: decoded.info })
+        .extract({
+          left: crop.parameters.x,
+          top: crop.parameters.y,
+          width: crop.parameters.width,
+          height: crop.parameters.height,
+        })
+        .raw()
+        .toBuffer({ resolveWithObject: true });
+    }
+    // Right-angle rotations are lossless pixel permutations. Applying a general affine matrix
+    // instead interpolates edge pixels against a black background.
+    for (const edit of edits) {
+      if (edit.action === 'crop' || edit.action === 'trim') {
+        continue;
+      }
+      let pipeline = sharp(decoded.data, { raw: decoded.info });
+      pipeline =
+        edit.action === 'rotate'
+          ? pipeline.rotate(edit.parameters.angle)
+          : edit.parameters.axis === 'horizontal'
+            ? pipeline.flip()
+            : pipeline.flop();
+      decoded = await pipeline.raw().toBuffer({ resolveWithObject: true });
+    }
+    const info = await this.getImageDecodingPipeline(decoded.data, {
+      colorspace: Colorspace.Srgb,
+      processInvalidImages: false,
+      raw: decoded.info,
+    })
+      .toFormat(format, { quality: 95, lossless: format === 'webp' })
+      .toFile(output);
+    return { width: info.width, height: info.height };
+  }
+
+  async writeSavedImageMetadata(
+    source: string,
+    output: string,
+    exif: Exif & { lockedProperties?: LockableProperty[] | null },
+    dimensions: ImageDimensions,
+    fallbackDate: Date,
+  ) {
+    const tags = await exiftool.read(source);
+    await exiftool.write(
+      output,
+      {},
+      {
+        ignoreMinorErrors: true,
+        writeArgs: ['-TagsFromFile', source, '-EXIF:all', '-IPTC:all', '-XMP:all', '-overwrite_original'],
+      },
+    );
+    const locked = exif.lockedProperties ?? [];
+    const captureDate = exif.dateTimeOriginal ?? fallbackDate;
+    const zonedCapture = mergeTimeZone(captureDate.toISOString(), exif.timeZone);
+    const date =
+      locked.includes('dateTimeOriginal') || locked.includes('timeZone') || !tags.DateTimeOriginal
+        ? (mergeTimeZone(captureDate.toISOString(), exif.timeZone)?.toISO() ?? captureDate.toISOString())
+        : undefined;
+    const overrides: WriteTags = {
+      ExifImageWidth: dimensions.width,
+      ExifImageHeight: dimensions.height,
+      'Orientation#': 1,
+      ColorSpace: 1,
+      ...(date && {
+        DateTimeOriginal: date,
+        CreateDate: date,
+        SubSecTimeOriginal: String(captureDate.getUTCMilliseconds()).padStart(3, '0'),
+        SubSecTimeDigitized: String(captureDate.getUTCMilliseconds()).padStart(3, '0'),
+        OffsetTimeOriginal: zonedCapture?.toFormat('ZZ') ?? '+00:00',
+        OffsetTimeDigitized: zonedCapture?.toFormat('ZZ') ?? '+00:00',
+      }),
+      ...(locked.includes('description') && { ImageDescription: exif.description, Description: exif.description }),
+      ...((locked.includes('latitude') || locked.includes('longitude')) && {
+        GPSLatitude: exif.latitude,
+        GPSLongitude: exif.longitude,
+      }),
+      ...(locked.includes('rating') && { Rating: exif.rating }),
+    };
+    await this.normalizeSavedMetadata(output, overrides);
+    const written = await exiftool.read(output);
+    if (
+      Number(written.Orientation) !== 1 ||
+      Number(written.ExifImageWidth) !== dimensions.width ||
+      Number(written.ExifImageHeight) !== dimensions.height
+    ) {
+      throw new Error('Saved image metadata validation failed');
+    }
+  }
+
+  async normalizeSavedSidecar(output: string, dimensions: ImageDimensions, exif?: Exif, fallbackDate?: Date) {
+    const date = exif && (exif.dateTimeOriginal ?? fallbackDate);
+    await this.normalizeSavedMetadata(output, {
+      ExifImageWidth: dimensions.width,
+      ExifImageHeight: dimensions.height,
+      'Orientation#': 1,
+      ...(exif && {
+        Description: exif.description,
+        ImageDescription: exif.description,
+        GPSLatitude: exif.latitude,
+        GPSLongitude: exif.longitude,
+        Rating: exif.rating,
+        DateTimeOriginal: date ? mergeTimeZone(date.toISOString(), exif.timeZone)?.toISO() : undefined,
+      }),
+    });
+  }
+
+  private async normalizeSavedMetadata(output: string, overrides: WriteTags) {
+    await exiftool.write(output, overrides, {
+      ignoreMinorErrors: true,
+      writeArgs: [
+        '-overwrite_original',
+        '-ThumbnailImage=',
+        '-PreviewImage=',
+        '-JpgFromRaw=',
+        '-XMP-crs:Crop*=',
+        '-XMP-crs:HasCrop=False',
+        '-XMP-crs:Rotation=',
+        '-XMP-crs:Flip=',
+        '-XMP-mwg-rs:RegionInfo=',
+        '-XMP-MP:RegionInfo=',
+        '-XMP-tiff:Orientation#=1',
+        `-XMP-tiff:ImageWidth=${overrides.ExifImageWidth}`,
+        `-XMP-tiff:ImageHeight=${overrides.ExifImageHeight}`,
+      ],
+    });
   }
 
   private applyEdits(pipeline: Sharp, edits: AssetEditActionItem[]): Sharp {

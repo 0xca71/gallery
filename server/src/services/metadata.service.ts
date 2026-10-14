@@ -258,6 +258,15 @@ export class MetadataService extends BaseService {
 
   @OnJob({ name: JobName.AssetExtractMetadata, queue: QueueName.MetadataExtraction })
   async handleMetadataExtraction(data: JobOf<JobName.AssetExtractMetadata>) {
+    return this.databaseRepository.withAssetLock(data.id, async () => {
+      if (await this.assetEditSaveRepository.isSaving(data.id, false)) {
+        return JobStatus.Skipped;
+      }
+      return this.handleMetadataExtractionUnlocked(data);
+    });
+  }
+
+  private async handleMetadataExtractionUnlocked(data: JobOf<JobName.AssetExtractMetadata>) {
     const [{ metadata, reverseGeocoding }, asset] = await Promise.all([
       this.getConfig({ withCache: true }),
       this.assetJobRepository.getForMetadataExtraction(data.id),
@@ -536,6 +545,15 @@ export class MetadataService extends BaseService {
 
   @OnJob({ name: JobName.SidecarWrite, queue: QueueName.Sidecar })
   async handleSidecarWrite(job: JobOf<JobName.SidecarWrite>): Promise<JobStatus> {
+    return this.databaseRepository.withAssetLock(job.id, async () => {
+      if (await this.assetEditSaveRepository.isSaving(job.id, false)) {
+        throw new Error('Image save in progress; retry sidecar write');
+      }
+      return this.handleSidecarWriteUnlocked(job);
+    });
+  }
+
+  private async handleSidecarWriteUnlocked(job: JobOf<JobName.SidecarWrite>): Promise<JobStatus> {
     const { id } = job;
     const asset = await this.assetJobRepository.getForSidecarWriteJob(id);
     if (!asset) {

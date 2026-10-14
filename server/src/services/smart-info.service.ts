@@ -89,6 +89,15 @@ export class SmartInfoService extends BaseService {
 
   @OnJob({ name: JobName.SmartSearch, queue: QueueName.SmartSearch })
   async handleEncodeClip({ id }: JobOf<JobName.SmartSearch>): Promise<JobStatus> {
+    return this.databaseRepository.withAssetLock(id, async () => {
+      if (await this.assetEditSaveRepository.isSaving(id, false)) {
+        return JobStatus.Skipped;
+      }
+      return this.handleEncodeClipUnlocked({ id });
+    });
+  }
+
+  private async handleEncodeClipUnlocked({ id }: JobOf<JobName.SmartSearch>): Promise<JobStatus> {
     const { machineLearning } = await this.getConfig({ withCache: true });
     if (!isSmartSearchEnabled(machineLearning)) {
       return JobStatus.Skipped;

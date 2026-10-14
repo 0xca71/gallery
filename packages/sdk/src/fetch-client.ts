@@ -1791,6 +1791,33 @@ export type TrimParameters = {
     /** Start time in seconds */
     startTime: number;
 };
+export type AssetEditActionItemDto = {
+    action: AssetEditAction;
+    /** List of edit actions to apply (crop, rotate, mirror, or trim) */
+    parameters: CropParameters | RotateParameters | MirrorParameters | TrimParameters;
+};
+export type AssetEditSaveCreateDto = {
+    edits: AssetEditActionItemDto[];
+    /** Asset updatedAt when the editor was opened */
+    expectedVersion: string;
+    /** Reuse this key when retrying the same save */
+    idempotencyKey: string;
+    mode: AssetEditSaveMode;
+};
+export type AssetEditSaveResponseDto = {
+    assetId: string;
+    error: string | null;
+    id: string;
+    mode: AssetEditSaveMode;
+    resultAssetId: string | null;
+    status: AssetEditSaveStatus;
+};
+export type AssetEditSaveCapabilitiesDto = {
+    canCopy: boolean;
+    canOverwrite: boolean;
+    outputFormat: string | null;
+    overwriteUnavailableReason: string | null;
+};
 export type AssetEditActionItemResponseDto = {
     action: AssetEditAction;
     /** Asset edit ID */
@@ -1803,11 +1830,6 @@ export type AssetEditsResponseDto = {
     assetId: string;
     /** List of edit actions applied to the asset */
     edits: AssetEditActionItemResponseDto[];
-};
-export type AssetEditActionItemDto = {
-    action: AssetEditAction;
-    /** List of edit actions to apply (crop, rotate, mirror, or trim) */
-    parameters: CropParameters | RotateParameters | MirrorParameters | TrimParameters;
 };
 export type AssetEditsCreateDto = {
     /** List of edit actions to apply (crop, rotate, mirror, or trim) */
@@ -6336,6 +6358,49 @@ export function ensureAssetAddress({ id }: {
     }>(`/assets/${encodeURIComponent(id)}/address`, {
         ...opts,
         method: "POST"
+    }));
+}
+/**
+ * Save image edits to a new or original file
+ */
+export function saveAssetEdits({ id, assetEditSaveCreateDto }: {
+    id: string;
+    assetEditSaveCreateDto: AssetEditSaveCreateDto;
+}, opts?: Oazapfts.RequestOpts) {
+    return oazapfts.ok(oazapfts.fetchJson<{
+        status: 201;
+        data: AssetEditSaveResponseDto;
+    }>(`/assets/${encodeURIComponent(id)}/edit-save`, oazapfts.json({
+        ...opts,
+        method: "POST",
+        body: assetEditSaveCreateDto
+    })));
+}
+/**
+ * Get image file save capabilities
+ */
+export function getAssetEditSaveCapabilities({ id }: {
+    id: string;
+}, opts?: Oazapfts.RequestOpts) {
+    return oazapfts.ok(oazapfts.fetchJson<{
+        status: 200;
+        data: AssetEditSaveCapabilitiesDto;
+    }>(`/assets/${encodeURIComponent(id)}/edit-save/capabilities`, {
+        ...opts
+    }));
+}
+/**
+ * Get an image file save operation
+ */
+export function getAssetEditSave({ id, operationId }: {
+    id: string;
+    operationId: string;
+}, opts?: Oazapfts.RequestOpts) {
+    return oazapfts.ok(oazapfts.fetchJson<{
+        status: 200;
+        data: AssetEditSaveResponseDto;
+    }>(`/assets/${encodeURIComponent(id)}/edit-save/${encodeURIComponent(operationId)}`, {
+        ...opts
     }));
 }
 /**
@@ -11224,6 +11289,19 @@ export enum AssetEditAction {
 export enum MirrorAxis {
     Horizontal = "horizontal",
     Vertical = "vertical"
+}
+export enum AssetEditSaveMode {
+    Copy = "copy",
+    Overwrite = "overwrite"
+}
+export enum AssetEditSaveStatus {
+    Queued = "queued",
+    Rendering = "rendering",
+    Publishing = "publishing",
+    Processing = "processing",
+    Completed = "completed",
+    Failed = "failed",
+    Conflict = "conflict"
 }
 export enum AssetMediaSize {
     Original = "original",

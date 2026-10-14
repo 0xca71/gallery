@@ -1,5 +1,6 @@
 import { createZodDto } from 'nestjs-zod';
 import z from 'zod';
+import { isoDatetimeToDate } from 'src/validation.js';
 
 export enum AssetEditAction {
   Crop = 'crop',
@@ -158,3 +159,53 @@ export type CropParameters = z.infer<typeof CropParametersSchema>;
 export type TrimParameters = z.infer<typeof TrimParametersSchema>;
 export type RotateParameters = z.infer<typeof RotateParametersSchema>;
 export type MirrorParameters = z.infer<typeof MirrorParametersSchema>;
+
+export enum AssetEditSaveMode {
+  Copy = 'copy',
+  Overwrite = 'overwrite',
+}
+
+export enum AssetEditSaveStatus {
+  Queued = 'queued',
+  Rendering = 'rendering',
+  Publishing = 'publishing',
+  Processing = 'processing',
+  Completed = 'completed',
+  Failed = 'failed',
+  Conflict = 'conflict',
+}
+
+const AssetEditSaveModeSchema = z.enum(AssetEditSaveMode).meta({ id: 'AssetEditSaveMode' });
+
+const AssetEditSaveCreateSchema = AssetEditsCreateSchema.extend({
+  edits: z
+    .array(AssetEditActionItemSchema)
+    .refine(uniqueEditActions, { error: 'Duplicate edit actions are not allowed' }),
+  mode: AssetEditSaveModeSchema,
+  expectedVersion: isoDatetimeToDate.describe('Asset updatedAt when the editor was opened'),
+  idempotencyKey: z.uuidv4().describe('Reuse this key when retrying the same save'),
+}).meta({ id: 'AssetEditSaveCreateDto' });
+
+const AssetEditSaveResponseSchema = z
+  .object({
+    id: z.uuidv4(),
+    assetId: z.uuidv4(),
+    resultAssetId: z.uuidv4().nullable(),
+    mode: AssetEditSaveModeSchema,
+    status: z.enum(AssetEditSaveStatus).meta({ id: 'AssetEditSaveStatus' }),
+    error: z.string().nullable(),
+  })
+  .meta({ id: 'AssetEditSaveResponseDto' });
+
+const AssetEditSaveCapabilitiesSchema = z
+  .object({
+    canCopy: z.boolean(),
+    canOverwrite: z.boolean(),
+    overwriteUnavailableReason: z.string().nullable(),
+    outputFormat: z.string().nullable(),
+  })
+  .meta({ id: 'AssetEditSaveCapabilitiesDto' });
+
+export class AssetEditSaveCreateDto extends createZodDto(AssetEditSaveCreateSchema) {}
+export class AssetEditSaveResponseDto extends createZodDto(AssetEditSaveResponseSchema) {}
+export class AssetEditSaveCapabilitiesDto extends createZodDto(AssetEditSaveCapabilitiesSchema) {}

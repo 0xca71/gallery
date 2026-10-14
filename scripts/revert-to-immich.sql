@@ -34,7 +34,8 @@
 -- HOW TO RUN
 -- =============================================================================
 --
--- 1. Stop every Immich/Gallery container (server, microservices, web). The
+-- 1. Finish or recover pending image file saves in Gallery, then stop every
+--    Immich/Gallery container (server, microservices, web). The
 --    script takes ACCESS EXCLUSIVE locks on many tables; a running server
 --    will either deadlock with it or race it.
 --
@@ -84,6 +85,18 @@ BEGIN
 END $$;
 
 -- -----------------------------------------------------------------------------
+-- 0. Refuse to discard an unfinished image save's recovery record.
+-- File saves must settle before removing their recovery records.
+DO $$
+BEGIN
+  IF to_regclass('public.asset_edit_save') IS NOT NULL THEN
+    IF EXISTS (SELECT 1 FROM public.asset_edit_save WHERE status IN ('queued', 'rendering', 'publishing', 'processing')) THEN
+      RAISE EXCEPTION 'Finish or recover pending image file saves in Gallery before reverting.';
+    END IF;
+  END IF;
+END $$;
+
+-- -----------------------------------------------------------------------------
 -- 1. Drop Gallery-only triggers on Immich-native tables.
 --
 -- These triggers live on upstream tables (library, asset) but call functions
@@ -105,6 +118,7 @@ DROP TRIGGER IF EXISTS "album_soft_delete_shared_space_album" ON "album";
 -- -----------------------------------------------------------------------------
 
 -- Library sync / audit
+DROP TABLE IF EXISTS "asset_edit_save" CASCADE;
 DROP TABLE IF EXISTS "library_user" CASCADE;
 DROP TABLE IF EXISTS "library_audit" CASCADE;
 DROP TABLE IF EXISTS "library_asset_audit" CASCADE;
@@ -280,6 +294,7 @@ DELETE FROM "migration_overrides"
    'index_shared_space_album_folder_parentId_idx',
    'index_shared_space_album_folder_nested_name_key',
    'index_shared_space_album_folder_root_name_key',
+   'index_asset_edit_save_active_asset_idx',
    'function_shared_space_album_folder_delete_audit',
    'trigger_asset_library_delete_audit',
    'trigger_classification_category_updatedAt',
@@ -508,6 +523,7 @@ DELETE FROM "kysely_migrations"
   '1793200000000-SharedSpaceAlbumFolderAuditTable',
   '1793300000000-ClearPreOptionMFaceRepairScans',
   '1793400000000-AddAssetFormattedAddress',
+  '1793500000000-AddAssetEditSave',
   -- Build-time compatibility alias (server/bin/sync-gallery-migrations.mjs): this migration was
   -- renumbered off 1793000000000 when fork PR #1060 took that timestamp, but rolling RC instances
   -- had already recorded the pre-rename name. Drop that row too, or upstream's migrator aborts
@@ -610,7 +626,7 @@ BEGIN
        'face_identity_face', 'face_identity',
        'shared_space', 'user_group_member', 'user_group',
        'classification_prompt_embedding', 'classification_category',
-       'storage_migration_log', 'asset_duplicate_checksum',
+       'storage_migration_log', 'asset_duplicate_checksum', 'asset_edit_save',
        'face_person_verdict', 'face_repair_scan', 'face_repair_decline',
        'face_repair_scan_flagged_face', 'face_repair_lock',
        'pet_search'

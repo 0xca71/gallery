@@ -176,6 +176,9 @@ export class JobService extends BaseService {
       }
 
       case JobName.AssetEditThumbnailGeneration: {
+        if (item.data.editSaveOperationId) {
+          break;
+        }
         const asset = await this.assetRepository.getById(item.data.id);
         const edits = await this.assetEditRepository.getWithSyncInfo(item.data.id);
 

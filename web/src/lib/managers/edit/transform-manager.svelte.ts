@@ -180,7 +180,7 @@ class TransformManager implements EditToolManager {
 
     const imageURL = getAssetMediaUrl({
       id: asset.id,
-      cacheKey: asset.thumbhash,
+      cacheKey: `${asset.thumbhash ?? ''}:${asset.fileModifiedAt}`,
       edited: false,
       size: AssetMediaSize.Preview,
     });

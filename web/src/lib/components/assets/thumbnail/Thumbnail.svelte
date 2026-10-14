@@ -81,6 +81,9 @@
   let loaded = $state(false);
   let thumbError = $state(false);
   let skipFade = $state(false);
+  let imageCacheKey = $derived(
+    asset.fileModifiedAt ? `${asset.thumbhash ?? ''}:${asset.fileModifiedAt}` : asset.thumbhash,
+  );
 
   let width = $derived(thumbnailSize || thumbnailWidth || 235);
   let height = $derived(thumbnailSize || thumbnailHeight || 235);
@@ -249,7 +252,7 @@
       <ImageThumbnail
         class={['absolute group-focus-visible:rounded-lg', { 'rounded-xl': selected }, imageClass]}
         brokenAssetClass={['z-1 absolute group-focus-visible:rounded-lg', selected && 'rounded-2xl', brokenAssetClass]}
-        url={getAssetMediaUrl({ id: asset.id, size: AssetMediaSize.Thumbnail, cacheKey: asset.thumbhash })}
+        url={getAssetMediaUrl({ id: asset.id, size: AssetMediaSize.Thumbnail, cacheKey: imageCacheKey })}
         altText={$getAltText(asset)}
         widthStyle="{width}px"
         heightStyle="{height}px"
@@ -292,7 +295,7 @@
           <ImageThumbnail
             class={imageClass}
             {brokenAssetClass}
-            url={getAssetMediaUrl({ id: asset.id, size: AssetMediaSize.Original, cacheKey: asset.thumbhash })}
+            url={getAssetMediaUrl({ id: asset.id, size: AssetMediaSize.Original, cacheKey: imageCacheKey })}
             altText={$getAltText(asset)}
             widthStyle="{width}px"
             heightStyle="{height}px"
