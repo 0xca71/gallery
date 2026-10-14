@@ -51,6 +51,15 @@ export class PetDetectionService extends BaseService {
 
   @OnJob({ name: JobName.PetDetection, queue: QueueName.PetDetection })
   async handlePetDetection({ id }: JobOf<JobName.PetDetection>): Promise<JobStatus> {
+    return this.databaseRepository.withAssetLock(id, async () => {
+      if (await this.assetEditSaveRepository.isSaving(id, false)) {
+        return JobStatus.Skipped;
+      }
+      return this.handlePetDetectionUnlocked({ id });
+    });
+  }
+
+  private async handlePetDetectionUnlocked({ id }: JobOf<JobName.PetDetection>): Promise<JobStatus> {
     const { machineLearning } = await this.getConfig({ withCache: true });
     if (!isPetDetectionEnabled(machineLearning)) {
       return JobStatus.Skipped;

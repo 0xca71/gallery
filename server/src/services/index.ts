@@ -4,6 +4,7 @@ import { AlbumService } from 'src/services/album.service.js';
 import { ApiKeyService } from 'src/services/api-key.service.js';
 import { ApiService } from 'src/services/api.service.js';
 import { AppMetricsService } from 'src/services/app-metrics.service.js';
+import { AssetEditSaveService } from 'src/services/asset-edit-save.service.js';
 import { AssetFileService } from 'src/services/asset-file.service.js';
 import { AssetMediaService } from 'src/services/asset-media.service.js';
 import { AssetService } from 'src/services/asset.service.js';
@@ -72,6 +73,7 @@ export const services = [
   AppMetricsService,
   AssetMediaService,
   AssetService,
+  AssetEditSaveService,
   AuthService,
   AuthAdminService,
   ClassificationService,

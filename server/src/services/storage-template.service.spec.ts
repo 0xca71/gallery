@@ -95,6 +95,20 @@ describe(StorageTemplateService.name, () => {
   });
 
   describe('handleMigrationSingle', () => {
+    it('does not move an original while a file save is in progress', async () => {
+      mocks.assetJob.getForStorageTemplateJob.mockResolvedValue(getForStorageTemplate(testAsset));
+      mocks.assetEditSave.isSaving.mockResolvedValue(true);
+      await sut.handleMigrationSingle({ id: testAsset.id });
+      expect(mocks.storage.rename).not.toHaveBeenCalled();
+      expect(mocks.move.create).not.toHaveBeenCalled();
+    });
+
+    it('does not apply a path migration from an obsolete source snapshot', async () => {
+      mocks.assetJob.getForStorageTemplateJob.mockResolvedValue(getForStorageTemplate(testAsset));
+      mocks.assetEditSave.getSource.mockResolvedValue({ asset: { originalPath: '/changed/photo.jpg' } } as never);
+      await sut.handleMigrationSingle({ id: testAsset.id });
+      expect(mocks.storage.rename).not.toHaveBeenCalled();
+    });
     it('should skip when storage template is disabled', async () => {
       mocks.systemMetadata.get.mockResolvedValue({ storageTemplate: { enabled: false } });
 

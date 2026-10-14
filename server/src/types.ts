@@ -229,6 +229,7 @@ export interface IEntityJob extends IBaseJob {
 }
 
 export interface IAssetDeleteJob extends IEntityJob {
+  delay?: number;
   deleteOnDisk: boolean;
 }
 
@@ -595,6 +596,7 @@ export type JobItem =
 
   // Editor
   | { name: JobName.AssetEditThumbnailGeneration; data: IEntityJob }
+  | { name: JobName.AssetEditSave; data: IEntityJob }
 
   // Storage Backend Migration
   | { name: JobName.StorageBackendMigrationQueueAll; data: IStorageMigrationQueueAllJob }

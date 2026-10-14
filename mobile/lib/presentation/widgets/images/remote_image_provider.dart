@@ -22,9 +22,10 @@ class RemoteImageProvider extends CancellableImageProvider<RemoteImageProvider>
   RemoteImageProvider.thumbnail({
     required String assetId,
     required String thumbhash,
+    DateTime? updatedAt,
     this.edited = true,
     this.decodeSize,
-  }) : url = getThumbnailUrlForRemoteId(assetId, thumbhash: thumbhash, edited: edited);
+  }) : url = getThumbnailUrlForRemoteId(assetId, thumbhash: thumbhash, edited: edited, updatedAt: updatedAt);
 
   @override
   Future<RemoteImageProvider> obtainKey(ImageConfiguration configuration) {
@@ -69,6 +70,7 @@ class RemoteFullImageProvider extends CancellableImageProvider<RemoteFullImagePr
   final String thumbhash;
   final AssetType assetType;
   final bool isAnimated;
+  final DateTime? updatedAt;
   final bool edited;
 
   /// Physical size of the thumbnail shown before the preview.
@@ -79,6 +81,7 @@ class RemoteFullImageProvider extends CancellableImageProvider<RemoteFullImagePr
     required this.thumbhash,
     required this.assetType,
     required this.isAnimated,
+    this.updatedAt,
     this.edited = true,
     this.thumbnailSize,
   });
@@ -95,7 +98,12 @@ class RemoteFullImageProvider extends CancellableImageProvider<RemoteFullImagePr
         stream: _animatedCodec(key, decode),
         scale: 1.0,
         initialImage: getInitialImage(
-          RemoteImageProvider.thumbnail(assetId: key.assetId, thumbhash: key.thumbhash, decodeSize: key.thumbnailSize),
+          RemoteImageProvider.thumbnail(
+            assetId: key.assetId,
+            thumbhash: key.thumbhash,
+            decodeSize: key.thumbnailSize,
+            updatedAt: key.updatedAt,
+          ),
         ),
         informationCollector: () => <DiagnosticsNode>[
           DiagnosticsProperty<ImageProvider>('Image provider', this),
@@ -113,6 +121,7 @@ class RemoteFullImageProvider extends CancellableImageProvider<RemoteFullImagePr
           assetId: key.assetId,
           thumbhash: key.thumbhash,
           edited: key.edited,
+          updatedAt: key.updatedAt,
           decodeSize: key.thumbnailSize,
         ),
       ),
@@ -138,6 +147,7 @@ class RemoteFullImageProvider extends CancellableImageProvider<RemoteFullImagePr
         type: AssetMediaSize.preview,
         thumbhash: key.thumbhash,
         edited: key.edited,
+        updatedAt: key.updatedAt,
       ),
     );
     final loadOriginal = assetType == AssetType.image && SettingsRepository.instance.appConfig.image.loadOriginal;
@@ -152,7 +162,7 @@ class RemoteFullImageProvider extends CancellableImageProvider<RemoteFullImagePr
     }
 
     final originalRequest = request = RemoteImageRequest(
-      uri: getOriginalUrlForRemoteId(key.assetId, edited: key.edited),
+      uri: getOriginalUrlForRemoteId(key.assetId, edited: key.edited, updatedAt: key.updatedAt),
     );
     yield* loadRequest(originalRequest, decode, isFinal: true);
   }
@@ -170,6 +180,7 @@ class RemoteFullImageProvider extends CancellableImageProvider<RemoteFullImagePr
         type: AssetMediaSize.preview,
         thumbhash: key.thumbhash,
         edited: key.edited,
+        updatedAt: key.updatedAt,
       ),
     );
     yield* loadRequest(previewRequest, decode, isFinal: false);
@@ -180,7 +191,7 @@ class RemoteFullImageProvider extends CancellableImageProvider<RemoteFullImagePr
 
     // always try original for animated, since previews don't support animation
     final originalRequest = request = RemoteImageRequest(
-      uri: getOriginalUrlForRemoteId(key.assetId, edited: key.edited),
+      uri: getOriginalUrlForRemoteId(key.assetId, edited: key.edited, updatedAt: key.updatedAt),
     );
     final codec = await loadCodecRequest(originalRequest, isFinal: true);
     if (codec == null) {
@@ -200,6 +211,7 @@ class RemoteFullImageProvider extends CancellableImageProvider<RemoteFullImagePr
     if (other is RemoteFullImageProvider) {
       return assetId == other.assetId &&
           thumbhash == other.thumbhash &&
+          updatedAt == other.updatedAt &&
           isAnimated == other.isAnimated &&
           edited == other.edited;
     }
@@ -208,5 +220,6 @@ class RemoteFullImageProvider extends CancellableImageProvider<RemoteFullImagePr
   }
 
   @override
-  int get hashCode => assetId.hashCode ^ thumbhash.hashCode ^ isAnimated.hashCode ^ edited.hashCode;
+  int get hashCode =>
+      assetId.hashCode ^ thumbhash.hashCode ^ updatedAt.hashCode ^ isAnimated.hashCode ^ edited.hashCode;
 }

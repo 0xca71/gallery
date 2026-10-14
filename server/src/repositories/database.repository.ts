@@ -1,5 +1,5 @@
 import { schemaDiff, schemaFromCode, schemaFromDatabase } from '@immich/sql-tools';
-import { Injectable } from '@nestjs/common';
+import { ConflictException, Injectable } from '@nestjs/common';
 import AsyncLock from 'async-lock';
 import { Kysely, Transaction, sql } from 'kysely';
 import { Migrator } from 'kysely/migration';
@@ -28,7 +28,7 @@ import { immich_uuid_v7 } from 'src/schema/functions.js';
 import 'src/schema/index.js'; // make sure all schema definitions are imported for schemaFromCode
 // eslint-disable-next-line import-x/no-duplicates
 import { DB } from 'src/schema/index.js';
-import { vectorIndexQuery } from 'src/utils/database.js';
+import { getKyselyConfig, vectorIndexQuery } from 'src/utils/database.js';
 
 export let cachedVectorExtension: VectorExtension | undefined;
 export async function getVectorExtension(runner: Kysely<DB>): Promise<VectorExtension> {
@@ -60,6 +60,7 @@ export const probes: Record<VectorIndex, number> = {
 @Injectable()
 export class DatabaseRepository {
   private readonly asyncLock = new AsyncLock();
+  private assetLockDatabase?: Kysely<DB>;
 
   constructor(
     @InjectKysely() private db: Kysely<DB>,
@@ -70,6 +71,7 @@ export class DatabaseRepository {
   }
 
   async shutdown() {
+    await this.assetLockDatabase?.destroy();
     await this.db.destroy();
   }
 
@@ -477,6 +479,44 @@ export class DatabaseRepository {
     });
 
     return res as R;
+  }
+
+  /** Cross-worker serialization. Contenders release their pool connection while waiting. */
+  async withAssetLock<R>(
+    assetId: string,
+    callback: () => Promise<R>,
+    lockDatabase?: Kysely<DB>,
+    wait = true,
+  ): Promise<R> {
+    // Lock sessions use a separate pool. Holding every application-pool connection while
+    // callbacks wait for their SQL transactions would otherwise deadlock different assets.
+    const runner =
+      lockDatabase ??
+      (this.assetLockDatabase ??= new Kysely<DB>(getKyselyConfig(this.configRepository.getEnv().database.config)));
+    for (;;) {
+      const result = await runner
+        .connection()
+        .execute(async (connection): Promise<{ acquired: false } | { acquired: true; value: R }> => {
+          const { rows } = await sql<{
+            acquired: boolean;
+          }>`SELECT pg_try_advisory_lock(hashtextextended(${assetId}, 18418)) AS acquired`.execute(connection);
+          if (!rows[0].acquired) {
+            return { acquired: false };
+          }
+          try {
+            return { acquired: true, value: await callback() };
+          } finally {
+            await sql`SELECT pg_advisory_unlock(hashtextextended(${assetId}, 18418))`.execute(connection);
+          }
+        });
+      if (result.acquired) {
+        return result.value;
+      }
+      if (!wait) {
+        throw new ConflictException('Asset file is being processed by another worker');
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, 250));
+    }
   }
 
   tryLock(lock: DatabaseLock): Promise<boolean> {

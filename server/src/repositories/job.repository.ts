@@ -581,6 +581,12 @@ export class JobRepository {
       case JobName.StorageTemplateMigrationSingle: {
         return { jobId: item.data.id };
       }
+      case JobName.AssetEditSave: {
+        return { jobId: item.data.id, removeOnComplete: true, removeOnFail: true };
+      }
+      case JobName.AssetDelete: {
+        return { delay: item.data.delay };
+      }
       case JobName.PersonGenerateThumbnail: {
         return { priority: 1 };
       }

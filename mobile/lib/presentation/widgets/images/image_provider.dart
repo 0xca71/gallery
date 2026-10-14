@@ -187,6 +187,7 @@ ImageProvider getFullImageProvider(
     provider = RemoteFullImageProvider(
       assetId: assetId,
       thumbhash: thumbhash,
+      updatedAt: asset.updatedAt,
       assetType: asset.type,
       isAnimated: asset.isAnimatedImage,
       edited: edited,
@@ -213,7 +214,13 @@ ImageProvider? getThumbnailImageProvider(
   final assetId = asset is RemoteAsset ? asset.id : (asset as LocalAsset).remoteId;
   final thumbhash = asset is RemoteAsset ? asset.thumbHash ?? "" : "";
   return assetId != null
-      ? RemoteImageProvider.thumbnail(assetId: assetId, thumbhash: thumbhash, edited: edited, decodeSize: remoteSize)
+      ? RemoteImageProvider.thumbnail(
+          assetId: assetId,
+          thumbhash: thumbhash,
+          edited: edited,
+          decodeSize: remoteSize,
+          updatedAt: asset.updatedAt,
+        )
       : null;
 }
 
