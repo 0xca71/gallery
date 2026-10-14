@@ -1395,6 +1395,53 @@ export class AssetRepository {
     return count;
   }
 
+  async unlinkAndDeleteLivePhoto({ photoId, videoId, ownerId }: { photoId: string; videoId: string; ownerId: string }) {
+    return this.db.transaction().execute(async (tx) => {
+      // Lock both rows in a stable order. Validate the association again after waiting for
+      // a concurrent unlink, delete, or ownership change before making either write.
+      const assets = await tx
+        .selectFrom('asset')
+        .select(['id', 'ownerId', 'type', 'livePhotoVideoId', 'status'])
+        .where('id', 'in', [asUuid(photoId), asUuid(videoId)])
+        .orderBy('id')
+        .forUpdate()
+        .execute();
+      const photo = assets.find(({ id }) => id === photoId);
+      const video = assets.find(({ id }) => id === videoId);
+      if (
+        !photo ||
+        !video ||
+        photo.ownerId !== ownerId ||
+        video.ownerId !== ownerId ||
+        photo.type !== AssetType.Image ||
+        video.type !== AssetType.Video ||
+        photo.livePhotoVideoId !== videoId ||
+        photo.status === AssetStatus.Deleted ||
+        video.status === AssetStatus.Deleted
+      ) {
+        return 'changed' as const;
+      }
+
+      const otherPhoto = await tx
+        .selectFrom('asset')
+        .select('id')
+        .where('livePhotoVideoId', '=', asUuid(videoId))
+        .where('id', '!=', asUuid(photoId))
+        .executeTakeFirst();
+      if (otherPhoto) {
+        return 'shared' as const;
+      }
+
+      await tx.updateTable('asset').set({ livePhotoVideoId: null }).where('id', '=', asUuid(photoId)).execute();
+      await tx
+        .updateTable('asset')
+        .set({ status: AssetStatus.Deleted, deletedAt: new Date() })
+        .where('id', '=', asUuid(videoId))
+        .execute();
+      return 'success' as const;
+    });
+  }
+
   @GenerateSql()
   getFileSamples() {
     return this.db.selectFrom('asset_file').select(['assetId', 'path']).limit(sql.lit(3)).execute();
@@ -1482,14 +1529,30 @@ export class AssetRepository {
     const value = omitBy(asset, isUndefined);
     delete value.id;
     if (!isEmpty(value)) {
-      return this.db
-        .with('asset', (qb) => qb.updateTable('asset').set(asset).where('id', '=', asUuid(asset.id)).returningAll())
-        .selectFrom('asset')
-        .selectAll('asset')
-        .$call(withExif)
-        .$call((qb) => qb.select(withFaces))
-        .$call((qb) => qb.select(withEdits))
-        .executeTakeFirst();
+      const update = (db: Kysely<DB>) =>
+        db
+          .with('asset', (qb) => qb.updateTable('asset').set(asset).where('id', '=', asUuid(asset.id)).returningAll())
+          .selectFrom('asset')
+          .selectAll('asset')
+          .$call(withExif)
+          .$call((qb) => qb.select(withFaces))
+          .$call((qb) => qb.select(withEdits))
+          .executeTakeFirst();
+      if (asset.livePhotoVideoId) {
+        return this.db.transaction().execute(async (tx) => {
+          // Serialize every new link with unlink-and-delete. A link that waited for deletion
+          // must recheck the video status instead of restoring an association to a deleted video.
+          const video = await tx
+            .selectFrom('asset')
+            .select('id')
+            .where('id', '=', asUuid(asset.livePhotoVideoId!))
+            .where('status', '!=', AssetStatus.Deleted)
+            .forShare()
+            .executeTakeFirst();
+          return video ? update(tx) : undefined;
+        });
+      }
+      return update(this.db);
     }
 
     return this.getById(asset.id, { exifInfo: true, faces: {}, edits: true });
@@ -1598,6 +1661,7 @@ export class AssetRepository {
       .where('ownerId', '=', asUuid(ownerId))
       .where('type', '=', type)
       .where('asset_exif.livePhotoCID', '=', livePhotoCID)
+      .where('asset.status', '!=', AssetStatus.Deleted)
       .limit(1)
       .executeTakeFirst();
   }

@@ -3,6 +3,7 @@ import {
   AssetFileType,
   AssetOrder,
   AssetOrderBy,
+  AssetStatus,
   AssetType,
   AssetVisibility,
   SharedSpaceRole,
@@ -183,6 +184,89 @@ const keyframeRow = (assetId: string, n: number) => ({
 });
 
 describe(AssetRepository.name, () => {
+  describe('unlinkAndDeleteLivePhoto', () => {
+    it.each([false, true])(
+      'atomically unlinks the photo and marks its video deleted (external=%s)',
+      async (external) => {
+        const { ctx, sut } = setup();
+        const { user } = await ctx.newUser();
+        const { library } = external ? await ctx.newLibrary({ ownerId: user.id }) : { library: null };
+        const { asset: video } = await ctx.newAsset({
+          ownerId: user.id,
+          type: AssetType.Video,
+          libraryId: library?.id ?? null,
+          isExternal: external,
+        });
+        const { asset: photo } = await ctx.newAsset({
+          ownerId: user.id,
+          livePhotoVideoId: video.id,
+          libraryId: library?.id ?? null,
+          isExternal: external,
+        });
+        await ctx.newExif({ assetId: photo.id, livePhotoCID: 'keep-original-metadata' });
+
+        await expect(
+          sut.unlinkAndDeleteLivePhoto({ photoId: photo.id, videoId: video.id, ownerId: user.id }),
+        ).resolves.toBe('success');
+        expect(await sut.getById(photo.id, { exifInfo: true })).toMatchObject({
+          livePhotoVideoId: null,
+          exifInfo: { livePhotoCID: 'keep-original-metadata' },
+        });
+        expect(await sut.getById(video.id)).toMatchObject({ status: AssetStatus.Deleted, deletedAt: expect.any(Date) });
+      },
+    );
+
+    it('keeps both associations and the video when another photo references it', async () => {
+      const { ctx, sut } = setup();
+      const { user } = await ctx.newUser();
+      const { asset: video } = await ctx.newAsset({ ownerId: user.id, type: AssetType.Video });
+      const { asset: photo } = await ctx.newAsset({ ownerId: user.id, livePhotoVideoId: video.id });
+      await ctx.newAsset({ ownerId: user.id, livePhotoVideoId: video.id });
+
+      await expect(
+        sut.unlinkAndDeleteLivePhoto({ photoId: photo.id, videoId: video.id, ownerId: user.id }),
+      ).resolves.toBe('shared');
+      expect(await sut.getById(photo.id)).toMatchObject({ livePhotoVideoId: video.id });
+      expect(await sut.getById(video.id)).toMatchObject({ status: AssetStatus.Active, deletedAt: null });
+    });
+
+    it('does not delete a stale association', async () => {
+      const { ctx, sut } = setup();
+      const { user } = await ctx.newUser();
+      const { asset: video } = await ctx.newAsset({ ownerId: user.id, type: AssetType.Video });
+      const { asset: photo } = await ctx.newAsset({ ownerId: user.id });
+
+      await expect(
+        sut.unlinkAndDeleteLivePhoto({ photoId: photo.id, videoId: video.id, ownerId: user.id }),
+      ).resolves.toBe('changed');
+      expect(await sut.getById(video.id)).toMatchObject({ status: AssetStatus.Active, deletedAt: null });
+    });
+
+    it('prevents new links and automatic matches to a video pending permanent deletion', async () => {
+      const { ctx, sut } = setup();
+      const { user } = await ctx.newUser();
+      const { asset: video } = await ctx.newAsset({
+        ownerId: user.id,
+        type: AssetType.Video,
+        status: AssetStatus.Deleted,
+        deletedAt: new Date(),
+      });
+      const { asset: photo } = await ctx.newAsset({ ownerId: user.id });
+      await ctx.newExif({ assetId: video.id, livePhotoCID: 'deleted-video' });
+
+      await expect(sut.update({ id: photo.id, livePhotoVideoId: video.id })).resolves.toBeUndefined();
+      expect(await sut.getById(photo.id)).toMatchObject({ livePhotoVideoId: null });
+      await expect(
+        sut.findLivePhotoMatch({
+          ownerId: user.id,
+          otherAssetId: photo.id,
+          livePhotoCID: 'deleted-video',
+          type: AssetType.Video,
+        }),
+      ).resolves.toBeUndefined();
+    });
+  });
+
   describe('getTimeBuckets', () => {
     it('defaults to month grouping when bucketSize is omitted', async () => {
       const { ctx, sut } = setup();

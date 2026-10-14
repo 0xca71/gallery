@@ -3512,6 +3512,8 @@
   "unlimited": "Sin límites",
   "unlink_album_from_space": "Desvincular álbum de {space}",
   "unlink_album_from_space_confirmation": "¿Quitar este álbum de \"{space}\"? Los archivos de este álbum dejarán de aparecer en ese Space.",
+  "unlink_and_delete_motion_video": "Desvincular y eliminar vídeo",
+  "unlink_and_delete_motion_video_confirmation": "¿Quieres conservar la foto y eliminar permanentemente el vídeo vinculado y su archivo original? Esta acción no se puede deshacer.",
   "unlink_motion_video": "Desvincular vídeo en movimiento",
   "unlink_oauth": "Desvincular OAuth",
   "unlinked_oauth_account": "Cuenta OAuth desconectada",

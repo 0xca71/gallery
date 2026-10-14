@@ -3518,6 +3518,8 @@
   "unlimited": "Onbeperkt",
   "unlink_album_from_space": "Album ontkoppelen van {space}",
   "unlink_album_from_space_confirmation": "Dit album uit \"{space}\" verwijderen? Bestanden in dit album verschijnen daar niet meer.",
+  "unlink_and_delete_motion_video": "Video ontkoppelen en verwijderen",
+  "unlink_and_delete_motion_video_confirmation": "Wil je de foto behouden en de gekoppelde video en het bronbestand permanent verwijderen? Deze actie kan niet ongedaan worden gemaakt.",
   "unlink_motion_video": "Ontkoppel bewegende video",
   "unlink_oauth": "Ontkoppel OAuth",
   "unlinked_oauth_account": "OAuth account ontkoppeld",

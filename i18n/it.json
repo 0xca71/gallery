@@ -3518,6 +3518,8 @@
   "unlimited": "Illimitato",
   "unlink_album_from_space": "Scollega album da {space}",
   "unlink_album_from_space_confirmation": "Rimuovere questo album da \"{space}\"? I file di questo album non appariranno più in quello Space.",
+  "unlink_and_delete_motion_video": "Scollega ed elimina il video",
+  "unlink_and_delete_motion_video_confirmation": "Vuoi conservare la foto ed eliminare definitivamente il video collegato e il suo file originale? Questa azione non può essere annullata.",
   "unlink_motion_video": "Scollega video in movimento",
   "unlink_oauth": "Scollega OAuth",
   "unlinked_oauth_account": "Scollega account OAuth",

@@ -3520,6 +3520,8 @@
   "unlimited": "Не ограничено",
   "unlink_album_from_space": "Отвязать альбом от «{space}»",
   "unlink_album_from_space_confirmation": "Убрать этот альбом из «{space}»? Объекты этого альбома больше не будут отображаться в этом Space.",
+  "unlink_and_delete_motion_video": "Отсоединить и удалить видео",
+  "unlink_and_delete_motion_video_confirmation": "Вы хотите сохранить фотографию и навсегда удалить связанное видео и его исходный файл? Это действие нельзя отменить.",
   "unlink_motion_video": "Отсоединить движущееся видео",
   "unlink_oauth": "Отключить OAuth",
   "unlinked_oauth_account": "Отключить аккаунт OAuth",

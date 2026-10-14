@@ -3510,6 +3510,8 @@
   "unlimited": "Unlimitiert",
   "unlink_album_from_space": "Album-Verknüpfung mit {space} aufheben",
   "unlink_album_from_space_confirmation": "Dieses Album aus \"{space}\" entfernen? Dateien in diesem Album werden dort nicht mehr angezeigt.",
+  "unlink_and_delete_motion_video": "Verknüpfung aufheben und Video löschen",
+  "unlink_and_delete_motion_video_confirmation": "Möchtest du das Foto behalten und das verknüpfte Video samt Originaldatei dauerhaft löschen? Diese Aktion kann nicht rückgängig gemacht werden.",
   "unlink_motion_video": "Verknüpfung zum Bewegungsvideo aufheben",
   "unlink_oauth": "OAuth entfernen",
   "unlinked_oauth_account": "OAuth-Konto entfernt",

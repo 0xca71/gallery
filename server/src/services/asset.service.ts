@@ -1,4 +1,4 @@
-import { BadRequestException, ForbiddenException, Injectable } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Injectable } from '@nestjs/common';
 import { isUndefined, omitBy } from 'lodash-es';
 import { DateTime, Duration } from 'luxon';
 import { isAbsolute } from 'node:path';
@@ -206,6 +206,36 @@ export class AssetService extends BaseService {
         person.type = spacePerson.type;
       }
     }
+  }
+
+  async unlinkAndDeleteLivePhoto(auth: AuthDto, id: string): Promise<AssetResponseDto> {
+    await this.requireAccess({ auth, permission: Permission.AssetDelete, ids: [id] });
+    const photo = await this.findOrFail(id);
+    if (photo.type !== AssetType.Image) {
+      throw new BadRequestException('Live photo must be an image');
+    }
+    if (!photo.livePhotoVideoId) {
+      return this.get(auth, id) as Promise<AssetResponseDto>;
+    }
+
+    const videoId = photo.livePhotoVideoId;
+    await this.requireAccess({ auth, permission: Permission.AssetDelete, ids: [videoId] });
+    await onBeforeUnlink({ asset: this.assetRepository, event: this.eventRepository }, { livePhotoVideoId: videoId });
+
+    const result = await retryOnDeadlock(() =>
+      this.assetRepository.unlinkAndDeleteLivePhoto({ photoId: id, videoId, ownerId: auth.user.id }),
+    );
+    if (result === 'shared') {
+      throw new ConflictException('Live photo video is still linked to another photo');
+    }
+    if (result === 'changed') {
+      throw new ConflictException('Live photo association changed; refresh the photo and try again');
+    }
+
+    // Reuse permanent deletion, including file cleanup and client deletion audits. Do not
+    // restore the video's visibility or emit AssetShow as the unlink-only path does.
+    await this.eventRepository.emit('AssetDeleteAll', { assetIds: [videoId], userId: auth.user.id });
+    return this.get(auth, id) as Promise<AssetResponseDto>;
   }
 
   async update(auth: AuthDto, id: string, dto: UpdateAssetDto): Promise<AssetResponseDto> {

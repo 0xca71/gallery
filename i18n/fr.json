@@ -3513,6 +3513,8 @@
   "unlimited": "Illimité",
   "unlink_album_from_space": "Délier l'album de {space}",
   "unlink_album_from_space_confirmation": "Retirer cet album de \"{space}\" ? Les fichiers de cet album n'apparaîtront plus dans cet espace.",
+  "unlink_and_delete_motion_video": "Détacher et supprimer la vidéo",
+  "unlink_and_delete_motion_video_confirmation": "Voulez-vous conserver la photo et supprimer définitivement la vidéo associée ainsi que son fichier source ? Cette action est irréversible.",
   "unlink_motion_video": "Détacher la photo animée",
   "unlink_oauth": "Déconnecter OAuth",
   "unlinked_oauth_account": "Compte OAuth non connecté",

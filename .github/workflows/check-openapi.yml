@@ -24,10 +24,19 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Checkout base specification
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.base_ref || 'main' }}
+          path: .openapi-base
+          sparse-checkout: open-api/immich-openapi-specs.json
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
       - name: Check for breaking API changes
         uses: oasdiff/oasdiff-action/breaking@9c0494cfee8b8fcc9fb383ed2d5d3fbdae169b93 # v0.1.15
         with:
-          base: https://raw.githubusercontent.com/${{ github.repository }}/main/open-api/immich-openapi-specs.json
+          base: .openapi-base/open-api/immich-openapi-specs.json
           revision: open-api/immich-openapi-specs.json
           fail-on: ERR
           review: false
@@ -42,6 +51,15 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Checkout base specification
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.base_ref || 'main' }}
+          path: .openapi-base
+          sparse-checkout: open-api/immich-openapi-specs.json
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
       - name: Setup Mise
         uses: immich-app/devtools/actions/use-mise@06a9ef925332c91be647d6256642b86b398592c8 # use-mise-action-v3.2.1
         with:
@@ -51,15 +69,9 @@ jobs:
       - name: Install dependencies
         run: mise //mobile:install:ci
 
-      - name: Fetch base spec from main
-        run: |
-          curl -fsSL \
-            "https://raw.githubusercontent.com/${{ github.repository }}/main/open-api/immich-openapi-specs.json" \
-            -o /tmp/base-spec.json
-
       - name: Check newly-required fields have a backward-compat patch
         working-directory: ./mobile
         env:
-          OPENAPI_BASE_SPEC: /tmp/base-spec.json
+          OPENAPI_BASE_SPEC: ../.openapi-base/open-api/immich-openapi-specs.json
           OPENAPI_REVISION_SPEC: ../open-api/immich-openapi-specs.json
         run: flutter test test/openapi_patches_coverage.dart

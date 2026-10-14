@@ -1,4 +1,4 @@
-import { BadRequestException, ForbiddenException, UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, UnauthorizedException } from '@nestjs/common';
 import { DateTime } from 'luxon';
 import path from 'node:path';
 import { Readable } from 'node:stream';
@@ -62,6 +62,92 @@ describe(AssetService.name, () => {
     // dedicated EXIF-restore emit (asset_exif.updateId is untouched by a visibility flip).
     mocks.sharedSpace.emitLibraryAssetVisibilityPurge.mockResolvedValue(void 0);
     mocks.sharedSpace.emitLibraryAssetVisibilityRestore.mockResolvedValue(void 0);
+  });
+
+  const setupUnlinkAndDelete = (external = false) => {
+    const auth = AuthFactory.create();
+    const libraryId = external ? newUuid() : null;
+    const video = AssetFactory.from({ type: AssetType.Video, libraryId, isExternal: external })
+      .owner(auth.user)
+      .build();
+    const photo = AssetFactory.from({ livePhotoVideoId: video.id, libraryId, isExternal: external })
+      .owner(auth.user)
+      .build();
+    const updated = { ...photo, livePhotoVideoId: null };
+    mocks.access.asset.checkOwnerAccess.mockImplementation((_userId, ids) =>
+      Promise.resolve(new Set([...ids].filter((id) => id === photo.id || id === video.id))),
+    );
+    mocks.asset.getById
+      .mockResolvedValueOnce(getForAsset(photo))
+      .mockResolvedValueOnce(getForAsset(video))
+      .mockResolvedValue(getForAsset(updated));
+    mocks.asset.unlinkAndDeleteLivePhoto.mockResolvedValue('success');
+    return { auth, photo, video, updated };
+  };
+
+  describe('unlinkAndDeleteLivePhoto', () => {
+    it.each([false, true])('unlinks and permanently deletes the video (external=%s)', async (external) => {
+      const { auth, photo, video } = setupUnlinkAndDelete(external);
+      const result = await sut.unlinkAndDeleteLivePhoto(auth, photo.id);
+
+      expect(result.livePhotoVideoId).toBeNull();
+      expect(mocks.asset.unlinkAndDeleteLivePhoto).toHaveBeenCalledWith({
+        photoId: photo.id,
+        videoId: video.id,
+        ownerId: auth.user.id,
+      });
+      expect(mocks.event.emit).toHaveBeenCalledWith('AssetDeleteAll', {
+        assetIds: [video.id],
+        userId: auth.user.id,
+      });
+      expect(mocks.event.emit).not.toHaveBeenCalledWith('AssetShow', expect.anything());
+      expect(mocks.asset.update).not.toHaveBeenCalled();
+      expect(mocks.metadata.writeTags).not.toHaveBeenCalled();
+    });
+
+    it('rejects a video still linked to another photo without scheduling deletion', async () => {
+      const { auth, photo } = setupUnlinkAndDelete();
+      mocks.asset.unlinkAndDeleteLivePhoto.mockResolvedValue('shared');
+
+      await expect(sut.unlinkAndDeleteLivePhoto(auth, photo.id)).rejects.toBeInstanceOf(ConflictException);
+      expect(mocks.event.emit).not.toHaveBeenCalled();
+    });
+
+    it('rejects an association changed by a concurrent request', async () => {
+      const { auth, photo } = setupUnlinkAndDelete();
+      mocks.asset.unlinkAndDeleteLivePhoto.mockResolvedValue('changed');
+
+      await expect(sut.unlinkAndDeleteLivePhoto(auth, photo.id)).rejects.toBeInstanceOf(ConflictException);
+      expect(mocks.event.emit).not.toHaveBeenCalled();
+    });
+
+    it('requires deletion access to the associated video too', async () => {
+      const { auth, photo } = setupUnlinkAndDelete();
+      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([photo.id]));
+
+      await expect(sut.unlinkAndDeleteLivePhoto(auth, photo.id)).rejects.toBeInstanceOf(BadRequestException);
+      expect(mocks.asset.unlinkAndDeleteLivePhoto).not.toHaveBeenCalled();
+      expect(mocks.event.emit).not.toHaveBeenCalled();
+    });
+
+    it('does nothing destructive when the photo is already unlinked', async () => {
+      const auth = AuthFactory.create();
+      const photo = AssetFactory.from({ livePhotoVideoId: null }).owner(auth.user).build();
+      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([photo.id]));
+      mocks.asset.getById.mockResolvedValue(getForAsset(photo));
+
+      await expect(sut.unlinkAndDeleteLivePhoto(auth, photo.id)).resolves.toMatchObject({ livePhotoVideoId: null });
+      expect(mocks.asset.unlinkAndDeleteLivePhoto).not.toHaveBeenCalled();
+      expect(mocks.event.emit).not.toHaveBeenCalled();
+    });
+
+    it('rejects a video as the selected photo', async () => {
+      const { auth, video } = setupUnlinkAndDelete();
+      mocks.asset.getById.mockReset().mockResolvedValue(getForAsset(video));
+
+      await expect(sut.unlinkAndDeleteLivePhoto(auth, video.id)).rejects.toBeInstanceOf(BadRequestException);
+      expect(mocks.asset.unlinkAndDeleteLivePhoto).not.toHaveBeenCalled();
+    });
   });
 
   describe('getStatistics', () => {
@@ -1587,6 +1673,29 @@ describe(AssetService.name, () => {
   });
 
   describe('handleAssetDeletion', () => {
+    it.each([false, true])('deletes the video source and sidecar (external=%s)', async (external) => {
+      const asset = AssetFactory.from({
+        type: AssetType.Video,
+        libraryId: external ? newUuid() : null,
+        isExternal: external,
+        originalPath: external ? '/mnt/external/video.mp4' : '/data/upload/video.mp4',
+      })
+        .file({ type: AssetFileType.Thumbnail })
+        .file({ type: AssetFileType.Preview })
+        .file({ type: AssetFileType.EncodedVideo })
+        .file({ type: AssetFileType.Sidecar })
+        .build();
+      mocks.assetJob.getForAssetDeletion.mockResolvedValue(getForAssetDeletion(asset));
+
+      await sut.handleAssetDeletion({ id: asset.id, deleteOnDisk: true });
+
+      expect(mocks.job.queue).toHaveBeenCalledWith({
+        name: JobName.FileDelete,
+        data: { files: expect.arrayContaining([asset.originalPath, ...asset.files.map(({ path }) => path)]) },
+      });
+      expect(mocks.asset.remove).toHaveBeenCalledWith(getForAssetDeletion(asset));
+    });
+
     // Deleting an asset makes Postgres lock shared_space_person itself to satisfy the
     // representativeFaceId ON DELETE SET NULL foreign key, in face-deletion order. That cycles
     // against concurrent space-people recounts and no application-level ordering can prevent it,

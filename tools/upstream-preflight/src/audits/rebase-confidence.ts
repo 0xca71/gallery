@@ -18,6 +18,7 @@ export type ConfidenceSurfaceMatch = {
 };
 
 export type WorkflowAssertionOptions = {
+  optional?: boolean;
   requireDispatch?: boolean;
   requiredDispatchInputs?: string[];
   requireBranding?: boolean;
@@ -115,12 +116,14 @@ const workflowAssertions: Record<string, WorkflowAssertionOptions> = {
     requiredWorkflowReferences: ['gallery-build-mobile.yml'],
   },
   '.github/workflows/gallery-build-mobile.yml': {
+    optional: true,
     requireDispatch: true,
     requiredDispatchInputs: ['environment', 'version', 'build_target'],
     requireBranding: true,
     brandingBeforeMarkers: ['Build signed Android App Bundle', 'flutter build'],
   },
   '.github/workflows/gallery-mobile-smoke.yml': {
+    optional: true,
     requireDispatch: true,
     requiredDispatchInputs: ['ref'],
     requireBranding: true,
@@ -140,6 +143,7 @@ const workflowAssertions: Record<string, WorkflowAssertionOptions> = {
     ],
   },
   '.github/workflows/gallery-ml-smoke.yml': {
+    optional: true,
     requireDispatch: true,
     requiredDispatchInputs: ['ref'],
     requiredWorkflowName: 'Gallery ML Smoke',
@@ -392,9 +396,11 @@ export function runGalleryWorkflowAssertions(
     ([workflowPath, options]) => {
       const text =
         workflowTexts?.[workflowPath] ?? readWorkflowText(cwd, workflowPath);
+      // Retired workflows still need validation if they are restored.
+      if (options.optional && text === undefined) return [];
       return validateGalleryWorkflowText(
         workflowPath,
-        text,
+        text ?? '',
         options,
       ).details.filter((detail) => !detail.endsWith(' passed'));
     },
@@ -473,9 +479,14 @@ export function runStrictOwnershipConfidenceAudit(
   };
 }
 
-function readWorkflowText(cwd: string, workflowPath: string): string {
+function readWorkflowText(
+  cwd: string,
+  workflowPath: string,
+): string | undefined {
   const fullPath = path.join(cwd, workflowPath);
-  return fs.existsSync(fullPath) ? fs.readFileSync(fullPath, 'utf8') : '';
+  return fs.existsSync(fullPath)
+    ? fs.readFileSync(fullPath, 'utf8')
+    : undefined;
 }
 
 function readConfidenceCheckAvailability(

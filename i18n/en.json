@@ -3526,6 +3526,8 @@
   "unlimited": "Unlimited",
   "unlink_album_from_space": "Unlink album from {space}",
   "unlink_album_from_space_confirmation": "Remove this album from \"{space}\"? Assets in this album will no longer appear in that space.",
+  "unlink_and_delete_motion_video": "Unlink and delete video",
+  "unlink_and_delete_motion_video_confirmation": "Keep the photo and permanently delete its linked video and source file? This action cannot be undone.",
   "unlink_motion_video": "Unlink motion video",
   "unlink_oauth": "Unlink OAuth",
   "unlinked_oauth_account": "Unlinked OAuth account",
