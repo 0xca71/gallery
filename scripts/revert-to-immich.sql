@@ -20,6 +20,7 @@
 --     system_metadata's system-config row — that key is stripped too)
 --   * Pet detection results (person.type, person.species, petsDetectedAt)
 --   * Asset duplicate checksums
+--   * Detailed photo addresses (asset_exif.formattedAddress)
 --   * Library sync state (library_audit, library_user, library.createId)
 --   * Storage migration history
 --
@@ -201,6 +202,7 @@ ALTER TABLE "person"            DROP COLUMN IF EXISTS "type";
 ALTER TABLE "person"            DROP COLUMN IF EXISTS "species";
 ALTER TABLE "asset_job_status"  DROP COLUMN IF EXISTS "petsDetectedAt";
 ALTER TABLE "asset_job_status"  DROP COLUMN IF EXISTS "classifiedAt";
+ALTER TABLE "asset_exif"        DROP COLUMN IF EXISTS "formattedAddress";
 ALTER TABLE "library"           DROP COLUMN IF EXISTS "createId";
 -- 1791000000000-RepointFaceReviewToPersonGroup added this unique index to make option M's
 -- one-person-per-group invariant a database fact. It lives on the upstream `person` table, so
@@ -505,6 +507,7 @@ DELETE FROM "kysely_migrations"
   '1793100000000-AddSharedSpaceAlbumFolderTable',
   '1793200000000-SharedSpaceAlbumFolderAuditTable',
   '1793300000000-ClearPreOptionMFaceRepairScans',
+  '1793400000000-AddAssetFormattedAddress',
   -- Build-time compatibility alias (server/bin/sync-gallery-migrations.mjs): this migration was
   -- renumbered off 1793000000000 when fork PR #1060 took that timestamp, but rolling RC instances
   -- had already recorded the pre-rename name. Drop that row too, or upstream's migrator aborts
