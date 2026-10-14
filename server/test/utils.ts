@@ -25,6 +25,7 @@ import { AlbumUserRepository } from 'src/repositories/album-user.repository.js';
 import { AlbumRepository } from 'src/repositories/album.repository.js';
 import { ApiKeyRepository } from 'src/repositories/api-key.repository.js';
 import { AppRepository } from 'src/repositories/app.repository.js';
+import { AssetEditSaveRepository } from 'src/repositories/asset-edit-save.repository.js';
 import { AssetEditRepository } from 'src/repositories/asset-edit.repository.js';
 import { AssetFileRepository } from 'src/repositories/asset-file.repository.js';
 import { AssetJobRepository } from 'src/repositories/asset-job.repository.js';
@@ -248,6 +249,7 @@ export type ServiceOverrides = {
   apiKey: ApiKeyRepository;
   app: AppRepository;
   asset: AssetRepository;
+  assetEditSave: AssetEditSaveRepository;
   assetEdit: AssetEditRepository;
   assetFile: AssetFileRepository;
   assetJob: AssetJobRepository;
@@ -327,6 +329,7 @@ export const getMocks = () => {
   const databaseMock = automock(DatabaseRepository, { args: [, loggerMock], strict: false });
 
   databaseMock.withLock.mockImplementation((_type, fn) => fn());
+  databaseMock.withAssetLock.mockImplementation((_id, fn) => fn());
   // L7: default `transaction` to a passthrough that just invokes the callback with the mock
   // itself standing in for the trx handle — every repo method the callback calls is ALSO a mock,
   // so it behaves identically regardless of what's passed as `trx`. Mirrors withLock above.
@@ -338,6 +341,7 @@ export const getMocks = () => {
   databaseMock.vacuum.mockResolvedValue(void 0);
 
   const mocks: ServiceMocks = {
+    assetEditSave: automock(AssetEditSaveRepository, { strict: false }),
     access: newAccessRepositoryMock(),
     // eslint-disable-next-line no-sparse-arrays
     logger: automock(LoggingRepository, { args: [, configMock], strict: false }),
@@ -434,6 +438,7 @@ export const newTestService = <T extends BaseService>(
     overrides.app || (mocks.app as As<AppRepository>),
     overrides.asset || (mocks.asset as As<AssetRepository>),
     overrides.assetEdit || (mocks.assetEdit as As<AssetEditRepository>),
+    overrides.assetEditSave || (mocks.assetEditSave as As<AssetEditSaveRepository>),
     overrides.assetFile || (mocks.assetFile as As<AssetFileRepository>),
     overrides.assetJob || (mocks.assetJob as As<AssetJobRepository>),
     overrides.clusterGroup || (mocks.clusterGroup as As<ClusterGroupRepository>),

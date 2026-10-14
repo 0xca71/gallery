@@ -431,6 +431,15 @@ describe(JobService.name, () => {
   });
 
   describe('onDone - AssetEditThumbnailGeneration', () => {
+    it('does not send a legacy edit-ready event for a baked file save', async () => {
+      mocks.job.run.mockResolvedValue(JobStatus.Success);
+      await sut.onJobRun(QueueName.Editor, {
+        name: JobName.AssetEditThumbnailGeneration,
+        data: { id: newUuid(), editSaveOperationId: newUuid() },
+      });
+      expect(mocks.asset.getById).not.toHaveBeenCalled();
+      expect(mocks.websocket.clientSend).not.toHaveBeenCalled();
+    });
     it('should send websocket event with asset and edit info when asset is found', async () => {
       mocks.job.run.mockResolvedValue(JobStatus.Success);
       const assetId = newUuid();

@@ -1,9 +1,15 @@
 import {
   AssetTypeEnum,
+  AssetEditSaveStatus,
+  getAssetEditSave,
+  getAssetEditSaveCapabilities,
+  saveAssetEdits,
   editAsset,
   getAssetInfo,
+  isHttpError,
   removeAssetEdits,
   type AssetEditsCreateDto,
+  type AssetEditSaveCreateDto,
   type AssetResponseDto,
 } from '@immich/sdk';
 import { ConfirmModal, modalManager, toastManager } from '@immich/ui';
@@ -14,6 +20,7 @@ import TrimTool from '$lib/components/asset-viewer/editor/trim-tool/trim-tool.sv
 import { transformManager } from '$lib/managers/edit/transform-manager.svelte';
 import { trimManager } from '$lib/managers/edit/trim-manager.svelte';
 import { eventManager } from '$lib/managers/event-manager.svelte';
+import AssetEditSaveModal from '$lib/modals/AssetEditSaveModal.svelte';
 import { waitForWebsocketEvent } from '$lib/stores/websocket';
 import { getFormatter } from '$lib/utils/i18n';
 
@@ -64,6 +71,9 @@ export class EditManager {
   isShowingConfirmDialog = $state(false);
   isApplyingEdits = $state(false);
   hasAppliedEdits = $state(false);
+  resultAssetId = $state<string | null>(null);
+  pendingSave = $state<{ operationId: string; assetId: string } | null>(null);
+  pendingRequest = $state<{ assetId: string; dto: AssetEditSaveCreateDto } | null>(null);
 
   hasUnsavedChanges = $derived(this.tools.some((t) => t.manager.hasChanges) && !this.hasAppliedEdits);
   canReset = $derived(this.tools.some((t) => t.manager.canReset));
@@ -102,6 +112,7 @@ export class EditManager {
 
   async activateTool(toolType: EditToolType, asset: AssetResponseDto, edits: AssetEditsCreateDto) {
     this.hasAppliedEdits = false;
+    this.resultAssetId = null;
     if (this.selectedTool?.type === toolType) {
       return;
     }
@@ -170,6 +181,98 @@ export class EditManager {
       return false;
     } finally {
       this.isApplyingEdits = false;
+    }
+  }
+
+  async saveImageEdits(): Promise<boolean> {
+    if (!this.currentAsset || this.isApplyingEdits || this.isShowingConfirmDialog) {
+      return false;
+    }
+    const assetId = this.currentAsset.id;
+    const t = await getFormatter();
+    this.isApplyingEdits = true;
+    try {
+      if (!this.pendingSave || this.pendingSave.assetId !== assetId) {
+        if (!this.pendingRequest || this.pendingRequest.assetId !== assetId) {
+          const capabilities = await getAssetEditSaveCapabilities({ id: assetId });
+          this.isShowingConfirmDialog = true;
+          const mode = await modalManager.show(AssetEditSaveModal, { capabilities });
+          this.isShowingConfirmDialog = false;
+          if (!mode) {
+            return false;
+          }
+          if (this.currentAsset?.id !== assetId) {
+            return false;
+          }
+          this.pendingRequest = {
+            assetId,
+            dto: {
+              mode,
+              expectedVersion: this.currentAsset.updatedAt,
+              idempotencyKey: crypto.randomUUID(),
+              edits: structuredClone($state.snapshot(this.selectedTool?.manager.edits ?? [])),
+            },
+          };
+        }
+        const operation = await saveAssetEdits({ id: assetId, assetEditSaveCreateDto: this.pendingRequest.dto });
+        this.pendingSave = { operationId: operation.id, assetId };
+      }
+      const deadline = Date.now() + 5 * 60_000;
+      while (Date.now() < deadline) {
+        const operation = await getAssetEditSave({ id: assetId, operationId: this.pendingSave.operationId });
+        if (operation.status === AssetEditSaveStatus.Completed && operation.resultAssetId) {
+          const refreshed = await getAssetInfo({ id: operation.resultAssetId });
+          if (this.currentAsset?.id !== assetId) {
+            return false;
+          }
+          this.resultAssetId = refreshed.id;
+          eventManager.emit('AssetUpdate', refreshed);
+          eventManager.emit('AssetEditsApplied', refreshed.id);
+          this.pendingSave = null;
+          this.pendingRequest = null;
+          this.hasAppliedEdits = true;
+          toastManager.primary(t('editor_edits_applied_success'));
+          return true;
+        }
+        if (operation.status === AssetEditSaveStatus.Failed || operation.status === AssetEditSaveStatus.Conflict) {
+          this.pendingSave = null;
+          this.pendingRequest = null;
+          const failures = {
+            source_changed: 'editor_save_failed_source_changed',
+            duplicate: 'editor_save_failed_duplicate',
+            unsupported_format: 'editor_save_failed_unsupported_format',
+            quota_exceeded: 'editor_save_failed_quota_exceeded',
+            not_writable: 'editor_save_failed_not_writable',
+            storage_full: 'editor_save_failed_storage_full',
+            source_unavailable: 'editor_save_failed_source_unavailable',
+            save_failed: 'editor_save_failed_save_failed',
+          } as const;
+          toastManager.danger(t(failures[operation.error as keyof typeof failures] ?? failures.save_failed));
+          return false;
+        }
+        if (operation.error === 'recovery_required') {
+          toastManager.danger(t('editor_save_recovery_required'));
+          return false;
+        }
+        await new Promise<void>((resolve) => setTimeout(resolve, 750));
+      }
+      toastManager.primary(t('editor_save_pending'));
+      return false;
+    } catch (error) {
+      if (!this.pendingSave && isHttpError(error) && error.status >= 400 && error.status < 500) {
+        this.pendingRequest = null;
+        toastManager.danger(
+          t(error.status === 409 ? 'editor_save_failed_source_changed' : 'editor_edits_applied_error'),
+        );
+      } else {
+        toastManager.danger(
+          t(this.pendingSave || this.pendingRequest ? 'editor_save_status_unavailable' : 'editor_edits_applied_error'),
+        );
+      }
+      return false;
+    } finally {
+      this.isApplyingEdits = false;
+      this.isShowingConfirmDialog = false;
     }
   }
 }

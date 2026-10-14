@@ -1475,6 +1475,19 @@ describe(MediaService.name, () => {
   describe('handleAssetEditThumbnailGeneration', () => {
     let rawInfo: RawImageInfo;
 
+    it('routes a durable file save through the editor worker without applying legacy edits', async () => {
+      mocks.event.emit.mockImplementation((_name, ...args) => {
+        const request = args[0] as { id: string; result: JobStatus };
+        request.result = JobStatus.Success;
+        return Promise.resolve();
+      });
+      await expect(
+        sut.handleAssetEditThumbnailGeneration({ id: 'source', editSaveOperationId: 'operation' }),
+      ).resolves.toBe(JobStatus.Success);
+      expect(mocks.event.emit).toHaveBeenCalledWith('AssetEditSave', { id: 'operation', result: JobStatus.Success });
+      expect(mocks.assetJob.getForGenerateThumbnailJob).not.toHaveBeenCalled();
+    });
+
     beforeEach(() => {
       rawInfo = { width: 100, height: 100, channels: 3 };
       mocks.person.getFaces.mockResolvedValue([]);

@@ -30,6 +30,15 @@ export class OcrService extends BaseService {
 
   @OnJob({ name: JobName.Ocr, queue: QueueName.Ocr })
   async handleOcr({ id }: JobOf<JobName.Ocr>): Promise<JobStatus> {
+    return this.databaseRepository.withAssetLock(id, async () => {
+      if (await this.assetEditSaveRepository.isSaving(id, false)) {
+        return JobStatus.Skipped;
+      }
+      return this.handleOcrUnlocked({ id });
+    });
+  }
+
+  private async handleOcrUnlocked({ id }: JobOf<JobName.Ocr>): Promise<JobStatus> {
     const { machineLearning } = await this.getConfig({ withCache: true });
     if (!isOcrEnabled(machineLearning)) {
       return JobStatus.Skipped;

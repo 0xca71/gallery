@@ -226,6 +226,22 @@ export class StorageTemplateService extends BaseService {
   }
 
   async moveAsset(asset: StorageAsset, metadata: MoveAssetMetadata, stillPhoto?: StorageAsset) {
+    return this.databaseRepository.withAssetLock(asset.id, async () => {
+      if (await this.assetEditSaveRepository.isSaving(asset.id)) {
+        return;
+      }
+      const current = await this.assetEditSaveRepository.getSource(asset.id);
+      if (
+        current &&
+        (current.asset.originalPath !== asset.originalPath || !current.asset.checksum.equals(asset.checksum))
+      ) {
+        return;
+      }
+      return this.moveAssetUnlocked(asset, metadata, stillPhoto);
+    });
+  }
+
+  private async moveAssetUnlocked(asset: StorageAsset, metadata: MoveAssetMetadata, stillPhoto?: StorageAsset) {
     if (asset.isExternal || StorageCore.isAndroidMotionPath(asset.originalPath)) {
       // External assets are not affected by storage template
       // TODO: shouldn't this only apply to external assets?

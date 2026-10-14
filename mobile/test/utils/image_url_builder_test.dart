@@ -32,4 +32,18 @@ void main() {
       expect(before, isNot(after));
     });
   });
+
+  test('replacement invalidates original and thumbnail URLs even with an unchanged thumbhash', () {
+    final before = DateTime.fromMillisecondsSinceEpoch(1);
+    final after = DateTime.fromMillisecondsSinceEpoch(2);
+    expect(
+      getOriginalUrlForRemoteId('asset', updatedAt: before),
+      isNot(getOriginalUrlForRemoteId('asset', updatedAt: after)),
+    );
+    expect(
+      getThumbnailUrlForRemoteId('asset', thumbhash: 'same', updatedAt: before),
+      isNot(getThumbnailUrlForRemoteId('asset', thumbhash: 'same', updatedAt: after)),
+    );
+    expect(getOriginalUrlForRemoteId('asset'), '$endpoint/assets/asset/original?edited=true');
+  });
 }

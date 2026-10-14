@@ -41,6 +41,7 @@ import { AssetAuditTable } from 'src/schema/tables/asset-audit.table.js';
 import { AssetAudioTable, AssetKeyframeTable, AssetVideoTable } from 'src/schema/tables/asset-av.table.js';
 import { AssetDuplicateChecksumTable } from 'src/schema/tables/asset-duplicate-checksum.table.js';
 import { AssetEditAuditTable } from 'src/schema/tables/asset-edit-audit.table.js';
+import { AssetEditSaveTable } from 'src/schema/tables/asset-edit-save.table.js';
 import { AssetEditTable } from 'src/schema/tables/asset-edit.table.js';
 import { AssetExifTable } from 'src/schema/tables/asset-exif.table.js';
 import { AssetFaceAuditTable } from 'src/schema/tables/asset-face-audit.table.js';
@@ -153,6 +154,7 @@ export class ImmichDatabase {
     AssetDuplicateChecksumTable,
     AssetEditTable,
     AssetEditAuditTable,
+    AssetEditSaveTable,
     AssetFaceTable,
     AssetFaceAuditTable,
     AssetMetadataTable,
@@ -277,6 +279,7 @@ export interface Migrations {
 }
 
 export interface DB {
+  asset_edit_save: AssetEditSaveTable;
   kysely_migrations: { timestamp: string; name: string };
 
   activity: ActivityTable;

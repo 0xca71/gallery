@@ -600,6 +600,16 @@ export class AssetService extends BaseService {
 
   @OnJob({ name: JobName.AssetDelete, queue: QueueName.BackgroundTask })
   async handleAssetDeletion(job: JobOf<JobName.AssetDelete>): Promise<JobStatus> {
+    return this.databaseRepository.withAssetLock(job.id, async () => {
+      if (await this.assetEditSaveRepository.isSaving(job.id)) {
+        await this.jobRepository.queue({ name: JobName.AssetDelete, data: { ...job, delay: 2000 } });
+        return JobStatus.Skipped;
+      }
+      return this.handleAssetDeletionUnlocked(job);
+    });
+  }
+
+  private async handleAssetDeletionUnlocked(job: JobOf<JobName.AssetDelete>): Promise<JobStatus> {
     const { id, deleteOnDisk } = job;
 
     const asset = await this.assetJobRepository.getForAssetDeletion(id);
@@ -867,6 +877,13 @@ export class AssetService extends BaseService {
   }
 
   async editAsset(auth: AuthDto, id: string, dto: AssetEditsCreateDto): Promise<AssetEditsResponseDto> {
+    return this.databaseRepository.withAssetLock(id, async () => {
+      await this.assetEditSaveRepository.assertNotSaving(id);
+      return this.editAssetUnlocked(auth, id, dto);
+    });
+  }
+
+  private async editAssetUnlocked(auth: AuthDto, id: string, dto: AssetEditsCreateDto): Promise<AssetEditsResponseDto> {
     await this.requireAccess({ auth, permission: Permission.AssetEditCreate, ids: [id] });
 
     const asset = await this.assetRepository.getForEdit(id);
@@ -1000,6 +1017,13 @@ export class AssetService extends BaseService {
   }
 
   async removeAssetEdits(auth: AuthDto, id: string): Promise<void> {
+    return this.databaseRepository.withAssetLock(id, async () => {
+      await this.assetEditSaveRepository.assertNotSaving(id);
+      return this.removeAssetEditsUnlocked(auth, id);
+    });
+  }
+
+  private async removeAssetEditsUnlocked(auth: AuthDto, id: string): Promise<void> {
     await this.requireAccess({ auth, permission: Permission.AssetEditDelete, ids: [id] });
 
     const asset = await this.assetRepository.getById(id);

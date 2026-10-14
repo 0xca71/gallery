@@ -207,7 +207,7 @@ export const getAssetUrl = ({
     return;
   }
   const id = asset.id;
-  const cacheKey = asset.thumbhash;
+  const cacheKey = `${asset.thumbhash ?? ''}:${asset.fileModifiedAt}`;
   if (sharedLink && (!sharedLink.allowDownload || !sharedLink.showMetadata)) {
     return getAssetMediaUrl({ id, size: AssetMediaSize.Preview, cacheKey });
   }
@@ -217,7 +217,11 @@ export const getAssetUrl = ({
 
 export function getAssetUrls(asset: AssetResponseDto, sharedLink?: SharedLinkResponseDto) {
   return {
-    thumbnail: getAssetMediaUrl({ id: asset.id, cacheKey: asset.thumbhash, size: AssetMediaSize.Thumbnail }),
+    thumbnail: getAssetMediaUrl({
+      id: asset.id,
+      cacheKey: `${asset.thumbhash ?? ''}:${asset.fileModifiedAt}`,
+      size: AssetMediaSize.Thumbnail,
+    }),
     preview: getAssetUrl({ asset, sharedLink })!,
     original: getAssetUrl({ asset, sharedLink, forceOriginal: true })!,
   };

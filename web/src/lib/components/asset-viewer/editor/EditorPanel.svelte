@@ -32,7 +32,8 @@
   });
 
   async function applyEdits() {
-    const success = await editManager.applyEdits();
+    const success =
+      asset.type === AssetTypeEnum.Image ? await editManager.saveImageEdits() : await editManager.applyEdits();
 
     if (success) {
       onClose();
@@ -40,6 +41,9 @@
   }
 
   async function closeEditor() {
+    if (editManager.isApplyingEdits) {
+      return;
+    }
     if (await editManager.closeConfirm()) {
       onClose();
     }
@@ -50,7 +54,7 @@
 
 <svelte:document
   use:shortcuts={[
-    { shortcut: { key: 'Escape' }, onShortcut: onClose },
+    { shortcut: { key: 'Escape' }, onShortcut: closeEditor },
     { shortcut: { key: 'Enter' }, onShortcut: applyEdits },
   ]}
 />
@@ -71,7 +75,11 @@
     <Button shape="round" size="small" onclick={applyEdits} loading={editManager.isApplyingEdits}>{$t('save')}</Button>
   </HStack>
 
-  <section>
+  <section
+    inert={editManager.isApplyingEdits ||
+      editManager.pendingSave?.assetId === asset.id ||
+      editManager.pendingRequest?.assetId === asset.id}
+  >
     {#if editManager.selectedTool}
       <editManager.selectedTool.component />
     {/if}

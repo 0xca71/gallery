@@ -1,5 +1,6 @@
 <script lang="ts">
   import { browser } from '$app/environment';
+  import { goto } from '$app/navigation';
   import { page } from '$app/state';
   import { focusTrap } from '$lib/actions/focus-trap';
   import { shortcuts } from '$lib/actions/shortcut';
@@ -16,6 +17,7 @@
   import { editManager, EditToolType } from '$lib/managers/edit/edit-manager.svelte';
   import { eventManager } from '$lib/managers/event-manager.svelte';
   import type { TimelineAsset } from '$lib/managers/timeline-manager/types';
+  import { Route } from '$lib/route';
   import { getAssetActions } from '$lib/services/asset.service';
   import { faceManager } from '$lib/stores/face.svelte';
   import { ocrManager } from '$lib/stores/ocr.svelte';
@@ -289,9 +291,16 @@
 
   const closeEditor = async () => {
     if (editManager.hasAppliedEdits) {
-      const refreshedAsset = await getAssetInfo({ id: asset.id, spaceId });
+      const resultId = editManager.resultAssetId ?? asset.id;
+      const refreshedAsset = await getAssetInfo({ id: resultId, spaceId: resultId === asset.id ? spaceId : undefined });
       onAssetChange?.(refreshedAsset);
-      assetViewerManager.setAsset(refreshedAsset);
+      if (resultId === asset.id) {
+        assetViewerManager.setAsset(refreshedAsset);
+      } else if (spaceId || sharedLink) {
+        await goto(Route.viewAsset({ id: refreshedAsset.id }));
+      } else {
+        await navigateToViewerAsset(refreshedAsset);
+      }
     }
     assetViewerManager.closeEditor();
   };
