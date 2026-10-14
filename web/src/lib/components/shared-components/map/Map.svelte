@@ -188,7 +188,10 @@
     }
   }
 
-  type FeaturePoint = Feature<Point, { id: string; city: string | null; state: string | null; country: string | null }>;
+  type FeaturePoint = Feature<
+    Point,
+    { id: string; city: string | null; state: string | null; country: string | null; formattedAddress?: string | null }
+  >;
 
   const asFeature = (marker: MapMarkerResponseDto): FeaturePoint => {
     return {
@@ -199,6 +202,7 @@
         city: marker.city,
         state: marker.state,
         country: marker.country,
+        formattedAddress: marker.formattedAddress,
       },
     };
   };
@@ -213,6 +217,7 @@
       city: featurePoint.properties.city,
       state: featurePoint.properties.state,
       country: featurePoint.properties.country,
+      formattedAddress: featurePoint.properties.formattedAddress,
     };
   };
 
@@ -498,9 +503,13 @@
                 data-testid="map-marker"
               />
             {/if}
-            {#if popup}
-              <Popup offset={[0, -30]} openOn="click" closeOnClickOutside>
-                {@render popup({ marker: asMarker(feature) })}
+            {#if popup || feature.properties?.formattedAddress}
+              <Popup offset={[0, -30]} openOn={popup ? 'click' : 'hover'} closeOnClickOutside>
+                {#if popup}
+                  {@render popup({ marker: asMarker(feature) })}
+                {:else}
+                  <p class="max-w-64 text-center wrap-break-word">{feature.properties?.formattedAddress}</p>
+                {/if}
               </Popup>
             {/if}
           {/snippet}

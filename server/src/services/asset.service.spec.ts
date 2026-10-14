@@ -192,6 +192,22 @@ describe(AssetService.name, () => {
     });
   });
 
+  describe('ensureAssetAddress', () => {
+    it('requires asset read access before resolving and saving an address', async () => {
+      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set(['asset-1']));
+      mocks.map.ensureDetailedAddress.mockResolvedValue('中国湖北省武汉市');
+      await expect(sut.ensureAssetAddress(authStub.admin, 'asset-1')).resolves.toEqual({
+        formattedAddress: '中国湖北省武汉市',
+      });
+      expect(mocks.map.ensureDetailedAddress).toHaveBeenCalledWith('asset-1');
+    });
+
+    it('never calls the provider for an asset the caller cannot read', async () => {
+      await expect(sut.ensureAssetAddress(authStub.admin, 'asset-1')).rejects.toBeInstanceOf(BadRequestException);
+      expect(mocks.map.ensureDetailedAddress).not.toHaveBeenCalled();
+    });
+  });
+
   describe('get', () => {
     it('should allow owner access', async () => {
       const asset = AssetFactory.create();
@@ -1231,6 +1247,7 @@ describe(AssetService.name, () => {
         country: null,
         state: null,
         city: null,
+        formattedAddress: null,
       });
       expect(mocks.job.queueAll).toHaveBeenCalledWith([{ name: JobName.SidecarWrite, data: { id: 'asset-1' } }]);
     });
@@ -1256,6 +1273,7 @@ describe(AssetService.name, () => {
         country: null,
         state: null,
         city: null,
+        formattedAddress: null,
       });
       expect(mocks.job.queueAll).toHaveBeenCalledWith([{ name: JobName.SidecarWrite, data: { id: 'asset-1' } }]);
     });
@@ -1281,6 +1299,7 @@ describe(AssetService.name, () => {
         country: 'France',
         state: 'Île-de-France',
         city: 'Paris',
+        formattedAddress: null,
       });
     });
 

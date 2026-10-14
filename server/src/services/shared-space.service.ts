@@ -1606,6 +1606,7 @@ export class SharedSpaceService extends BaseService {
       city: marker.city ?? null,
       state: marker.state ?? null,
       country: marker.country ?? null,
+      formattedAddress: marker.formattedAddress ?? null,
     }));
   }
 
@@ -1742,6 +1743,7 @@ export class SharedSpaceService extends BaseService {
       city: marker.city ?? null,
       state: marker.state ?? null,
       country: marker.country ?? null,
+      formattedAddress: marker.formattedAddress ?? null,
     }));
   }
 

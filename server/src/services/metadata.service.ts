@@ -438,6 +438,14 @@ export class MetadataService extends BaseService {
         }
 
         await tasks.all();
+        // Read the persisted point, including manually locked GPS, after metadata is saved.
+        if (reverseGeocoding.enabled) {
+          try {
+            await this.mapRepository.ensureDetailedAddress(asset.id, 'metadata');
+          } catch {
+            this.logger.warn('Detailed address lookup skipped');
+          }
+        }
 
         if (exifData.livePhotoCID) {
           await this.linkLivePhotos(asset, exifData);

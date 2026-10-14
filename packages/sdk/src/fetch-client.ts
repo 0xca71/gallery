@@ -1355,6 +1355,8 @@ export type MapMarkerResponseDto = {
     city: string | null;
     /** Country name */
     country: string | null;
+    /** Detailed display address */
+    formattedAddress?: string | null;
     /** Asset ID */
     id: string;
     /** Latitude */
@@ -1598,6 +1600,8 @@ export type ExifResponseDto = {
     fileSizeInByte?: number | null;
     /** Focal length in mm */
     focalLength?: number | null;
+    /** Detailed display address */
+    formattedAddress?: string | null;
     /** ISO sensitivity */
     iso?: number | null;
     /** GPS latitude */
@@ -1759,6 +1763,10 @@ export type UpdateAssetDto = {
     /** Rating in range [1-5] (starred), -1 (rejected), or null (unrated) */
     rating?: number | null;
     visibility?: AssetVisibility;
+};
+export type AssetAddressResponseDto = {
+    /** Detailed address, or null when unavailable */
+    formattedAddress: string | null;
 };
 export type CropParameters = {
     /** Height of the crop */
@@ -6315,6 +6323,20 @@ export function updateAsset({ id, updateAssetDto }: {
         method: "PUT",
         body: updateAssetDto
     })));
+}
+/**
+ * Ensure asset detailed address
+ */
+export function ensureAssetAddress({ id }: {
+    id: string;
+}, opts?: Oazapfts.RequestOpts) {
+    return oazapfts.ok(oazapfts.fetchJson<{
+        status: 200;
+        data: AssetAddressResponseDto;
+    }>(`/assets/${encodeURIComponent(id)}/address`, {
+        ...opts,
+        method: "POST"
+    }));
 }
 /**
  * Remove edits from an existing asset

@@ -2,6 +2,7 @@ import { AccessRepository } from 'src/repositories/access.repository.js';
 import { ActivityRepository } from 'src/repositories/activity.repository.js';
 import { AlbumUserRepository } from 'src/repositories/album-user.repository.js';
 import { AlbumRepository } from 'src/repositories/album.repository.js';
+import { AmapRepository } from 'src/repositories/amap.repository.js';
 import { ApiKeyRepository } from 'src/repositories/api-key.repository.js';
 import { AppMetricsRepository } from 'src/repositories/app-metrics.repository.js';
 import { AppRepository } from 'src/repositories/app.repository.js';
@@ -65,6 +66,7 @@ import { WebsocketRepository } from 'src/repositories/websocket.repository.js';
 import { WorkflowRepository } from 'src/repositories/workflow.repository.js';
 
 export const repositories = [
+  AmapRepository,
   AccessRepository,
   ActivityRepository,
   AlbumRepository,
