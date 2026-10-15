@@ -61,16 +61,6 @@ ENV IMMICH_BUILD=${BUILD_ID}
 
 RUN --mount=type=cache,id=pnpm,target=/buildcache/pnpm-store pnpm --filter immich-web build
 
-FROM sdk AS cli
-
-COPY ./packages/cli/package.json ./packages/cli/package.json
-RUN --mount=type=cache,id=pnpm,target=/buildcache/pnpm-store pnpm --filter @immich/cli install --frozen-lockfile
-
-COPY ./packages/cli ./packages/cli/
-RUN --mount=type=cache,id=pnpm,target=/buildcache/pnpm-store \
-  pnpm --filter @immich/cli build && \
-  pnpm --filter @immich/cli --prod --no-optional deploy /output/cli-pruned
-
 FROM plugin-sdk AS plugins
 
 ARG TARGETPLATFORM
@@ -105,14 +95,13 @@ ENV NODE_ENV=production \
   NVIDIA_DRIVER_CAPABILITIES=all \
   NVIDIA_VISIBLE_DEVICES=all
 
+# The server package includes immich-admin and its start.sh launcher.
 COPY --from=server /output/server-pruned ./server
 COPY --from=web /usr/src/app/web/build /build/www
-COPY --from=cli /output/cli-pruned ./cli
 COPY --from=plugins /usr/src/app/packages/plugin-core/dist /build/plugins/immich-plugin-core/dist
 COPY --from=plugins /usr/src/app/packages/plugin-core/manifest.json /build/plugins/immich-plugin-core/manifest.json
 COPY --from=plugins /usr/src/app/packages/plugin-gallery/dist /build/plugins/gallery-core/dist
 COPY --from=plugins /usr/src/app/packages/plugin-gallery/manifest.json /build/plugins/gallery-core/manifest.json
-RUN ln -s ../../cli/bin/immich server/bin/immich
 COPY LICENSE /licenses/LICENSE.txt
 COPY LICENSE /LICENSE
 
