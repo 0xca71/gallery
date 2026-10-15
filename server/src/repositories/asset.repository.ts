@@ -740,6 +740,7 @@ export class AssetRepository {
                 longitude: ref('longitude'),
                 projectionType: ref('projectionType'),
                 city: ref('city'),
+                formattedAddress: ref('formattedAddress'),
                 livePhotoCID: ref('livePhotoCID'),
                 autoStackId: ref('autoStackId'),
                 state: ref('state'),
@@ -764,6 +765,26 @@ export class AssetRepository {
               },
               exif,
             ),
+            // Metadata extraction may change unlocked GPS while leaving the address column omitted.
+            // Compare the effective (lock-aware) GPS, not the file's incoming coordinates.
+            ...(exif.formattedAddress === undefined &&
+              (exif.latitude !== undefined || exif.longitude !== undefined) && {
+                formattedAddress: eb
+                  .case()
+                  .when(
+                    eb.or([
+                      ...(exif.latitude === undefined
+                        ? []
+                        : [sql<boolean>`${ref('latitude')} IS DISTINCT FROM ${eb.ref('asset_exif.latitude')}`]),
+                      ...(exif.longitude === undefined
+                        ? []
+                        : [sql<boolean>`${ref('longitude')} IS DISTINCT FROM ${eb.ref('asset_exif.longitude')}`]),
+                    ]),
+                  )
+                  .then(null)
+                  .else(eb.ref('asset_exif.formattedAddress'))
+                  .end(),
+              }),
           };
         }),
       )

@@ -50,11 +50,12 @@
 
   interface Props {
     asset: AssetResponseDto;
+    onAddressResolved?: (asset: AssetResponseDto) => void;
     currentAlbum?: AlbumResponseDto | null;
     spaceId?: string;
   }
 
-  let { asset, currentAlbum = null, spaceId }: Props = $props();
+  let { asset, currentAlbum = null, spaceId, onAddressResolved }: Props = $props();
   let effectiveSpaceId = $derived(spaceId || asset.resolvedSpaceId);
 
   let isOwner = $derived(authManager.authenticated && authManager.user.id === asset.ownerId);
@@ -397,7 +398,7 @@
         </div>
       {/if}
 
-      <DetailPanelLocation {isOwner} {canFilter} {asset} />
+      <DetailPanelLocation {isOwner} {canFilter} bind:asset {onAddressResolved} />
     </div>
   </section>
 
@@ -414,6 +415,7 @@
               city: asset.exifInfo?.city ?? null,
               state: asset.exifInfo?.state ?? null,
               country: asset.exifInfo?.country ?? null,
+              formattedAddress: asset.exifInfo?.formattedAddress ?? null,
             },
           ]}
           center={latlng}
@@ -428,6 +430,9 @@
             {@const { lat, lon } = marker}
             {@const mapProviderLinks = getMapProviderLinks(lat, lon)}
             <div class="flex flex-col items-center gap-1">
+              {#if marker.formattedAddress}
+                <p class="max-w-64 text-center wrap-break-word">{marker.formattedAddress}</p>
+              {/if}
               <Text fontWeight="bold">{lat.toPrecision(6)}, {lon.toPrecision(6)}</Text>
               <div class="flex flex-col items-center gap-1">
                 {#each mapProviderLinks as link (link.key)}

@@ -709,6 +709,7 @@ export const columns = {
     'asset_exif.fNumber',
     'asset_exif.focalLength',
     'asset_exif.fps',
+    'asset_exif.formattedAddress',
     'asset_exif.iso',
     'asset_exif.latitude',
     'asset_exif.lensModel',

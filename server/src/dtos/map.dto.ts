@@ -37,6 +37,7 @@ const MapMarkerResponseSchema = z
     city: z.string().nullable().describe('City name'),
     state: z.string().nullable().describe('State/Province name'),
     country: z.string().nullable().describe('Country name'),
+    formattedAddress: z.string().nullish().describe('Detailed display address'),
   })
   .meta({ id: 'MapMarkerResponseDto' });
 

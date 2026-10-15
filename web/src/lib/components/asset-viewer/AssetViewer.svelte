@@ -905,7 +905,21 @@
       translate="yes"
     >
       {#if showDetailPanel}
-        <DetailPanel {asset} currentAlbum={album} {spaceId} />
+        <DetailPanel
+          {asset}
+          currentAlbum={album}
+          {spaceId}
+          onAddressResolved={(updated) => {
+            if (updated.id !== asset.id) {
+              return;
+            }
+            if (previewStackedAsset?.id === updated.id) {
+              previewStackedAsset = updated;
+            }
+            onAssetChange?.(updated);
+            assetViewerManager.setAsset(updated);
+          }}
+        />
       {:else if assetViewerManager.isShowEditor}
         <EditorPanel {asset} onClose={closeEditor} />
       {/if}

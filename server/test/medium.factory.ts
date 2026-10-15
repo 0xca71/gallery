@@ -25,6 +25,7 @@ import { AccessRepository } from 'src/repositories/access.repository.js';
 import { ActivityRepository } from 'src/repositories/activity.repository.js';
 import { AlbumUserRepository } from 'src/repositories/album-user.repository.js';
 import { AlbumRepository } from 'src/repositories/album.repository.js';
+import { AmapRepository } from 'src/repositories/amap.repository.js';
 import { ApiKeyRepository } from 'src/repositories/api-key.repository.js';
 import { AssetEditSaveRepository } from 'src/repositories/asset-edit-save.repository.js';
 import { AssetEditRepository } from 'src/repositories/asset-edit.repository.js';
@@ -715,6 +716,7 @@ const newRealRepository = <T extends BaseServiceDeps[number]>(key: T, db: Kysely
         new SystemMetadataRepository(db),
         LoggingRepository.create(),
         db as unknown as ConstructorParameters<typeof MapRepository>[3],
+        new AmapRepository(new ConfigRepository(), LoggingRepository.create(), db),
       ) as InstanceType<T>;
     }
 

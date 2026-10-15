@@ -25,7 +25,8 @@
   const dateString = $derived(dateTime.toLocaleString(DateTime.DATE_MED_WITH_WEEKDAY));
 
   const locationString = $derived(
-    [asset.exifInfo?.city, asset.exifInfo?.state, asset.exifInfo?.country].filter(Boolean).join(', '),
+    asset.exifInfo?.formattedAddress?.trim() ||
+      [asset.exifInfo?.city, asset.exifInfo?.state, asset.exifInfo?.country].filter(Boolean).join(', '),
   );
 
   const shouldShow = $derived.by(() => {

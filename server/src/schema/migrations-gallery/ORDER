@@ -65,4 +65,5 @@
 1793100000000-AddSharedSpaceAlbumFolderTable
 1793200000000-SharedSpaceAlbumFolderAuditTable
 1793300000000-ClearPreOptionMFaceRepairScans
+1793400000000-AddAssetFormattedAddress
 1793500000000-AddAssetEditSave

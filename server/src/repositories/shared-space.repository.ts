@@ -4,6 +4,7 @@ import { InjectKysely } from 'nestjs-kysely';
 import type { PeopleFaceStatistics } from 'src/repositories/person.repository.js';
 import type { AssetSearchBuilderOptions } from 'src/repositories/search.repository.js';
 import { ChunkedArray, ChunkedSet, DummyValue, GenerateSql } from 'src/decorators.js';
+import { MapMarkerResponseDto } from 'src/dtos/map.dto.js';
 import {
   AlbumUserRole,
   AssetType,
@@ -2208,7 +2209,17 @@ export class SharedSpaceRepository {
   }
 
   @GenerateSql({ params: [DummyValue.UUID] })
-  getMapMarkers(spaceId: string) {
+  getMapMarkers(spaceId: string): Promise<
+    {
+      id: string;
+      latitude: number | null;
+      longitude: number | null;
+      city: string | null;
+      state: string | null;
+      country: string | null;
+      formattedAddress?: string | null;
+    }[]
+  > {
     return this.db
       .selectFrom(
         this.db
@@ -2242,6 +2253,7 @@ export class SharedSpaceRepository {
         'asset_exif.city',
         'asset_exif.state',
         'asset_exif.country',
+        'asset_exif.formattedAddress',
       ])
       .execute();
   }
@@ -2249,7 +2261,7 @@ export class SharedSpaceRepository {
   @GenerateSql({
     params: [{ userIds: [DummyValue.UUID], visibility: AssetVisibility.Timeline }],
   })
-  getFilteredMapMarkers(options: AssetSearchBuilderOptions) {
+  getFilteredMapMarkers(options: AssetSearchBuilderOptions): Promise<MapMarkerResponseDto[]> {
     return searchAssetBuilderLegacy(this.db, options)
       .innerJoin('asset_exif', 'asset.id', 'asset_exif.assetId')
       .where('asset_exif.latitude', 'is not', null)
@@ -2261,6 +2273,7 @@ export class SharedSpaceRepository {
         'asset_exif.city',
         'asset_exif.state',
         'asset_exif.country',
+        'asset_exif.formattedAddress',
       ])
       .$narrowType<{ lat: NotNull; lon: NotNull }>()
       .execute();

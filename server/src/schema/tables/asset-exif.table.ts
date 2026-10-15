@@ -79,6 +79,9 @@ export class AssetExifTable {
   @Column({ type: 'character varying', nullable: true })
   country!: string | null;
 
+  @Column({ type: 'text', nullable: true })
+  formattedAddress!: string | null;
+
   @Column({ type: 'text', default: '' })
   description!: Generated<string>; // or caption
 

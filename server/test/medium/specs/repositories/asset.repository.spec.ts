@@ -1916,6 +1916,40 @@ describe(AssetRepository.name, () => {
   });
 
   describe('upsertExif', () => {
+    it.each([
+      { latitude: 30.6, longitude: 114.18, locked: false, address: 'saved' },
+      { latitude: 31.6, longitude: 114.18, locked: false, address: null },
+      { latitude: 31.6, longitude: 115, locked: true, address: 'saved' },
+    ])(
+      'keeps detailed addresses consistent with effective GPS ($latitude/$longitude, locked=$locked)',
+      async ({ latitude, longitude, locked, address }) => {
+        const { ctx, sut } = setup();
+        const { user } = await ctx.newUser();
+        const { asset } = await ctx.newAsset({ ownerId: user.id });
+        await sut.upsertExif({
+          exif: {
+            assetId: asset.id,
+            latitude: 30.6,
+            longitude: 114.18,
+            formattedAddress: 'saved',
+            lockedProperties: locked ? ['latitude', 'longitude'] : [],
+          },
+          lockedPropertiesBehavior: 'override',
+        });
+        await sut.upsertExif({ exif: { assetId: asset.id, latitude, longitude }, lockedPropertiesBehavior: 'skip' });
+        const exif = await ctx.database
+          .selectFrom('asset_exif')
+          .select(['latitude', 'longitude', 'formattedAddress'])
+          .where('assetId', '=', asset.id)
+          .executeTakeFirstOrThrow();
+        expect(exif).toEqual({
+          latitude: locked ? 30.6 : latitude,
+          longitude: locked ? 114.18 : longitude,
+          formattedAddress: address,
+        });
+      },
+    );
+
     it('should replace stored audio metadata on a second extraction', async () => {
       const { ctx, sut } = setup();
       const { user } = await ctx.newUser();

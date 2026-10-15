@@ -19,6 +19,7 @@ import {
   UpdateAssetDto,
 } from 'src/dtos/asset.dto.js';
 import { AssetEditsCreateDto, AssetEditsResponseDto } from 'src/dtos/editing.dto.js';
+import { AssetAddressResponseDto } from 'src/dtos/exif.dto.js';
 import { AssetOcrResponseDto } from 'src/dtos/ocr.dto.js';
 import { ApiTag, Permission, RouteKey } from 'src/enum.js';
 import { Auth, Authenticated } from 'src/middleware/auth.guard.js';
@@ -87,6 +88,18 @@ export class AssetController {
   })
   deleteAssets(@Auth() auth: AuthDto, @Body() dto: AssetBulkDeleteDto): Promise<void> {
     return this.service.deleteAll(auth, dto);
+  }
+
+  @Post(':id/address')
+  @Authenticated({ permission: Permission.AssetRead })
+  @HttpCode(HttpStatus.OK)
+  @Endpoint({
+    summary: 'Ensure asset detailed address',
+    description: 'Resolve and store a missing detailed address without changing GPS or location filters.',
+    history: new HistoryBuilder().added('v1').beta('v1'),
+  })
+  ensureAssetAddress(@Auth() auth: AuthDto, @Param() { id }: UUIDParamDto): Promise<AssetAddressResponseDto> {
+    return this.service.ensureAssetAddress(auth, id);
   }
 
   @Get(':id')

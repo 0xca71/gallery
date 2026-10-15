@@ -373,6 +373,7 @@ export class AssetService extends BaseService {
         description,
         dateTimeOriginal,
         ...geo,
+        formattedAddress: geo ? null : undefined,
       },
       isUndefined,
     );
@@ -819,6 +820,12 @@ export class AssetService extends BaseService {
     await this.jobRepository.queueAll(jobs);
   }
 
+  async ensureAssetAddress(auth: AuthDto, id: string): Promise<{ formattedAddress: string | null }> {
+    await this.requireAccess({ auth, permission: Permission.AssetRead, ids: [id] });
+    const { reverseGeocoding } = await this.getConfig({ withCache: true });
+    return { formattedAddress: reverseGeocoding.enabled ? await this.mapRepository.ensureDetailedAddress(id) : null };
+  }
+
   private findOrFail(id: string) {
     return findOrFail(() => this.assetRepository.getById(id), 'Asset');
   }
@@ -850,6 +857,7 @@ export class AssetService extends BaseService {
         longitude,
         rating,
         ...geo,
+        formattedAddress: geo ? null : undefined,
       },
       isUndefined,
     );
