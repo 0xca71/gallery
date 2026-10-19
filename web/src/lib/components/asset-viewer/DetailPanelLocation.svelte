@@ -1,6 +1,7 @@
 <script lang="ts">
   import { page } from '$app/state';
   import GeolocationPointPickerModal from '$lib/modals/GeolocationPointPickerModal.svelte';
+  import { getDetailedAddressRemainder } from '$lib/utils/address-display';
   import { applyContextualFilter, buildContextualMapUrl } from '$lib/utils/filter-target';
   import { handleError } from '$lib/utils/handle-error';
   import { ensureAssetAddress, updateAsset, type AssetResponseDto } from '@immich/sdk';
@@ -60,6 +61,7 @@
   const city = $derived(asset.exifInfo?.city?.trim() ?? '');
   const stateName = $derived(asset.exifInfo?.state?.trim() ?? '');
   const country = $derived(asset.exifInfo?.country?.trim() ?? '');
+  const detailedAddress = $derived(getDetailedAddressRemainder(asset.exifInfo));
 
   // E10 — the pin carries the current context (Space scope + active filters) to the full map, and
   // centers it on this asset. Null on an album, which has no map URL (see buildContextualMapUrl).
@@ -109,17 +111,8 @@
       <div><Icon icon={mdiMapMarkerOutline} size="24" /></div>
 
       <div class="min-w-0">
-        {#if asset.exifInfo?.formattedAddress}
-          <div class="flex items-start gap-1" data-testid="detailed-address">
-            <p class="min-w-0 wrap-break-word" title={$t('detailed_address')}>{asset.exifInfo.formattedAddress}</p>
-            <IconButton
-              icon={mdiContentCopy}
-              aria-label={$t('copy_detailed_address')}
-              size="small"
-              variant="ghost"
-              onclick={copyAddress}
-            />
-          </div>
+        {#if detailedAddress}
+          <p class="wrap-break-word" title={$t('detailed_address')} data-testid="detailed-address">{detailedAddress}</p>
         {/if}
         {#if asset.exifInfo?.city}
           <p>
@@ -176,7 +169,18 @@
       </div>
     </div>
 
-    <div class="flex items-center gap-1">
+    <div class="flex shrink-0 items-center gap-1">
+      {#if asset.exifInfo?.formattedAddress}
+        <IconButton
+          icon={mdiContentCopy}
+          aria-label={$t('copy_detailed_address')}
+          size="small"
+          shape="round"
+          color="secondary"
+          variant="ghost"
+          onclick={copyAddress}
+        />
+      {/if}
       {#if canFilter && mapUrl}
         <IconButton
           href={mapUrl}
