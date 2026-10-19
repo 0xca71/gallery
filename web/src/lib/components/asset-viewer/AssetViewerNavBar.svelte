@@ -142,11 +142,12 @@
     {/if}
 
     <ActionButton action={Actions.RotateRight} />
-    <ActionButton action={Actions.Edit} />
 
     {#if isOwner}
       <DeleteAction {asset} {onAction} {preAction} {onUndoDelete} />
     {/if}
+
+    <ActionButton action={Actions.Edit} />
 
     {#if !sharedLink}
       <ButtonContextMenu direction="left" align="top-right" color="secondary" title={$t('more')} icon={mdiDotsVertical}>
