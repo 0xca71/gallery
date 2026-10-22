@@ -145,7 +145,6 @@
 
   let isPlayingOriginalVideo = $state($alwaysLoadOriginalVideo);
   let filmstripVisible = $state(false);
-  let filmstripHideTimer: ReturnType<typeof setTimeout> | undefined;
   let slideshowStartAssetId = $state<string>();
   const wheelZoomSpeedDivisor = 300;
   const wheelZoomSpeedLimit = 0.35;
@@ -154,23 +153,15 @@
     isPlayingOriginalVideo = value;
   };
 
-  const revealFilmstrip = () => {
+  const toggleFilmstrip = () => {
     if (filmstripAssets.length < 2 || $slideshowState !== SlideshowState.None) {
       return;
     }
 
-    filmstripVisible = true;
-    if (filmstripHideTimer) {
-      clearTimeout(filmstripHideTimer);
-    }
-    filmstripHideTimer = setTimeout(() => {
-      filmstripVisible = false;
-      filmstripHideTimer = undefined;
-    }, 4000);
+    filmstripVisible = !filmstripVisible;
   };
 
   const selectFilmstripAsset: FilmstripAssetResolver = async (targetAsset) => {
-    revealFilmstrip();
     if (onFilmstripAssetSelect) {
       await onFilmstripAssetSelect(targetAsset);
       return;
@@ -280,9 +271,6 @@
     assetViewerManager.resetPanelState();
     syncAssetViewerOpenClass(false);
     preloadManager.destroy();
-    if (filmstripHideTimer) {
-      clearTimeout(filmstripHideTimer);
-    }
   });
 
   const closeViewer = () => {
@@ -800,10 +788,10 @@
     class="relative z-[-1] col-span-4 col-start-1 row-span-full row-start-1"
     role="presentation"
     tabindex="-1"
-    onclick={revealFilmstrip}
+    onclick={toggleFilmstrip}
     onkeydown={(event) => {
       if (event.key === 'Enter' || event.key === ' ') {
-        revealFilmstrip();
+        toggleFilmstrip();
       }
     }}
   >
@@ -880,12 +868,7 @@
   </div>
 
   {#if filmstripVisible && filmstripAssets.length > 1 && !assetViewerManager.isShowEditor && !assetViewerManager.isFaceEditMode}
-    <AssetViewerFilmstrip
-      assets={filmstripAssets}
-      currentAssetId={asset.id}
-      onAssetSelect={selectFilmstripAsset}
-      onInteract={revealFilmstrip}
-    />
+    <AssetViewerFilmstrip assets={filmstripAssets} currentAssetId={asset.id} onAssetSelect={selectFilmstripAsset} />
   {/if}
 
   {#if $slideshowState === SlideshowState.None && showNavigation && !assetViewerManager.isShowEditor && !assetViewerManager.isFaceEditMode && nextAsset}
