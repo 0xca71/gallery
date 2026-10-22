@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import { t } from 'svelte-i18n';
   import type { AssetResponseDto } from '@immich/sdk';
   import { Button, LoadingSpinner } from '@immich/ui';
@@ -20,7 +20,14 @@
   let {
     full = false,
     onselect,
-  }: { full?: boolean; onselect: (assets: AssetResponseDto[], asset: AssetResponseDto) => void } = $props();
+    viewerAssetId,
+    onassetschange,
+  }: {
+    full?: boolean;
+    onselect: (assets: AssetResponseDto[], asset: AssetResponseDto) => void;
+    viewerAssetId?: string;
+    onassetschange?: (assets: AssetResponseDto[]) => void;
+  } = $props();
 
   let filter = $state(defaultRandomFilter());
   let assets = $state<AssetResponseDto[]>([]);
@@ -32,6 +39,9 @@
   let sentinelVisible = $state(false);
   let autoLoadPaused = $state(false);
   let controller: AbortController;
+  const previewSize = 24;
+  const viewerPrefetchRemaining = 72;
+  let viewerLoadAttempt: string | undefined;
 
   async function refresh() {
     if (loading) {
@@ -46,6 +56,7 @@
     total = null;
     exhausted = false;
     autoLoadPaused = false;
+    viewerLoadAttempt = undefined;
 
     try {
       const query = buildRandomSearchFilter(filter);
@@ -65,7 +76,7 @@
           exhausted = isRandomExhausted(assets.length, total, batch.length);
         }
       } else {
-        assets = await loadRandomBatch(query, signal, 24);
+        assets = await loadRandomBatch(query, signal, previewSize);
         if (!signal.aborted) {
           randomSeedManager.set(assets, filter);
         }
@@ -81,17 +92,21 @@
   }
 
   async function loadMore() {
-    if (!full || loading || exhausted) {
+    if ((!full && !viewerAssetId) || loading || exhausted) {
       return;
     }
     const signal = controller.signal;
     loading = true;
     try {
       const batch = await loadRandomBatch(buildRandomSearchFilter(filter), signal);
+      if (signal.aborted) {
+        return;
+      }
       autoLoadPaused = false;
       const merged = mergeUniqueAssets(assets, batch);
       assets = merged.assets;
       exhausted = isRandomExhausted(assets.length, total, merged.added);
+      onassetschange?.(assets);
     } catch (error) {
       if (!signal.aborted) {
         autoLoadPaused = true;
@@ -128,6 +143,26 @@
     }
   });
 
+  // Viewer navigation happens in an overlay, where the page's infinite-scroll sentinel may
+  // never become visible. Refill from the current asset instead, including the Explore preview.
+  $effect(() => {
+    if (!viewerAssetId) {
+      viewerLoadAttempt = undefined;
+      return;
+    }
+    const index = assets.findIndex(({ id }) => id === viewerAssetId);
+    if (index === -1 || assets.length - index - 1 > viewerPrefetchRemaining || loading || exhausted) {
+      return;
+    }
+    const attempt = `${viewerAssetId}:${assets.length}`;
+    if (viewerLoadAttempt === attempt) {
+      return;
+    }
+    // A failed request gets one attempt per position; moving to another photo can retry.
+    viewerLoadAttempt = attempt;
+    untrack(() => void loadMore());
+  });
+
   onMount(() => {
     void refresh();
     return () => controller?.abort();
@@ -156,7 +191,11 @@
     <div class="flex h-24 items-center justify-center"><LoadingSpinner /></div>
   {/if}
 
-  <ExploreAssetRow {assets} {full} onselect={(asset) => onselect(assets, asset)} />
+  <ExploreAssetRow
+    assets={full ? assets : assets.slice(0, previewSize)}
+    {full}
+    onselect={(asset) => onselect(assets, asset)}
+  />
 
   {#if !loading && assets.length === 0}
     <p class="py-4 text-sm">{$t(failed ? 'errors.failed_to_load_assets' : 'no_results')}</p>

@@ -108,7 +108,13 @@ export const RANDOM_BATCH_SIZE = 200;
 
 export function mergeUniqueAssets(assets: AssetResponseDto[], incoming: AssetResponseDto[]) {
   const seen = new Set(assets.map((asset) => asset.id));
-  const added = incoming.filter((asset) => !seen.has(asset.id));
+  const added = incoming.filter((asset) => {
+    if (seen.has(asset.id)) {
+      return false;
+    }
+    seen.add(asset.id);
+    return true;
+  });
   return { assets: added.length > 0 ? [...assets, ...added] : assets, added: added.length };
 }
 

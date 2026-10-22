@@ -39,7 +39,16 @@
 
 <UserPageLayout title={$t('explore_random')}>
   <div class="px-2 md:px-4">
-    <RandomSection full {onselect} />
+    <RandomSection
+      full
+      {onselect}
+      viewerAssetId={assetViewerManager.isViewing && viewerAssets.length > 0 ? assetViewerManager.asset?.id : undefined}
+      onassetschange={(assets) => {
+        if (viewerAssets.length > 0) {
+          viewerAssets = assets;
+        }
+      }}
+    />
   </div>
 </UserPageLayout>
 
