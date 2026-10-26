@@ -1,0 +1,410 @@
+diff --git a/dist/chunk-QNZJ2XH6.mjs b/dist/chunk-QNZJ2XH6.mjs
+index badd33d95307f48a625590b9c47c5db80f379993..28dfb15dcac366ebf790ff6dd5dc78200cd672eb 100644
+--- a/dist/chunk-QNZJ2XH6.mjs
++++ b/dist/chunk-QNZJ2XH6.mjs
+@@ -16,6 +16,8 @@ function createZoomImageWheel(container, options = {}) {
+     wheelZoomRatio: options.wheelZoomRatio || 0.1,
+     dblTapAnimationDuration: options.dblTapAnimationDuration || 300,
+     initialState: { ...defaultInitialState, ...options.initialState },
++    shouldZoomOnDoubleTap: options.shouldZoomOnDoubleTap ?? true,
++    constrainPosition: options.constrainPosition || ((axis, value) => value),
+     shouldZoomOnSingleTouch: options.shouldZoomOnSingleTouch || defaultShouldZoomOnSingleTouch,
+     zoomTarget: options.zoomTarget === void 0 ? container.querySelector("img") : options.zoomTarget
+   };
+@@ -24,6 +26,7 @@ function createZoomImageWheel(container, options = {}) {
+     return [90, 270].includes(store.getState().currentRotation % 360);
+   };
+   const calculatePositionX = (newPositionX, currentZoom, isDimensionSwitched) => {
++    if (options.constrainPosition) return options.constrainPosition(isDimensionSwitched ? "y" : "x", newPositionX, currentZoom, store.getState().currentRotation);
+     if (newPositionX > 0)
+       return 0;
+     const width = isDimensionSwitched ? container.clientHeight : container.clientWidth;
+@@ -32,6 +35,7 @@ function createZoomImageWheel(container, options = {}) {
+     return newPositionX;
+   };
+   const calculatePositionY = (newPositionY, currentZoom, isDimensionSwitched) => {
++    if (options.constrainPosition) return options.constrainPosition(isDimensionSwitched ? "x" : "y", newPositionY, currentZoom, store.getState().currentRotation);
+     if (newPositionY > 0)
+       return 0;
+     const height = isDimensionSwitched ? container.clientWidth : container.clientHeight;
+@@ -96,6 +100,12 @@ function createZoomImageWheel(container, options = {}) {
+         updateStateOnNewZoom(newCurrentZoom);
+       }
+     });
++    const latest = store.getState();
++    store.setState({
++      currentPositionX: calculatePositionX(newState.currentPositionX ?? latest.currentPositionX, latest.currentZoom, false),
++      currentPositionY: calculatePositionY(newState.currentPositionY ?? latest.currentPositionY, latest.currentZoom, false),
++    });
++    updatePositionsForSinglePointerFlow();
+     updateZoom();
+   }
+   function processZoomWheel({ delta, x, y }) {
+@@ -254,6 +264,7 @@ function createZoomImageWheel(container, options = {}) {
+   let touchTimer = null;
+   const durationBetweenTap = 300;
+   function _handleTouchStart(event) {
++    if (!finalOptions.shouldZoomOnDoubleTap) return;
+     if (event.touches.length > 1) {
+       return;
+     }
+@@ -347,6 +358,7 @@ function createZoomImageWheel(container, options = {}) {
+   container.addEventListener("pointerleave", handlePointerLeave, { signal });
+   container.addEventListener("pointermove", handlePointerMove, { signal });
+   container.addEventListener("pointerup", handlePointerUp, { signal });
++  container.addEventListener("pointercancel", handlePointerUp, { signal });
+   container.addEventListener(
+     "touchend",
+     () => {
+diff --git a/dist/createZoomImageWheel.d.mts b/dist/createZoomImageWheel.d.mts
+index cead8c9ed8f897ed0c5c87cfa6e87f2170984607..fddc0ed5876e92028d7d365cefd8aa10efff054b 100644
+--- a/dist/createZoomImageWheel.d.mts
++++ b/dist/createZoomImageWheel.d.mts
+@@ -5,6 +5,8 @@ type ZoomImageWheelOptions = {
+     wheelZoomRatio?: number;
+     dblTapAnimationDuration?: number;
+     initialState?: Partial<ZoomImageWheelStateUpdate>;
++    shouldZoomOnDoubleTap?: boolean;
++    constrainPosition?: (axis: "x" | "y", value: number, zoom: number, rotation: number) => number;
+     shouldZoomOnSingleTouch?: () => boolean;
+     zoomTarget?: HTMLElement | null;
+ };
+@@ -16,6 +18,8 @@ type ZoomImageWheelState = {
+     currentPositionY: number;
+ };
+ type ZoomImageWheelStateUpdate = Partial<{
++    currentPositionX: number;
++    currentPositionY: number;
+     enable: boolean;
+     currentZoom: number;
+     currentRotation: number;
+diff --git a/dist/createZoomImageWheel.d.ts b/dist/createZoomImageWheel.d.ts
+index cead8c9ed8f897ed0c5c87cfa6e87f2170984607..fddc0ed5876e92028d7d365cefd8aa10efff054b 100644
+--- a/dist/createZoomImageWheel.d.ts
++++ b/dist/createZoomImageWheel.d.ts
+@@ -5,6 +5,8 @@ type ZoomImageWheelOptions = {
+     wheelZoomRatio?: number;
+     dblTapAnimationDuration?: number;
+     initialState?: Partial<ZoomImageWheelStateUpdate>;
++    shouldZoomOnDoubleTap?: boolean;
++    constrainPosition?: (axis: "x" | "y", value: number, zoom: number, rotation: number) => number;
+     shouldZoomOnSingleTouch?: () => boolean;
+     zoomTarget?: HTMLElement | null;
+ };
+@@ -16,6 +18,8 @@ type ZoomImageWheelState = {
+     currentPositionY: number;
+ };
+ type ZoomImageWheelStateUpdate = Partial<{
++    currentPositionX: number;
++    currentPositionY: number;
+     enable: boolean;
+     currentZoom: number;
+     currentRotation: number;
+diff --git a/dist/createZoomImageWheel.global.js b/dist/createZoomImageWheel.global.js
+index 9c1291c92aee1d1a414e310550246bb8f2f6ab11..440cdc658b0cb03a9f26e982fc4042ce530ba437 100644
+--- a/dist/createZoomImageWheel.global.js
++++ b/dist/createZoomImageWheel.global.js
+@@ -101,6 +101,8 @@ var ZoomImage = (function (exports) {
+       wheelZoomRatio: options.wheelZoomRatio || 0.1,
+       dblTapAnimationDuration: options.dblTapAnimationDuration || 300,
+       initialState: { ...defaultInitialState, ...options.initialState },
++      shouldZoomOnDoubleTap: options.shouldZoomOnDoubleTap ?? true,
++      constrainPosition: options.constrainPosition || ((axis, value) => value),
+       shouldZoomOnSingleTouch: options.shouldZoomOnSingleTouch || defaultShouldZoomOnSingleTouch,
+       zoomTarget: options.zoomTarget === void 0 ? container.querySelector("img") : options.zoomTarget
+     };
+@@ -109,6 +111,7 @@ var ZoomImage = (function (exports) {
+       return [90, 270].includes(store.getState().currentRotation % 360);
+     };
+     const calculatePositionX = (newPositionX, currentZoom, isDimensionSwitched) => {
++      if (options.constrainPosition) return options.constrainPosition(isDimensionSwitched ? "y" : "x", newPositionX, currentZoom, store.getState().currentRotation);
+       if (newPositionX > 0)
+         return 0;
+       const width = isDimensionSwitched ? container.clientHeight : container.clientWidth;
+@@ -117,6 +120,7 @@ var ZoomImage = (function (exports) {
+       return newPositionX;
+     };
+     const calculatePositionY = (newPositionY, currentZoom, isDimensionSwitched) => {
++      if (options.constrainPosition) return options.constrainPosition(isDimensionSwitched ? "x" : "y", newPositionY, currentZoom, store.getState().currentRotation);
+       if (newPositionY > 0)
+         return 0;
+       const height = isDimensionSwitched ? container.clientWidth : container.clientHeight;
+@@ -181,6 +185,12 @@ var ZoomImage = (function (exports) {
+           updateStateOnNewZoom(newCurrentZoom);
+         }
+       });
++      const latest = store.getState();
++      store.setState({
++        currentPositionX: calculatePositionX(newState.currentPositionX ?? latest.currentPositionX, latest.currentZoom, false),
++        currentPositionY: calculatePositionY(newState.currentPositionY ?? latest.currentPositionY, latest.currentZoom, false),
++      });
++      updatePositionsForSinglePointerFlow();
+       updateZoom();
+     }
+     function processZoomWheel({ delta, x, y }) {
+@@ -339,6 +349,7 @@ var ZoomImage = (function (exports) {
+     let touchTimer = null;
+     const durationBetweenTap = 300;
+     function _handleTouchStart(event) {
++      if (!finalOptions.shouldZoomOnDoubleTap) return;
+       if (event.touches.length > 1) {
+         return;
+       }
+@@ -432,6 +443,7 @@ var ZoomImage = (function (exports) {
+     container.addEventListener("pointerleave", handlePointerLeave, { signal: signal2 });
+     container.addEventListener("pointermove", handlePointerMove, { signal: signal2 });
+     container.addEventListener("pointerup", handlePointerUp, { signal: signal2 });
++    container.addEventListener("pointercancel", handlePointerUp, { signal: signal2 });
+     container.addEventListener(
+       "touchend",
+       () => {
+diff --git a/dist/createZoomImageWheel.js b/dist/createZoomImageWheel.js
+index 38ec2fb673ef3bfd186fdfcfc65d9b976c4224fb..ca71501757888817bd1fc56913750d1ce85fbd66 100644
+--- a/dist/createZoomImageWheel.js
++++ b/dist/createZoomImageWheel.js
+@@ -80,6 +80,8 @@ function createZoomImageWheel(container, options = {}) {
+     wheelZoomRatio: options.wheelZoomRatio || 0.1,
+     dblTapAnimationDuration: options.dblTapAnimationDuration || 300,
+     initialState: { ...defaultInitialState, ...options.initialState },
++    shouldZoomOnDoubleTap: options.shouldZoomOnDoubleTap ?? true,
++    constrainPosition: options.constrainPosition || ((axis, value) => value),
+     shouldZoomOnSingleTouch: options.shouldZoomOnSingleTouch || defaultShouldZoomOnSingleTouch,
+     zoomTarget: options.zoomTarget === void 0 ? container.querySelector("img") : options.zoomTarget
+   };
+@@ -88,6 +90,7 @@ function createZoomImageWheel(container, options = {}) {
+     return [90, 270].includes(store$1.getState().currentRotation % 360);
+   };
+   const calculatePositionX = (newPositionX, currentZoom, isDimensionSwitched) => {
++    if (options.constrainPosition) return options.constrainPosition(isDimensionSwitched ? "y" : "x", newPositionX, currentZoom, store$1.getState().currentRotation);
+     if (newPositionX > 0)
+       return 0;
+     const width = isDimensionSwitched ? container.clientHeight : container.clientWidth;
+@@ -96,6 +99,7 @@ function createZoomImageWheel(container, options = {}) {
+     return newPositionX;
+   };
+   const calculatePositionY = (newPositionY, currentZoom, isDimensionSwitched) => {
++    if (options.constrainPosition) return options.constrainPosition(isDimensionSwitched ? "x" : "y", newPositionY, currentZoom, store$1.getState().currentRotation);
+     if (newPositionY > 0)
+       return 0;
+     const height = isDimensionSwitched ? container.clientWidth : container.clientHeight;
+@@ -160,6 +164,12 @@ function createZoomImageWheel(container, options = {}) {
+         updateStateOnNewZoom(newCurrentZoom);
+       }
+     });
++    const latest = store$1.getState();
++    store$1.setState({
++      currentPositionX: calculatePositionX(newState.currentPositionX ?? latest.currentPositionX, latest.currentZoom, false),
++      currentPositionY: calculatePositionY(newState.currentPositionY ?? latest.currentPositionY, latest.currentZoom, false),
++    });
++    updatePositionsForSinglePointerFlow();
+     updateZoom();
+   }
+   function processZoomWheel({ delta, x, y }) {
+@@ -318,6 +328,7 @@ function createZoomImageWheel(container, options = {}) {
+   let touchTimer = null;
+   const durationBetweenTap = 300;
+   function _handleTouchStart(event) {
++    if (!finalOptions.shouldZoomOnDoubleTap) return;
+     if (event.touches.length > 1) {
+       return;
+     }
+@@ -411,6 +422,7 @@ function createZoomImageWheel(container, options = {}) {
+   container.addEventListener("pointerleave", handlePointerLeave, { signal: signal2 });
+   container.addEventListener("pointermove", handlePointerMove, { signal: signal2 });
+   container.addEventListener("pointerup", handlePointerUp, { signal: signal2 });
++  container.addEventListener("pointercancel", handlePointerUp, { signal: signal2 });
+   container.addEventListener(
+     "touchend",
+     () => {
+diff --git a/dist/index.global.js b/dist/index.global.js
+index 31a9c20a33a01908c9426f35597553ed3bc387fc..cd41cd0462570a842907f826b6be7a4d31face1f 100644
+--- a/dist/index.global.js
++++ b/dist/index.global.js
+@@ -401,6 +401,8 @@ var ZoomImage = (function (exports) {
+       wheelZoomRatio: options.wheelZoomRatio || 0.1,
+       dblTapAnimationDuration: options.dblTapAnimationDuration || 300,
+       initialState: { ...defaultInitialState, ...options.initialState },
++      shouldZoomOnDoubleTap: options.shouldZoomOnDoubleTap ?? true,
++      constrainPosition: options.constrainPosition || ((axis, value) => value),
+       shouldZoomOnSingleTouch: options.shouldZoomOnSingleTouch || defaultShouldZoomOnSingleTouch,
+       zoomTarget: options.zoomTarget === void 0 ? container.querySelector("img") : options.zoomTarget
+     };
+@@ -409,6 +411,7 @@ var ZoomImage = (function (exports) {
+       return [90, 270].includes(store.getState().currentRotation % 360);
+     };
+     const calculatePositionX = (newPositionX, currentZoom, isDimensionSwitched) => {
++      if (options.constrainPosition) return options.constrainPosition(isDimensionSwitched ? "y" : "x", newPositionX, currentZoom, store.getState().currentRotation);
+       if (newPositionX > 0)
+         return 0;
+       const width = isDimensionSwitched ? container.clientHeight : container.clientWidth;
+@@ -417,6 +420,7 @@ var ZoomImage = (function (exports) {
+       return newPositionX;
+     };
+     const calculatePositionY = (newPositionY, currentZoom, isDimensionSwitched) => {
++      if (options.constrainPosition) return options.constrainPosition(isDimensionSwitched ? "x" : "y", newPositionY, currentZoom, store.getState().currentRotation);
+       if (newPositionY > 0)
+         return 0;
+       const height = isDimensionSwitched ? container.clientWidth : container.clientHeight;
+@@ -481,6 +485,12 @@ var ZoomImage = (function (exports) {
+           updateStateOnNewZoom(newCurrentZoom);
+         }
+       });
++      const latest = store.getState();
++      store.setState({
++        currentPositionX: calculatePositionX(newState.currentPositionX ?? latest.currentPositionX, latest.currentZoom, false),
++        currentPositionY: calculatePositionY(newState.currentPositionY ?? latest.currentPositionY, latest.currentZoom, false),
++      });
++      updatePositionsForSinglePointerFlow();
+       updateZoom();
+     }
+     function processZoomWheel({ delta, x, y }) {
+@@ -639,6 +649,7 @@ var ZoomImage = (function (exports) {
+     let touchTimer = null;
+     const durationBetweenTap = 300;
+     function _handleTouchStart(event) {
++      if (!finalOptions.shouldZoomOnDoubleTap) return;
+       if (event.touches.length > 1) {
+         return;
+       }
+@@ -732,6 +743,7 @@ var ZoomImage = (function (exports) {
+     container.addEventListener("pointerleave", handlePointerLeave, { signal: signal2 });
+     container.addEventListener("pointermove", handlePointerMove, { signal: signal2 });
+     container.addEventListener("pointerup", handlePointerUp, { signal: signal2 });
++    container.addEventListener("pointercancel", handlePointerUp, { signal: signal2 });
+     container.addEventListener(
+       "touchend",
+       () => {
+diff --git a/dist/index.js b/dist/index.js
+index c1251632a1a0d25237b77f1ea66d9549a8e0f473..3a9d489e6d8e274d21607a1dcc798b12920da2fb 100644
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -376,6 +376,8 @@ function createZoomImageWheel(container, options = {}) {
+     wheelZoomRatio: options.wheelZoomRatio || 0.1,
+     dblTapAnimationDuration: options.dblTapAnimationDuration || 300,
+     initialState: { ...defaultInitialState, ...options.initialState },
++    shouldZoomOnDoubleTap: options.shouldZoomOnDoubleTap ?? true,
++    constrainPosition: options.constrainPosition || ((axis, value) => value),
+     shouldZoomOnSingleTouch: options.shouldZoomOnSingleTouch || defaultShouldZoomOnSingleTouch,
+     zoomTarget: options.zoomTarget === void 0 ? container.querySelector("img") : options.zoomTarget
+   };
+@@ -384,6 +386,7 @@ function createZoomImageWheel(container, options = {}) {
+     return [90, 270].includes(store$1.getState().currentRotation % 360);
+   };
+   const calculatePositionX = (newPositionX, currentZoom, isDimensionSwitched) => {
++    if (options.constrainPosition) return options.constrainPosition(isDimensionSwitched ? "y" : "x", newPositionX, currentZoom, store$1.getState().currentRotation);
+     if (newPositionX > 0)
+       return 0;
+     const width = isDimensionSwitched ? container.clientHeight : container.clientWidth;
+@@ -392,6 +395,7 @@ function createZoomImageWheel(container, options = {}) {
+     return newPositionX;
+   };
+   const calculatePositionY = (newPositionY, currentZoom, isDimensionSwitched) => {
++    if (options.constrainPosition) return options.constrainPosition(isDimensionSwitched ? "x" : "y", newPositionY, currentZoom, store$1.getState().currentRotation);
+     if (newPositionY > 0)
+       return 0;
+     const height = isDimensionSwitched ? container.clientWidth : container.clientHeight;
+@@ -456,6 +460,12 @@ function createZoomImageWheel(container, options = {}) {
+         updateStateOnNewZoom(newCurrentZoom);
+       }
+     });
++    const latest = store$1.getState();
++    store$1.setState({
++      currentPositionX: calculatePositionX(newState.currentPositionX ?? latest.currentPositionX, latest.currentZoom, false),
++      currentPositionY: calculatePositionY(newState.currentPositionY ?? latest.currentPositionY, latest.currentZoom, false),
++    });
++    updatePositionsForSinglePointerFlow();
+     updateZoom();
+   }
+   function processZoomWheel({ delta, x, y }) {
+@@ -614,6 +624,7 @@ function createZoomImageWheel(container, options = {}) {
+   let touchTimer = null;
+   const durationBetweenTap = 300;
+   function _handleTouchStart(event) {
++    if (!finalOptions.shouldZoomOnDoubleTap) return;
+     if (event.touches.length > 1) {
+       return;
+     }
+@@ -707,6 +718,7 @@ function createZoomImageWheel(container, options = {}) {
+   container.addEventListener("pointerleave", handlePointerLeave, { signal: signal2 });
+   container.addEventListener("pointermove", handlePointerMove, { signal: signal2 });
+   container.addEventListener("pointerup", handlePointerUp, { signal: signal2 });
++  container.addEventListener("pointercancel", handlePointerUp, { signal: signal2 });
+   container.addEventListener(
+     "touchend",
+     () => {
+diff --git a/src/createZoomImageWheel.ts b/src/createZoomImageWheel.ts
+index 24ded697d4d93894a1b5f8ae63cafbe2c69c3645..e75e88dca927946728fc9c2f272c88e8bdf5e405 100644
+--- a/src/createZoomImageWheel.ts
++++ b/src/createZoomImageWheel.ts
+@@ -7,6 +7,8 @@ export type ZoomImageWheelOptions = {
+   wheelZoomRatio?: number
+   dblTapAnimationDuration?: number
+   initialState?: Partial<ZoomImageWheelStateUpdate>
++  shouldZoomOnDoubleTap?: boolean
++  constrainPosition?: (axis: "x" | "y", value: number, zoom: number, rotation: number) => number
+   shouldZoomOnSingleTouch?: () => boolean
+   zoomTarget?: HTMLElement | null
+ }
+@@ -26,6 +28,8 @@ export type ZoomImageWheelState = {
+ }
+ 
+ export type ZoomImageWheelStateUpdate = Partial<{
++  currentPositionX: number
++  currentPositionY: number
+   enable: boolean
+   currentZoom: number
+   currentRotation: number
+@@ -48,6 +52,8 @@ export function createZoomImageWheel(container: HTMLElement, options: ZoomImageW
+     wheelZoomRatio: options.wheelZoomRatio || 0.1,
+     dblTapAnimationDuration: options.dblTapAnimationDuration || 300,
+     initialState: { ...defaultInitialState, ...options.initialState },
++    shouldZoomOnDoubleTap: options.shouldZoomOnDoubleTap ?? true,
++    constrainPosition: options.constrainPosition || ((axis, value) => value),
+     shouldZoomOnSingleTouch: options.shouldZoomOnSingleTouch || defaultShouldZoomOnSingleTouch,
+     zoomTarget: options.zoomTarget === undefined ? container.querySelector("img") : options.zoomTarget,
+   }
+@@ -59,6 +65,7 @@ export function createZoomImageWheel(container: HTMLElement, options: ZoomImageW
+   }
+ 
+   const calculatePositionX = (newPositionX: number, currentZoom: number, isDimensionSwitched: boolean) => {
++    if (options.constrainPosition) return options.constrainPosition(isDimensionSwitched ? "y" : "x", newPositionX, currentZoom, store.getState().currentRotation)
+     if (newPositionX > 0) return 0
+ 
+     const width = isDimensionSwitched ? container.clientHeight : container.clientWidth
+@@ -67,6 +74,7 @@ export function createZoomImageWheel(container: HTMLElement, options: ZoomImageW
+   }
+ 
+   const calculatePositionY = (newPositionY: number, currentZoom: number, isDimensionSwitched: boolean) => {
++    if (options.constrainPosition) return options.constrainPosition(isDimensionSwitched ? "x" : "y", newPositionY, currentZoom, store.getState().currentRotation)
+     if (newPositionY > 0) return 0
+ 
+     const height = isDimensionSwitched ? container.clientWidth : container.clientHeight
+@@ -146,6 +154,12 @@ export function createZoomImageWheel(container: HTMLElement, options: ZoomImageW
+       }
+     })
+ 
++    const latest = store.getState()
++    store.setState({
++      currentPositionX: calculatePositionX(newState.currentPositionX ?? latest.currentPositionX, latest.currentZoom, false),
++      currentPositionY: calculatePositionY(newState.currentPositionY ?? latest.currentPositionY, latest.currentZoom, false),
++    })
++    updatePositionsForSinglePointerFlow()
+     updateZoom()
+   }
+ 
+@@ -338,6 +352,7 @@ export function createZoomImageWheel(container: HTMLElement, options: ZoomImageW
+   const durationBetweenTap = 300
+ 
+   function _handleTouchStart(event: TouchEvent) {
++    if (!finalOptions.shouldZoomOnDoubleTap) return
+     if (event.touches.length > 1) {
+       return
+     }
+@@ -451,6 +466,7 @@ export function createZoomImageWheel(container: HTMLElement, options: ZoomImageW
+   container.addEventListener("pointerleave", handlePointerLeave, { signal })
+   container.addEventListener("pointermove", handlePointerMove, { signal })
+   container.addEventListener("pointerup", handlePointerUp, { signal })
++  container.addEventListener("pointercancel", handlePointerUp, { signal })
+   container.addEventListener(
+     "touchend",
+     () => {

@@ -1,5 +1,9 @@
 import { createZoomImageWheel } from '@zoom-image/core';
 import { assetViewerManager } from '$lib/managers/asset-viewer-manager.svelte';
+import type { Size } from '$lib/utils/container-utils';
+import { constrainPhotoPosition, rotatePoint } from '$lib/utils/zoom-geometry';
+
+type ZoomOptions = { zoomTarget?: HTMLElement; image?: Size };
 
 // Minimal touch shape — avoids importing DOM TouchEvent which isn't available in all TS targets.
 type TouchEventLike = {
@@ -8,9 +12,15 @@ type TouchEventLike = {
 };
 const asTouchEvent = (event: Event) => event as unknown as TouchEventLike;
 
-export const zoomImageAction = (node: HTMLElement, options?: { zoomTarget?: HTMLElement }) => {
+export const zoomImageAction = (node: HTMLElement, options?: ZoomOptions) => {
   const zoomInstance = createZoomImageWheel(node, {
     maxZoom: 10,
+    shouldZoomOnDoubleTap: false,
+    constrainPosition: (axis, value, zoom, rotation) =>
+      constrainPhotoPosition(axis, value, zoom, rotation, options?.image ?? { width: 1, height: 1 }, {
+        width: node.clientWidth,
+        height: node.clientHeight,
+      }),
     initialState: assetViewerManager.zoomState,
     zoomTarget: options?.zoomTarget,
   });
@@ -60,6 +70,7 @@ export const zoomImageAction = (node: HTMLElement, options?: { zoomTarget?: HTML
   node.addEventListener('pointermove', interceptOverlayPointerEvent, { capture: true, signal });
   node.addEventListener('pointerup', interceptOverlayPointerEnd, { capture: true, signal });
   node.addEventListener('pointerleave', interceptOverlayPointerEnd, { capture: true, signal });
+  node.addEventListener('pointercancel', interceptOverlayPointerEnd, { capture: true, signal });
 
   // Touch event interception for overlay touches or split gestures (pinch across container boundary).
   // Once intercepted, stays intercepted until all fingers are lifted.
@@ -96,10 +107,89 @@ export const zoomImageAction = (node: HTMLElement, options?: { zoomTarget?: HTML
   node.addEventListener('touchstart', interceptOverlayTouchEvent, { capture: true, signal });
   node.addEventListener('touchmove', interceptOverlayTouchEvent, { capture: true, signal });
   node.addEventListener('touchend', resetTouchGesture, { capture: true, signal });
+  node.addEventListener('touchcancel', resetTouchGesture, { capture: true, signal });
 
   // Wheel and dblclick interception on overlay elements.
   // Dblclick also intercepted for all touch double-taps (Safari fires synthetic dblclick
   // on double-tap, which conflicts with zoom-image's touch zoom handler).
+  const toggleAt = (x: number, y: number) => {
+    if (!assetViewerManager.zoomState.enable) {
+      return;
+    }
+    const bounds = node.getBoundingClientRect();
+    const offset = rotatePoint(
+      x - (bounds.left + bounds.width / 2),
+      y - (bounds.top + bounds.height / 2),
+      -assetViewerManager.zoomState.currentRotation,
+    );
+    assetViewerManager.animatedZoom(assetViewerManager.zoom > 1 ? 1 : 2, 300, {
+      x: node.clientWidth / 2 + offset.x,
+      y: node.clientHeight / 2 + offset.y,
+    });
+  };
+  let lastTap: { x: number; y: number; time: number } | undefined;
+  let tapStart: { x: number; y: number; time: number; pointerId: number } | undefined;
+  node.addEventListener(
+    'pointerdown',
+    (event) => {
+      if (event.pointerType !== 'touch' || isOverlayEvent(event)) {
+        return;
+      }
+      if (!event.isPrimary || tapStart) {
+        tapStart = undefined;
+        lastTap = undefined;
+        return;
+      }
+      tapStart = { x: event.clientX, y: event.clientY, time: performance.now(), pointerId: event.pointerId };
+    },
+    { capture: true, signal },
+  );
+  node.addEventListener(
+    'pointermove',
+    (event) => {
+      if (!(
+        tapStart?.pointerId === event.pointerId &&
+        Math.hypot(event.clientX - tapStart.x, event.clientY - tapStart.y) > 12
+      )) {
+        return;
+      }
+
+      tapStart = undefined;
+      lastTap = undefined;
+    },
+    { capture: true, signal },
+  );
+  node.addEventListener(
+    'pointerup',
+    (event) => {
+      if (!tapStart || tapStart.pointerId !== event.pointerId) {
+        return;
+      }
+      const now = performance.now();
+      const valid = now - tapStart.time < 300;
+      tapStart = undefined;
+      if (
+        valid &&
+        lastTap &&
+        now - lastTap.time < 300 &&
+        Math.hypot(event.clientX - lastTap.x, event.clientY - lastTap.y) < 24
+      ) {
+        lastTap = undefined;
+        toggleAt(event.clientX, event.clientY);
+      } else {
+        lastTap = valid ? { x: event.clientX, y: event.clientY, time: now } : undefined;
+      }
+    },
+    { capture: true, signal },
+  );
+  node.addEventListener(
+    'pointercancel',
+    () => {
+      tapStart = undefined;
+      lastTap = undefined;
+    },
+    { capture: true, signal },
+  );
   let lastPointerWasTouch = false;
   node.addEventListener('pointerdown', (event) => (lastPointerWasTouch = event.pointerType === 'touch'), {
     capture: true,
@@ -117,8 +207,10 @@ export const zoomImageAction = (node: HTMLElement, options?: { zoomTarget?: HTML
   node.addEventListener(
     'dblclick',
     (event) => {
-      if (lastPointerWasTouch || isOverlayEvent(event)) {
-        event.stopImmediatePropagation();
+      event.stopImmediatePropagation();
+      if (!lastPointerWasTouch && !isOverlayEvent(event)) {
+        event.preventDefault();
+        toggleAt(event.clientX, event.clientY);
       }
     },
     { capture: true, signal },
@@ -127,10 +219,10 @@ export const zoomImageAction = (node: HTMLElement, options?: { zoomTarget?: HTML
   node.style.overflow = 'visible';
   node.style.touchAction = 'none';
   return {
-    update(newOptions?: { zoomTarget?: HTMLElement }) {
+    update(newOptions?: ZoomOptions) {
       options = newOptions;
       if (newOptions?.zoomTarget !== undefined) {
-        zoomInstance.setState({ zoomTarget: newOptions.zoomTarget });
+        zoomInstance.setState({ ...assetViewerManager.zoomState, zoomTarget: newOptions.zoomTarget });
       }
     },
     destroy() {

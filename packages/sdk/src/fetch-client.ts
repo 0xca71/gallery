@@ -6550,8 +6550,9 @@ export function downloadAsset({ download, edited, id, key, slug }: {
 /**
  * View asset thumbnail
  */
-export function viewAsset({ edited, id, key, size, slug }: {
+export function viewAsset({ edited, fallback, id, key, size, slug }: {
     edited?: boolean;
+    fallback?: boolean;
     id: string;
     key?: string;
     size?: AssetMediaSize;
@@ -6562,6 +6563,7 @@ export function viewAsset({ edited, id, key, size, slug }: {
         data: Blob;
     }>(`/assets/${encodeURIComponent(id)}/thumbnail${QS.query(QS.explode({
         edited,
+        fallback,
         key,
         size,
         slug

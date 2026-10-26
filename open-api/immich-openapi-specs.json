@@ -6380,6 +6380,15 @@
             }
           },
           {
+            "name": "fallback",
+            "required": false,
+            "in": "query",
+            "description": "Allow a missing fullsize image to fall back to preview (default true)",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
             "name": "id",
             "required": true,
             "in": "path",

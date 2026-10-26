@@ -20,6 +20,7 @@
   <div class="absolute top-0" style:width style:height>
     <Image
       {src}
+      decodeBeforeLoad={quality === 'original'}
       onStart={() => adaptiveImageLoader.onStart(quality)}
       onLoad={() => adaptiveImageLoader.onLoad(quality)}
       onError={() => adaptiveImageLoader.onError(quality)}

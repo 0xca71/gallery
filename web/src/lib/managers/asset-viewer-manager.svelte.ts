@@ -7,6 +7,7 @@ import type { ImageLoaderStatus } from '$lib/utils/adaptive-image-loader.svelte'
 import { canCopyImageToClipboard } from '$lib/utils/asset-utils';
 import { BaseEventManager } from '$lib/utils/base-event-manager.svelte';
 import type { AssetGridRouteSearchParams } from '$lib/utils/navigation';
+import { zoomAt } from '$lib/utils/zoom-geometry';
 
 export interface Faces {
   id: string;
@@ -37,6 +38,7 @@ class AssetViewerManager extends BaseEventManager<Events> {
   #zoomState = $state(createDefaultZoomState());
   #animationFrameId: number | null = null;
 
+  zoomViewport = $state({ width: 0, height: 0 });
   imgRef = $state<HTMLImageElement | undefined>();
   imageLoaderStatus = $state<ImageLoaderStatus | undefined>();
   #isImageLoading = $derived.by(() => {
@@ -45,8 +47,8 @@ class AssetViewerManager extends BaseEventManager<Events> {
       return false;
     }
     const previewOrOriginalReady = quality.preview === 'success' || quality.original === 'success';
-    const loadingOriginal = this.zoom > 1 && quality.original !== 'success';
-    return !previewOrOriginalReady || loadingOriginal;
+    const loadingOriginal = this.zoom > 1 && quality.original === 'unloaded';
+    return (!previewOrOriginalReady && quality.preview === 'unloaded') || loadingOriginal;
   });
   isShowActivityPanel = $state(false);
   isPlayingMotionPhoto = $state(false);
@@ -102,7 +104,7 @@ class AssetViewerManager extends BaseEventManager<Events> {
 
   set zoom(zoom: number) {
     this.cancelZoomAnimation();
-    this.zoomState = { ...this.zoomState, currentZoom: zoom };
+    this.zoomState = zoomAt(this.zoomState, zoom, { x: this.zoomViewport.width / 2, y: this.zoomViewport.height / 2 });
   }
 
   canZoomIn() {
@@ -139,10 +141,16 @@ class AssetViewerManager extends BaseEventManager<Events> {
     this.#animationFrameId = null;
   }
 
-  animatedZoom(targetZoom: number, duration = 300) {
+  animatedZoom(targetZoom: number, duration = 300, anchor?: { x: number; y: number }) {
     this.cancelZoomAnimation();
 
-    const startZoom = this.#zoomState.currentZoom;
+    const zoomAnchor = anchor ?? { x: this.zoomViewport.width / 2, y: this.zoomViewport.height / 2 };
+    const startState = { ...this.#zoomState };
+    const startZoom = startState.currentZoom;
+    if (globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches) {
+      this.zoomState = zoomAt(startState, targetZoom, zoomAnchor);
+      return;
+    }
     const startTime = performance.now();
 
     const frame = (currentTime: number) => {
@@ -151,7 +159,7 @@ class AssetViewerManager extends BaseEventManager<Events> {
       const easedProgress = cubicOut(linearProgress);
       const interpolatedZoom = startZoom + (targetZoom - startZoom) * easedProgress;
 
-      this.zoomState = { ...this.#zoomState, currentZoom: interpolatedZoom };
+      this.zoomState = zoomAt(startState, interpolatedZoom, zoomAnchor);
 
       this.#animationFrameId = linearProgress < 1 ? requestAnimationFrame(frame) : null;
     };

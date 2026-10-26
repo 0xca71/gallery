@@ -674,10 +674,7 @@
       return;
     }
 
-    assetViewerManager.zoomState = {
-      ...assetViewerManager.zoomState,
-      currentZoom: zoomDelta < 0 && nextZoom < 1.01 ? 1 : nextZoom,
-    };
+    assetViewerManager.zoom = zoomDelta < 0 && nextZoom < 1.01 ? 1 : nextZoom;
   };
 
   const handleAssetViewerWheel = (event: WheelEvent) => {

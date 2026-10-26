@@ -1,4 +1,4 @@
-import { fireEvent, render } from '@testing-library/svelte';
+import { act, fireEvent, render } from '@testing-library/svelte';
 import Image from '$lib/components/Image.svelte';
 import { cancelImageUrl } from '$lib/utils/sw-messaging';
 
@@ -50,6 +50,54 @@ describe('Image component', () => {
     const img = baseElement.querySelector('img')!;
     await fireEvent.load(img);
     expect(onLoad).toHaveBeenCalledOnce();
+  });
+
+  it('waits for decode before reporting the replacement image ready', async () => {
+    const onLoad = vi.fn();
+    const { baseElement } = render(Image, { src: '/test.jpg', decodeBeforeLoad: true, onLoad });
+    const img = baseElement.querySelector('img')!;
+    let decoded!: () => void;
+    vi.spyOn(img, 'decode').mockReturnValue(
+      new Promise<void>((resolve) => {
+        decoded = resolve;
+      }),
+    );
+    await fireEvent.load(img);
+    expect(onLoad).not.toHaveBeenCalled();
+    await act(async () => {
+      decoded();
+      await Promise.resolve();
+    });
+    expect(onLoad).toHaveBeenCalledOnce();
+  });
+
+  it('ignores a late decode after changing images', async () => {
+    const onLoad = vi.fn();
+    const { baseElement, rerender } = render(Image, { src: '/old.jpg', decodeBeforeLoad: true, onLoad });
+    let decoded!: () => void;
+    vi.spyOn(baseElement.querySelector('img')!, 'decode').mockReturnValue(
+      new Promise<void>((resolve) => {
+        decoded = resolve;
+      }),
+    );
+    await fireEvent.load(baseElement.querySelector('img')!);
+    await rerender({ src: '/new.jpg', decodeBeforeLoad: true, onLoad });
+    await act(async () => {
+      decoded();
+      await Promise.resolve();
+    });
+    expect(onLoad).not.toHaveBeenCalled();
+  });
+
+  it('reports decode failure instead of marking the high-resolution layer ready', async () => {
+    const onLoad = vi.fn();
+    const onError = vi.fn();
+    const { baseElement } = render(Image, { src: '/test.jpg', decodeBeforeLoad: true, onLoad, onError });
+    const img = baseElement.querySelector('img')!;
+    vi.spyOn(img, 'decode').mockRejectedValue(new Error('Invalid image'));
+    await fireEvent.load(img);
+    expect(onLoad).not.toHaveBeenCalled();
+    expect(onError).toHaveBeenCalledOnce();
   });
 
   it('calls onError when image fails to load', async () => {
