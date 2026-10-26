@@ -228,7 +228,7 @@ export class AssetMediaService extends BaseService {
       return { targetSize: 'original' };
     }
 
-    if (dto.size === AssetMediaSize.FULLSIZE && !path) {
+    if (dto.size === AssetMediaSize.FULLSIZE && !path && dto.fallback !== false) {
       // downgrade to preview if fullsize is not available.
       // e.g. disabled or not yet (re)generated
       return { targetSize: AssetMediaSize.PREVIEW };

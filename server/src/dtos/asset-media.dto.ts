@@ -26,6 +26,7 @@ const AssetMediaOptionsSchema = z
         .getExtensions(),
     ),
     edited: stringToBool.default(false).optional().describe('Return edited asset if available'),
+    fallback: stringToBool.optional().describe('Allow a missing fullsize image to fall back to preview (default true)'),
   })
   .meta({ id: 'AssetMediaOptionsDto' });
 

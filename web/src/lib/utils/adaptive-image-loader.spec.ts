@@ -269,6 +269,39 @@ describe('AdaptiveImageLoader', () => {
     });
   });
 
+  describe('non-blocking high-resolution loading', () => {
+    it('keeps the preview usable when original loading fails and retries only explicitly', () => {
+      const onError = vi.fn();
+      const loader = new AdaptiveImageLoader(createQualityList(), { onError });
+      loader.trigger('preview');
+      loader.onLoad('preview');
+      loader.trigger('original');
+      loader.onError('original');
+      expect(loader.status.hasError).toBe(false);
+      expect(loader.status.quality.preview).toBe('success');
+      expect(onError).not.toHaveBeenCalled();
+      expect(loader.trigger('original')).toBe(false);
+      expect(loader.status.urls.original).toBeUndefined();
+      loader.retry('original');
+      expect(loader.status.quality.original).toBe('unloaded');
+      expect(loader.status.urls.original).toBe('/original.jpg');
+      loader.onLoad('original');
+      expect(loader.status.quality.original).toBe('success');
+    });
+    it('does not apply late load, error or retry callbacks after an asset change', () => {
+      const callbacks = { onUrlChange: vi.fn(), onError: vi.fn(), onImageReady: vi.fn() };
+      const loader = new AdaptiveImageLoader(createQualityList(), callbacks);
+      loader.trigger('original');
+      loader.destroy();
+      loader.onLoad('original');
+      loader.onError('original');
+      loader.retry('original');
+      expect(callbacks.onUrlChange).not.toHaveBeenCalled();
+      expect(callbacks.onError).not.toHaveBeenCalled();
+      expect(loader.status.quality.original).toBe('unloaded');
+    });
+  });
+
   describe('progressive loading flow', () => {
     it('thumbnail load triggers preview via onAfterLoad', () => {
       const triggerSpy = vi.fn();

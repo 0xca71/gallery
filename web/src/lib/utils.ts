@@ -192,6 +192,7 @@ type AssetUrlOptions = {
   edited?: boolean;
   size?: AssetMediaSize;
   download?: boolean;
+  fallback?: boolean;
 };
 
 export const getAssetUrl = ({
@@ -212,7 +213,12 @@ export const getAssetUrl = ({
     return getAssetMediaUrl({ id, size: AssetMediaSize.Preview, cacheKey });
   }
   const size = targetImageSize(asset, forceOriginal);
-  return getAssetMediaUrl({ id, size, cacheKey });
+  return getAssetMediaUrl({
+    id,
+    size,
+    cacheKey,
+    fallback: forceOriginal && size === AssetMediaSize.Fullsize ? false : undefined,
+  });
 };
 
 export function getAssetUrls(asset: AssetResponseDto, sharedLink?: SharedLinkResponseDto) {
@@ -241,7 +247,7 @@ export const targetImageSize = (asset: AssetResponseDto, forceOriginal: boolean)
 };
 
 export const getAssetMediaUrl = (options: AssetUrlOptions) => {
-  const { id, size, cacheKey: c, edited = true, download } = options;
+  const { id, size, cacheKey: c, edited = true, download, fallback } = options;
   const isOriginal = size === AssetMediaSize.Original;
   const path = isOriginal ? getAssetOriginalPath(id) : getAssetThumbnailPath(id);
   return createUrl(path, {
@@ -249,6 +255,7 @@ export const getAssetMediaUrl = (options: AssetUrlOptions) => {
     size: isOriginal ? undefined : size,
     c,
     edited,
+    fallback,
     download: isOriginal ? download : undefined,
   });
 };

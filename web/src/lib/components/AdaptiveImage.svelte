@@ -64,11 +64,14 @@
   import type { AssetResponseDto, SharedLinkResponseDto } from '@immich/sdk';
   import { untrack, type Snippet } from 'svelte';
   import { languageManager } from '$lib/managers/language-manager.svelte';
+  import { fittedPhoto } from '$lib/utils/zoom-geometry';
 
   type Props = {
     asset: AssetResponseDto;
     sharedLink?: SharedLinkResponseDto;
     objectFit?: 'contain' | 'cover';
+    rotation?: number;
+    retryOriginal?: number;
     container: Size;
     onUrlChange?: (url: string) => void;
     onImageReady?: () => void;
@@ -86,6 +89,8 @@
     asset,
     sharedLink,
     objectFit = 'contain',
+    rotation = 0,
+    retryOriginal = 0,
     container,
     onUrlChange,
     onImageReady,
@@ -95,10 +100,9 @@
   }: Props = $props();
 
   const afterThumbnail = (loader: AdaptiveImageLoader) => {
+    loader.trigger('preview');
     if (assetViewerManager.zoom > 1) {
       loader.trigger('original');
-    } else {
-      loader.trigger('preview');
     }
   };
 
@@ -121,7 +125,9 @@
     return qualityList;
   };
 
-  const loaderKey = $derived(`${asset.id}:${asset.thumbhash}:${sharedLink?.id}`);
+  const loaderKey = $derived(
+    `${asset.id}:${asset.thumbhash}:${asset.updatedAt}:${sharedLink?.id}:${sharedLink?.allowDownload}:${sharedLink?.showMetadata}`,
+  );
 
   const adaptiveImageLoader = $derived.by(() => {
     void loaderKey;
@@ -153,7 +159,10 @@
   const { insetInlineStart, top, displayWidth, displayHeight, rasterWidth, rasterHeight, rasterScale } = $derived.by(
     () => {
       const scaleFn = objectFit === 'cover' ? scaleToCover : scaleToFit;
-      const { width, height } = scaleFn(imageDimensions, container);
+      const { width, height } =
+        objectFit === 'contain'
+          ? fittedPhoto(imageDimensions, container, rotation)
+          : scaleFn(imageDimensions, container);
       if (maxRasterPixels === 0) {
         return {
           insetInlineStart: (container.width - width) / 2 + 'px',
@@ -203,6 +212,12 @@
   $effect(() => {
     if (assetViewerManager.zoom > 1 && status.quality.original !== 'success') {
       untrack(() => void adaptiveImageLoader.trigger('original'));
+    }
+  });
+
+  $effect(() => {
+    if (retryOriginal > 0) {
+      untrack(() => adaptiveImageLoader.retry('original'));
     }
   });
 
