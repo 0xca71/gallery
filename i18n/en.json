@@ -1560,7 +1560,7 @@
   "editor_save_failed_storage_full": "Storage is full. The photo could not be saved.",
   "editor_save_failed_unsupported_format": "This format cannot be saved. Try saving a copy in a supported format.",
   "editor_save_mode_title": "Save edited photo",
-  "editor_save_overwrite": "Modify original file",
+  "editor_save_overwrite": "Overwrite original",
   "editor_save_overwrite_description": "Replace the original file. These edits cannot be undone.",
   "editor_save_pending": "The photo is still being saved. Select Save again to continue checking.",
   "editor_save_recovery_required": "The original file could not be restored. The recovery backup has been kept; contact your administrator.",

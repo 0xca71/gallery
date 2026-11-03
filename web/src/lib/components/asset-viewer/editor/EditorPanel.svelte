@@ -2,9 +2,9 @@
   import { shortcuts } from '$lib/actions/shortcut';
   import { editManager, EditToolType } from '$lib/managers/edit/edit-manager.svelte';
   import { websocketEvents } from '$lib/stores/websocket';
-  import { AssetTypeEnum, getAssetEdits, type AssetResponseDto } from '@immich/sdk';
-  import { Button, HStack, IconButton } from '@immich/ui';
-  import { mdiClose } from '@mdi/js';
+  import { AssetEditSaveMode, AssetTypeEnum, getAssetEdits, type AssetResponseDto } from '@immich/sdk';
+  import { Button, HStack, Icon, IconButton } from '@immich/ui';
+  import { mdiChevronDown, mdiClose } from '@mdi/js';
   import { onDestroy, onMount } from 'svelte';
   import { t } from 'svelte-i18n';
 
@@ -21,6 +21,22 @@
     onClose: () => void;
   }
 
+  let { asset = $bindable(), onClose }: Props = $props();
+  let saveMenuOpen = $state(false);
+  let splitButtonContainer: HTMLDivElement | undefined = $state();
+
+  const canOverwrite = $derived(editManager.saveCapabilities?.canOverwrite ?? true);
+  const canCopy = $derived(editManager.saveCapabilities?.canCopy ?? true);
+  const defaultSaveMode = $derived(canOverwrite ? AssetEditSaveMode.Overwrite : AssetEditSaveMode.Copy);
+  const unavailableReason = $derived(editManager.saveCapabilities?.overwriteUnavailableReason ?? null);
+  const unavailableReasonKey = $derived(
+    unavailableReason === 'unsupported_format'
+      ? 'editor_save_unavailable_unsupported_format'
+      : unavailableReason === 'save_in_progress'
+        ? 'editor_save_unavailable_save_in_progress'
+        : 'editor_save_unavailable_not_writable',
+  );
+
   onMount(async () => {
     const edits = await getAssetEdits({ id: asset.id });
     const toolType = asset.type === AssetTypeEnum.Video ? EditToolType.Trim : EditToolType.Transform;
@@ -31,9 +47,12 @@
     editManager.cleanup();
   });
 
-  async function applyEdits() {
+  async function applyEdits(mode?: AssetEditSaveMode) {
+    saveMenuOpen = false;
     const success =
-      asset.type === AssetTypeEnum.Image ? await editManager.saveImageEdits() : await editManager.applyEdits();
+      asset.type === AssetTypeEnum.Image
+        ? await editManager.saveImageEdits(mode ?? defaultSaveMode)
+        : await editManager.applyEdits();
 
     if (success) {
       onClose();
@@ -41,6 +60,10 @@
   }
 
   async function closeEditor() {
+    if (saveMenuOpen) {
+      saveMenuOpen = false;
+      return;
+    }
     if (editManager.isApplyingEdits) {
       return;
     }
@@ -49,13 +72,19 @@
     }
   }
 
-  let { asset = $bindable(), onClose }: Props = $props();
+  function handleWindowClick(event: MouseEvent) {
+    if (saveMenuOpen && !splitButtonContainer?.contains(event.target as Node)) {
+      saveMenuOpen = false;
+    }
+  }
 </script>
+
+<svelte:window onclick={handleWindowClick} />
 
 <svelte:document
   use:shortcuts={[
     { shortcut: { key: 'Escape' }, onShortcut: closeEditor },
-    { shortcut: { key: 'Enter' }, onShortcut: applyEdits },
+    { shortcut: { key: 'Enter' }, onShortcut: () => applyEdits() },
   ]}
 />
 
@@ -72,7 +101,66 @@
       />
       <p class="text-lg text-immich-fg capitalize dark:text-immich-dark-fg">{$t('editor')}</p>
     </HStack>
-    <Button shape="round" size="small" onclick={applyEdits} loading={editManager.isApplyingEdits}>{$t('save')}</Button>
+    {#if asset.type === AssetTypeEnum.Image}
+      <div class="relative inline-flex items-stretch" bind:this={splitButtonContainer} data-testid="editor-save-split">
+        <Button
+          shape="round"
+          size="small"
+          class="rounded-e-none"
+          onclick={() => applyEdits(defaultSaveMode)}
+          loading={editManager.isApplyingEdits}
+          disabled={defaultSaveMode === AssetEditSaveMode.Overwrite ? !canOverwrite : !canCopy}
+        >
+          {defaultSaveMode === AssetEditSaveMode.Overwrite ? $t('editor_save_overwrite') : $t('editor_save_copy')}
+        </Button>
+        <Button
+          shape="round"
+          size="small"
+          class="rounded-s-none border-s border-white/25 px-2"
+          aria-label={$t('editor_save_mode_title')}
+          aria-expanded={saveMenuOpen}
+          aria-haspopup="menu"
+          disabled={editManager.isApplyingEdits}
+          onclick={() => (saveMenuOpen = !saveMenuOpen)}
+        >
+          <Icon icon={mdiChevronDown} size="18" />
+        </Button>
+        {#if saveMenuOpen}
+          <div
+            role="menu"
+            class="absolute end-0 top-full z-20 mt-1.5 w-72 rounded-xl border border-gray-200 bg-light p-1.5 text-immich-fg shadow-lg dark:border-gray-700 dark:bg-immich-dark-gray dark:text-immich-dark-fg"
+          >
+            <button
+              type="button"
+              role="menuitem"
+              class="w-full rounded-lg p-2.5 text-start transition hover:bg-subtle disabled:cursor-not-allowed disabled:opacity-60"
+              disabled={!canOverwrite}
+              onclick={() => applyEdits(AssetEditSaveMode.Overwrite)}
+            >
+              <span class="block text-sm font-medium">{$t('editor_save_overwrite')}</span>
+              <span class="mt-0.5 block text-xs text-muted">{$t('editor_save_overwrite_description')}</span>
+              {#if unavailableReason}
+                <span class="text-immich-error mt-1 block text-xs">{$t(unavailableReasonKey)}</span>
+              {/if}
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              class="mt-1 w-full rounded-lg p-2.5 text-start transition hover:bg-subtle disabled:cursor-not-allowed disabled:opacity-60"
+              disabled={!canCopy}
+              onclick={() => applyEdits(AssetEditSaveMode.Copy)}
+            >
+              <span class="block text-sm font-medium">{$t('editor_save_copy')}</span>
+              <span class="mt-0.5 block text-xs text-muted">{$t('editor_save_copy_description')}</span>
+            </button>
+          </div>
+        {/if}
+      </div>
+    {:else}
+      <Button shape="round" size="small" onclick={() => applyEdits()} loading={editManager.isApplyingEdits}>
+        {$t('save')}
+      </Button>
+    {/if}
   </HStack>
 
   <section

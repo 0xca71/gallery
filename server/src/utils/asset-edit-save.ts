@@ -24,6 +24,15 @@ export const getSavedImageFormat = (filename: string): SavedImageFormat | undefi
   }
 };
 
+export const getSavedImageExtension = (format: SavedImageFormat): string =>
+  format === 'jpeg' ? '.jpg' : `.${format}`;
+
+export const replaceFilenameExtension = (filename: string, extension: string): string => {
+  const ext = extname(filename);
+  const stem = ext ? filename.slice(0, -ext.length) : filename;
+  return `${stem}${extension}`;
+};
+
 export const validateSavedImageEdits = (edits: AssetEditActionItem[], dimensions: ImageDimensions) => {
   if (edits.some((edit) => edit.action === 'trim')) {
     throw new BadRequestException('Only image transformations can be saved to a file');

@@ -282,4 +282,50 @@ describe('image save worker on real files', () => {
     const files = await readdir(join(directory, 'managed'), { recursive: true });
     expect(files.some((file) => file.includes('_save-'))).toBe(false);
   });
+
+  it('converts non-native formats in overwrite mode, updates path and filename, and removes the old file after commit', async () => {
+    const { sut, mocks, source, operation } = await setup(AssetEditSaveMode.Overwrite);
+    const tiffPath = join(directory, 'IMG_5183.tiff');
+    await sharp({ create: { width: 8, height: 6, channels: 3, background: { r: 10, g: 120, b: 200 } } })
+      .tiff()
+      .toFile(tiffPath);
+    const tiffStat = await stat(tiffPath);
+    source.asset.originalPath = tiffPath;
+    source.asset.originalFileName = 'IMG_5183.HEIC';
+    source.asset.fileModifiedAt = tiffStat.mtime;
+    source.asset.checksum = createHash('sha1')
+      .update(await readFile(tiffPath))
+      .digest();
+
+    expect(await sut.handleSave({ id: operation.id })).toBe(JobStatus.Success);
+    const committed = mocks.assetEditSave.commit.mock.calls[0][2];
+    expect(committed.path).toBe(join(directory, 'IMG_5183.jpg'));
+    expect(committed.filename).toBe('IMG_5183.jpg');
+    expect(await widthOf(committed.path)).toBe(4);
+    const convertedMeta = await sharp(committed.path).metadata();
+    expect(convertedMeta.format).toBe('jpeg');
+    expect(convertedMeta.chromaSubsampling).toBe('4:4:4');
+    await expect(stat(tiffPath)).rejects.toThrow();
+  });
+
+  it('keeps the original non-native file untouched and removes the converted output if commit fails', async () => {
+    const { sut, mocks, source, operation } = await setup(AssetEditSaveMode.Overwrite);
+    const tiffPath = join(directory, 'IMG_5183.tiff');
+    await sharp({ create: { width: 8, height: 6, channels: 3, background: { r: 10, g: 120, b: 200 } } })
+      .tiff()
+      .toFile(tiffPath);
+    const tiffBytes = await readFile(tiffPath);
+    const tiffStat = await stat(tiffPath);
+    source.asset.originalPath = tiffPath;
+    source.asset.originalFileName = 'IMG_5183.HEIC';
+    source.asset.fileModifiedAt = tiffStat.mtime;
+    source.asset.checksum = createHash('sha1')
+      .update(tiffBytes)
+      .digest();
+    mocks.assetEditSave.commit.mockRejectedValueOnce(new Error('Injected commit failure'));
+
+    expect(await sut.handleSave({ id: operation.id })).toBe(JobStatus.Failed);
+    expect(await readFile(tiffPath)).toEqual(tiffBytes);
+    await expect(stat(join(directory, 'IMG_5183.jpg'))).rejects.toThrow();
+  });
 });

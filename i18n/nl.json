@@ -1556,7 +1556,7 @@
   "editor_save_failed_storage_full": "De opslag is vol. De foto kon niet worden opgeslagen.",
   "editor_save_failed_unsupported_format": "Dit formaat kan niet worden opgeslagen. Probeer een kopie in een ondersteund formaat op te slaan.",
   "editor_save_mode_title": "Bewerkte foto opslaan",
-  "editor_save_overwrite": "Origineel bestand wijzigen",
+  "editor_save_overwrite": "Origineel overschrijven",
   "editor_save_overwrite_description": "Vervang het originele bestand. Deze bewerkingen kunnen niet ongedaan worden gemaakt.",
   "editor_save_pending": "De foto wordt nog opgeslagen. Kies opnieuw Opslaan om de status verder te controleren.",
   "editor_save_recovery_required": "Het originele bestand kon niet worden hersteld. De herstelkopie is bewaard; neem contact op met je beheerder.",

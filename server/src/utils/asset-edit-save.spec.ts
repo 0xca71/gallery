@@ -1,5 +1,11 @@
 import { AssetEditAction } from 'src/dtos/editing.dto.js';
-import { getSavedImageFormat, transformSavedFace, validateSavedImageEdits } from 'src/utils/asset-edit-save.js';
+import {
+  getSavedImageExtension,
+  getSavedImageFormat,
+  replaceFilenameExtension,
+  transformSavedFace,
+  validateSavedImageEdits,
+} from 'src/utils/asset-edit-save.js';
 
 describe('image file saving geometry', () => {
   const edits = [
@@ -50,5 +56,9 @@ describe('image file saving geometry', () => {
     expect(getSavedImageFormat('photo.png')).toBe('png');
     expect(getSavedImageFormat('photo.heic')).toBeUndefined();
     expect(getSavedImageFormat('photo.cr2')).toBeUndefined();
+    expect(getSavedImageExtension('jpeg')).toBe('.jpg');
+    expect(getSavedImageExtension('png')).toBe('.png');
+    expect(replaceFilenameExtension('/photos/IMG_5183.HEIC', '.jpg')).toBe('/photos/IMG_5183.jpg');
+    expect(replaceFilenameExtension('IMG_5183', '.jpg')).toBe('IMG_5183.jpg');
   });
 });

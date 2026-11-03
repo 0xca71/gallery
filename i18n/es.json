@@ -1555,7 +1555,7 @@
   "editor_save_failed_storage_full": "El almacenamiento está lleno. No se ha podido guardar la foto.",
   "editor_save_failed_unsupported_format": "No se puede guardar este formato. Intenta guardar una copia en un formato compatible.",
   "editor_save_mode_title": "Guardar foto editada",
-  "editor_save_overwrite": "Modificar archivo original",
+  "editor_save_overwrite": "Sobrescribir original",
   "editor_save_overwrite_description": "Reemplaza el archivo original. Estas modificaciones no se pueden deshacer.",
   "editor_save_pending": "La foto se sigue guardando. Selecciona Guardar de nuevo para seguir comprobando su estado.",
   "editor_save_recovery_required": "No se pudo restaurar el archivo original. Se ha conservado la copia de recuperación; ponte en contacto con tu administrador.",

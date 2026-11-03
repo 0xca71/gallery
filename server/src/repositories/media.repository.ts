@@ -208,7 +208,11 @@ export class MediaRepository {
       processInvalidImages: false,
       raw: decoded.info,
     })
-      .toFormat(format, { quality: 95, lossless: format === 'webp' })
+      .toFormat(format, {
+        quality: 95,
+        lossless: format === 'webp',
+        ...(format === 'jpeg' && { chromaSubsampling: '4:4:4' }),
+      })
       .toFile(output);
     return { width: info.width, height: info.height };
   }
