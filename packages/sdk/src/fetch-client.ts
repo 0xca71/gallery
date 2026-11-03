@@ -3470,6 +3470,8 @@ export type ServerConfigDto = {
     trashDays: number;
     /** Delay in days before deleted users are permanently removed */
     userDeleteDelay: number;
+    /** Number of selected assets above which delete notifications stay open */
+    webDeleteToastThreshold: number;
 };
 export type ServerFeaturesDto = {
     /** Whether config file is available */

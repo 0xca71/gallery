@@ -201,6 +201,9 @@
     {#if caps.canFavorite}
       <FavoriteAction removeFavorite={assetInteraction.isAllFavorite} {onFavorite} />
     {/if}
+    {#if caps.canDelete && onAssetDelete}
+      <DeleteAssets {onAssetDelete} {onUndoDelete} />
+    {/if}
     {#if caps.canRemoveFromSpace && space}
       <!-- Top-level (not a menu item): RemoveFromSpaceAction has no `menuItem` variant, and the
            direct-space pages render it top-level today. RemoveFromAlbum stays in the menu below,
@@ -233,9 +236,6 @@
       {/if}
       {#if caps.canRemoveFromAlbum && album}
         <RemoveFromAlbum menuItem bind:album={localAlbum} {onRemove} />
-      {/if}
-      {#if caps.canDelete && onAssetDelete}
-        <DeleteAssets menuItem {onAssetDelete} {onUndoDelete} />
       {/if}
     </ButtonContextMenu>
   </AssetSelectControlBar>

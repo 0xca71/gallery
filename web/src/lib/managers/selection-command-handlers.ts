@@ -10,6 +10,7 @@ import AssetAddToCollectionModal from '$lib/modals/AssetAddToCollectionModal.sve
 import AssetDeleteConfirmModal from '$lib/modals/AssetDeleteConfirmModal.svelte';
 import { showDeleteModal } from '$lib/stores/preferences.store';
 import type { OnUndoDelete } from '$lib/utils/actions';
+import { getDeleteToastOptions, getDeleteToastThreshold } from '$lib/utils/delete-toast';
 import { handleError } from '$lib/utils/handle-error';
 
 const getSelection = (ctx?: CommandContext): SelectionCommandContext | null => ctx?.selection ?? null;
@@ -173,7 +174,7 @@ export async function handleDeleteSelected(ctx?: CommandContext) {
             }
           : undefined,
       },
-      { timeout: 5000 },
+      getDeleteToastOptions(ids.length, getDeleteToastThreshold()),
     );
     selection.clearSelection();
     return true;

@@ -34,6 +34,7 @@ export interface EnvData {
   logLevel?: LogLevel;
   logFormat?: LogFormat;
   peopleStatistics: boolean;
+  webDeleteToastThreshold: number;
 
   backup: {
     s3: Pick<S3StorageConfig, 'bucket' | 'region' | 'endpoint' | 'accessKeyId' | 'secretAccessKey'> & {
@@ -280,6 +281,7 @@ const getEnv = (): EnvData => {
     logLevel: dto.IMMICH_LOG_LEVEL,
     logFormat: dto.IMMICH_LOG_FORMAT || LogFormat.Console,
     peopleStatistics: dto.IMMICH_PEOPLE_STATISTICS_ENABLED ?? false,
+    webDeleteToastThreshold: dto.IMMICH_WEB_DELETE_TOAST_THRESHOLD ?? 20,
 
     backup: {
       s3: {

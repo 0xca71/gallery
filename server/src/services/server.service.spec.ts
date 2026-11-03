@@ -210,6 +210,7 @@ describe(ServerService.name, () => {
           'themed',
           'person_throwback',
         ],
+        webDeleteToastThreshold: 20,
       });
       expect(mocks.systemMetadata.get).toHaveBeenCalled();
     });

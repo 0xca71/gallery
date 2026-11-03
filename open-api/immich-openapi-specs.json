@@ -37850,6 +37850,12 @@
             "maximum": 9007199254740991,
             "minimum": -9007199254740991,
             "type": "integer"
+          },
+          "webDeleteToastThreshold": {
+            "description": "Number of selected assets above which delete notifications stay open",
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
           }
         },
         "required": [
@@ -37865,7 +37871,8 @@
           "oauthButtonText",
           "publicUsers",
           "trashDays",
-          "userDeleteDelay"
+          "userDeleteDelay",
+          "webDeleteToastThreshold"
         ],
         "type": "object"
       },
