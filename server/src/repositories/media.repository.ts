@@ -39,7 +39,7 @@ import {
 import { LoggingRepository } from 'src/repositories/logging.repository.js';
 import { mergeTimeZone } from 'src/utils/date.js';
 import { handlePromiseError } from 'src/utils/misc.js';
-import { createAffineMatrix } from 'src/utils/transform.js';
+import { createAffineMatrix, hasArbitraryRotation } from 'src/utils/transform.js';
 
 const probe = (input: string, options: string[]): Promise<FfprobeData> =>
   new Promise((resolve, reject) =>
@@ -177,16 +177,22 @@ export class MediaRepository {
       throw new BadRequestException('Full original image could not be decoded at the expected dimensions');
     }
     const crop = edits.find((edit) => edit.action === 'crop');
-    if (crop) {
+    const arbitraryRotation = hasArbitraryRotation(edits);
+    const extractCrop = async () => {
+      if (!crop) {
+        return;
+      }
+      const left = Math.min(Math.max(0, crop.parameters.x), Math.max(0, decoded.info.width - 1));
+      const top = Math.min(Math.max(0, crop.parameters.y), Math.max(0, decoded.info.height - 1));
+      const width = Math.min(crop.parameters.width, decoded.info.width - left);
+      const height = Math.min(crop.parameters.height, decoded.info.height - top);
       decoded = await sharp(decoded.data, { raw: decoded.info })
-        .extract({
-          left: crop.parameters.x,
-          top: crop.parameters.y,
-          width: crop.parameters.width,
-          height: crop.parameters.height,
-        })
+        .extract({ left, top, width, height })
         .raw()
         .toBuffer({ resolveWithObject: true });
+    };
+    if (!arbitraryRotation) {
+      await extractCrop();
     }
     // Right-angle rotations are lossless pixel permutations. Applying a general affine matrix
     // instead interpolates edge pixels against a black background.
@@ -203,12 +209,19 @@ export class MediaRepository {
             : pipeline.flop();
       decoded = await pipeline.raw().toBuffer({ resolveWithObject: true });
     }
+    if (arbitraryRotation) {
+      await extractCrop();
+    }
     const info = await this.getImageDecodingPipeline(decoded.data, {
       colorspace: Colorspace.Srgb,
       processInvalidImages: false,
       raw: decoded.info,
     })
-      .toFormat(format, { quality: 95, lossless: format === 'webp' })
+      .toFormat(format, {
+        quality: 95,
+        lossless: format === 'webp',
+        ...(format === 'jpeg' && { chromaSubsampling: '4:4:4' }),
+      })
       .toFile(output);
     return { width: info.width, height: info.height };
   }
@@ -307,7 +320,8 @@ export class MediaRepository {
 
   private applyEdits(pipeline: Sharp, edits: AssetEditActionItem[]): Sharp {
     const crop = edits.find((edit) => edit.action === 'crop');
-    if (crop) {
+    const arbitraryRotation = hasArbitraryRotation(edits);
+    if (crop && !arbitraryRotation) {
       pipeline = pipeline.extract({
         left: Math.round(crop.parameters.x),
         top: Math.round(crop.parameters.y),
@@ -323,6 +337,15 @@ export class MediaRepository {
         [a, b],
         [c, d],
       ]);
+    }
+
+    if (crop && arbitraryRotation) {
+      pipeline = pipeline.extract({
+        left: Math.round(crop.parameters.x),
+        top: Math.round(crop.parameters.y),
+        width: Math.round(crop.parameters.width),
+        height: Math.round(crop.parameters.height),
+      });
     }
 
     return pipeline;

@@ -8,7 +8,7 @@ import {
   getAssetEditSave,
   saveAssetEdits,
 } from '@immich/sdk';
-import { modalManager, toastManager } from '@immich/ui';
+import { toastManager } from '@immich/ui';
 import type { MessageFormatter } from 'svelte-i18n';
 import { EditManager } from '$lib/managers/edit/edit-manager.svelte';
 import { eventManager } from '$lib/managers/event-manager.svelte';
@@ -18,7 +18,6 @@ import { websocketMock } from '@test-data/mocks/websocket.mock';
 
 vi.mock('@immich/sdk');
 vi.mock('$lib/stores/websocket');
-vi.mock('$lib/modals/AssetEditSaveModal.svelte', () => ({ default: {} }));
 vi.mock('$lib/utils/i18n', () => ({
   getFormatter: vi.fn(),
   getPreferredLocale: vi.fn(),
@@ -185,14 +184,19 @@ describe('EditManager', () => {
         overwriteUnavailableReason: null,
         outputFormat: 'png',
       });
-      vi.mocked(modalManager.show).mockResolvedValue(AssetEditSaveMode.Copy as never);
       vi.mocked(saveAssetEdits).mockResolvedValue(operation(AssetEditSaveStatus.Queued));
     });
 
-    it('cancels without starting a save or discarding the edits', async () => {
-      vi.mocked(modalManager.show).mockResolvedValue(null as never);
-      expect(await editManager.saveImageEdits()).toBe(false);
+    it('rejects explicit overwrite when overwrite capability is unavailable', async () => {
+      vi.mocked(getAssetEditSaveCapabilities).mockResolvedValue({
+        canCopy: true,
+        canOverwrite: false,
+        overwriteUnavailableReason: 'not_writable',
+        outputFormat: 'jpeg',
+      });
+      expect(await editManager.saveImageEdits(AssetEditSaveMode.Overwrite)).toBe(false);
       expect(saveAssetEdits).not.toHaveBeenCalled();
+      expect(toastManager.danger).toHaveBeenCalledWith('editor_save_unavailable_not_writable');
       expect(editManager.hasAppliedEdits).toBe(false);
     });
 
@@ -200,7 +204,7 @@ describe('EditManager', () => {
       const result = assetFactory.build({ id: 'copy-id' });
       vi.mocked(getAssetEditSave).mockResolvedValue(operation(AssetEditSaveStatus.Completed, result.id));
       vi.mocked(getAssetInfo).mockResolvedValue(result);
-      expect(await editManager.saveImageEdits()).toBe(true);
+      expect(await editManager.saveImageEdits(AssetEditSaveMode.Copy)).toBe(true);
       expect(saveAssetEdits).toHaveBeenCalledWith({
         id: 'source-id',
         assetEditSaveCreateDto: expect.objectContaining({
@@ -214,8 +218,7 @@ describe('EditManager', () => {
       expect(editManager.pendingRequest).toBeNull();
     });
 
-    it('uses the overwrite choice and keeps the original identity', async () => {
-      vi.mocked(modalManager.show).mockResolvedValue(AssetEditSaveMode.Overwrite as never);
+    it('defaults to overwrite when capabilities allow it and keeps the original identity', async () => {
       vi.mocked(getAssetEditSave).mockResolvedValue(operation(AssetEditSaveStatus.Completed, 'source-id'));
       vi.mocked(getAssetInfo).mockResolvedValue(editManager.currentAsset!);
       expect(await editManager.saveImageEdits()).toBe(true);
@@ -227,24 +230,42 @@ describe('EditManager', () => {
       expect(editManager.resultAssetId).toBe('source-id');
     });
 
+    it('falls back to copy when no mode is passed and overwrite is unavailable', async () => {
+      vi.mocked(getAssetEditSaveCapabilities).mockResolvedValue({
+        canCopy: true,
+        canOverwrite: false,
+        overwriteUnavailableReason: 'not_writable',
+        outputFormat: 'jpeg',
+      });
+      const result = assetFactory.build({ id: 'copy-id' });
+      vi.mocked(getAssetEditSave).mockResolvedValue(operation(AssetEditSaveStatus.Completed, result.id));
+      vi.mocked(getAssetInfo).mockResolvedValue(result);
+      expect(await editManager.saveImageEdits()).toBe(true);
+      expect(saveAssetEdits).toHaveBeenCalledWith(
+        expect.objectContaining({
+          assetEditSaveCreateDto: expect.objectContaining({ mode: AssetEditSaveMode.Copy }),
+        }),
+      );
+      expect(editManager.resultAssetId).toBe('copy-id');
+    });
+
     it('reuses the idempotency key if the creation response is lost', async () => {
       vi.mocked(saveAssetEdits)
         .mockRejectedValueOnce(new Error('connection lost'))
         .mockResolvedValueOnce(operation(AssetEditSaveStatus.Queued));
       expect(await editManager.saveImageEdits()).toBe(false);
       const first = vi.mocked(saveAssetEdits).mock.calls[0][0];
-      vi.mocked(getAssetEditSave).mockResolvedValue(operation(AssetEditSaveStatus.Completed, 'copy-id'));
-      vi.mocked(getAssetInfo).mockResolvedValue(assetFactory.build({ id: 'copy-id' }));
+      vi.mocked(getAssetEditSave).mockResolvedValue(operation(AssetEditSaveStatus.Completed, 'source-id'));
+      vi.mocked(getAssetInfo).mockResolvedValue(assetFactory.build({ id: 'source-id' }));
       expect(await editManager.saveImageEdits()).toBe(true);
       expect(vi.mocked(saveAssetEdits).mock.calls[1][0]).toEqual(first);
-      expect(modalManager.show).toHaveBeenCalledTimes(1);
     });
 
     it('resumes status polling after a disconnect without creating another file', async () => {
       vi.mocked(getAssetEditSave)
         .mockRejectedValueOnce(new Error('connection lost'))
-        .mockResolvedValueOnce(operation(AssetEditSaveStatus.Completed, 'copy-id'));
-      vi.mocked(getAssetInfo).mockResolvedValue(assetFactory.build({ id: 'copy-id' }));
+        .mockResolvedValueOnce(operation(AssetEditSaveStatus.Completed, 'source-id'));
+      vi.mocked(getAssetInfo).mockResolvedValue(assetFactory.build({ id: 'source-id' }));
       expect(await editManager.saveImageEdits()).toBe(false);
       expect(editManager.pendingSave?.operationId).toBe('operation-id');
       expect(await editManager.saveImageEdits()).toBe(true);

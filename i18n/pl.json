@@ -1558,7 +1558,7 @@
   "editor_save_failed_storage_full": "Pamięć jest pełna. Nie można zapisać zdjęcia.",
   "editor_save_failed_unsupported_format": "Nie można zapisać tego formatu. Spróbuj zapisać kopię w obsługiwanym formacie.",
   "editor_save_mode_title": "Zapisz edytowane zdjęcie",
-  "editor_save_overwrite": "Zmień oryginalny plik",
+  "editor_save_overwrite": "Nadpisz oryginał",
   "editor_save_overwrite_description": "Zastąp oryginalny plik. Tych zmian nie można cofnąć.",
   "editor_save_pending": "Zdjęcie jest nadal zapisywane. Wybierz ponownie Zapisz, aby dalej sprawdzać stan.",
   "editor_save_recovery_required": "Nie udało się przywrócić oryginalnego pliku. Kopia do odzyskania została zachowana; skontaktuj się z administratorem.",

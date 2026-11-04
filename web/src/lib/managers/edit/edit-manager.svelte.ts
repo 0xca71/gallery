@@ -1,5 +1,6 @@
 import {
   AssetTypeEnum,
+  AssetEditSaveMode,
   AssetEditSaveStatus,
   getAssetEditSave,
   getAssetEditSaveCapabilities,
@@ -9,6 +10,7 @@ import {
   isHttpError,
   removeAssetEdits,
   type AssetEditsCreateDto,
+  type AssetEditSaveCapabilitiesDto,
   type AssetEditSaveCreateDto,
   type AssetResponseDto,
 } from '@immich/sdk';
@@ -20,7 +22,6 @@ import TrimTool from '$lib/components/asset-viewer/editor/trim-tool/trim-tool.sv
 import { transformManager } from '$lib/managers/edit/transform-manager.svelte';
 import { trimManager } from '$lib/managers/edit/trim-manager.svelte';
 import { eventManager } from '$lib/managers/event-manager.svelte';
-import AssetEditSaveModal from '$lib/modals/AssetEditSaveModal.svelte';
 import { waitForWebsocketEvent } from '$lib/stores/websocket';
 import { getFormatter } from '$lib/utils/i18n';
 
@@ -72,6 +73,7 @@ export class EditManager {
   isApplyingEdits = $state(false);
   hasAppliedEdits = $state(false);
   resultAssetId = $state<string | null>(null);
+  saveCapabilities = $state<AssetEditSaveCapabilitiesDto | null>(null);
   pendingSave = $state<{ operationId: string; assetId: string } | null>(null);
   pendingRequest = $state<{ assetId: string; dto: AssetEditSaveCreateDto } | null>(null);
 
@@ -118,6 +120,10 @@ export class EditManager {
     }
 
     this.currentAsset = asset;
+    this.saveCapabilities = null;
+    if (asset.type === AssetTypeEnum.Image) {
+      void this.loadSaveCapabilities(asset.id);
+    }
 
     this.selectedTool?.manager.onDeactivate?.();
     const newTool = this.tools.find((t) => t.type === toolType);
@@ -127,12 +133,28 @@ export class EditManager {
     }
   }
 
+  async loadSaveCapabilities(assetId = this.currentAsset?.id): Promise<AssetEditSaveCapabilitiesDto | null> {
+    if (!assetId) {
+      return null;
+    }
+    try {
+      const capabilities = await getAssetEditSaveCapabilities({ id: assetId });
+      if (this.currentAsset?.id === assetId) {
+        this.saveCapabilities = capabilities;
+      }
+      return capabilities;
+    } catch {
+      return null;
+    }
+  }
+
   cleanup() {
     for (const tool of this.tools) {
       tool.manager.onDeactivate?.();
     }
     this.currentAsset = null;
     this.selectedTool = null;
+    this.saveCapabilities = null;
   }
 
   async resetAllChanges() {
@@ -184,7 +206,7 @@ export class EditManager {
     }
   }
 
-  async saveImageEdits(): Promise<boolean> {
+  async saveImageEdits(requestedMode?: AssetEditSaveMode): Promise<boolean> {
     if (!this.currentAsset || this.isApplyingEdits || this.isShowingConfirmDialog) {
       return false;
     }
@@ -193,15 +215,27 @@ export class EditManager {
     this.isApplyingEdits = true;
     try {
       if (!this.pendingSave || this.pendingSave.assetId !== assetId) {
-        if (!this.pendingRequest || this.pendingRequest.assetId !== assetId) {
-          const capabilities = await getAssetEditSaveCapabilities({ id: assetId });
-          this.isShowingConfirmDialog = true;
-          const mode = await modalManager.show(AssetEditSaveModal, { capabilities });
-          this.isShowingConfirmDialog = false;
-          if (!mode) {
+        if (
+          !this.pendingRequest ||
+          this.pendingRequest.assetId !== assetId ||
+          (requestedMode && this.pendingRequest.dto.mode !== requestedMode)
+        ) {
+          const capabilities = this.saveCapabilities ?? (await this.loadSaveCapabilities(assetId));
+          if (this.currentAsset?.id !== assetId) {
             return false;
           }
-          if (this.currentAsset?.id !== assetId) {
+          const mode =
+            requestedMode ??
+            (capabilities?.canOverwrite === false ? AssetEditSaveMode.Copy : AssetEditSaveMode.Overwrite);
+          if (mode === AssetEditSaveMode.Overwrite && capabilities && !capabilities.canOverwrite) {
+            const reason = capabilities.overwriteUnavailableReason;
+            toastManager.danger(
+              t(
+                reason === 'save_in_progress'
+                  ? 'editor_save_unavailable_save_in_progress'
+                  : 'editor_save_unavailable_not_writable',
+              ),
+            );
             return false;
           }
           this.pendingRequest = {

@@ -323,4 +323,16 @@ describe('edit normalization', () => {
 
     expect(compareEditAffines(normalizedEdits, edits)).toBe(true);
   });
+
+  it('should handle arbitrary angle rotation and mirrors', () => {
+    const edits: EditActions = [
+      { action: AssetEditAction.Mirror, parameters: { axis: MirrorAxis.Horizontal } },
+      { action: AssetEditAction.Rotate, parameters: { angle: 14.5 } },
+    ];
+
+    const result = normalizeTransformEdits(edits);
+    const normalizedEdits = normalizedToEdits(result);
+
+    expect(compareEditAffines(normalizedEdits, edits)).toBe(true);
+  });
 });

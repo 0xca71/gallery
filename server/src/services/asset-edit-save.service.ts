@@ -39,7 +39,13 @@ import {
 } from 'src/repositories/asset-edit-save.repository.js';
 import { BaseService } from 'src/services/base.service.js';
 import { StorageService } from 'src/services/storage.service.js';
-import { getSavedImageFormat, validateSavedImageEdits } from 'src/utils/asset-edit-save.js';
+import {
+  type SavedImageFormat,
+  getSavedImageExtension,
+  getSavedImageFormat,
+  replaceFilenameExtension,
+  validateSavedImageEdits,
+} from 'src/utils/asset-edit-save.js';
 import { getDimensions, isPanorama } from 'src/utils/asset.util.js';
 import { isAssetChecksumConstraint } from 'src/utils/database.js';
 import { mimeTypes } from 'src/utils/mime-types.js';
@@ -113,10 +119,10 @@ export class AssetEditSaveService extends BaseService {
     const source = await this.assetEditSaveRepository.getSource(id);
     this.validateSource(source);
     const format = getSavedImageFormat(source.asset.originalPath);
-    let reason: string | null = format ? null : 'unsupported_format';
+    let reason: string | null = null;
     if (await this.assetEditSaveRepository.isSaving(id)) {
       reason = 'save_in_progress';
-    } else if (!reason && isAbsolute(source.asset.originalPath)) {
+    } else if (isAbsolute(source.asset.originalPath)) {
       try {
         const path = await realpath(source.asset.originalPath);
         await access(path, constants.R_OK | constants.W_OK);
@@ -270,10 +276,7 @@ export class AssetEditSaveService extends BaseService {
       throw new ConflictException('Source image version changed');
     }
     const { asset, exif } = source;
-    const format = getSavedImageFormat(asset.originalPath) ?? 'jpeg';
-    if (operation.mode === AssetEditSaveMode.Overwrite && !getSavedImageFormat(asset.originalPath)) {
-      throw new BadRequestException('unsupported_format');
-    }
+    const nativeFormat = getSavedImageFormat(asset.originalPath);
     operation = await this.assetEditSaveRepository.update(operation.id, {
       status: AssetEditSaveStatus.Rendering,
       error: null,
@@ -288,6 +291,13 @@ export class AssetEditSaveService extends BaseService {
       if (asset.checksumAlgorithm === ChecksumAlgorithm.sha1File && originalDigest !== asset.checksum.toString('hex')) {
         throw new ConflictException('Original image content changed before rendering');
       }
+      let format: SavedImageFormat;
+      if (nativeFormat) {
+        format = nativeFormat;
+      } else {
+        const { isTransparent } = await this.mediaRepository.getImageMetadata(original.localPath);
+        format = isTransparent ? 'png' : 'jpeg';
+      }
       const output = join(workdir, `image.${format}`);
       validateSavedImageEdits(operation.edits, getDimensions(exif));
       const dimensions = await this.mediaRepository.renderSavedImage(
@@ -296,7 +306,7 @@ export class AssetEditSaveService extends BaseService {
         operation.edits,
         format,
         getDimensions(exif),
-        operation.mode === AssetEditSaveMode.Overwrite,
+        operation.mode === AssetEditSaveMode.Overwrite && Boolean(nativeFormat),
       );
       await this.mediaRepository.writeSavedImageMetadata(
         original.localPath,
@@ -308,21 +318,33 @@ export class AssetEditSaveService extends BaseService {
       const checksum = await this.cryptoRepository.hashFile(output);
       const { size } = await stat(output);
       const resultAssetId = operation.mode === AssetEditSaveMode.Copy ? this.cryptoRepository.randomUUID() : asset.id;
+      const sourcePublishPath =
+        operation.mode === AssetEditSaveMode.Overwrite && isAbsolute(asset.originalPath)
+          ? await realpath(asset.originalPath)
+          : asset.originalPath;
+      const overwriteTarget =
+        operation.mode === AssetEditSaveMode.Overwrite
+          ? await this.resolveOverwriteTarget(
+              asset.originalPath,
+              sourcePublishPath,
+              asset.originalFileName,
+              format,
+              operation.id,
+            )
+          : null;
       const relative = StorageCore.getRelativeNestedPath(
         StorageFolder.Upload,
         asset.ownerId,
         `${resultAssetId}.${format}`,
       );
-      const path =
-        operation.mode === AssetEditSaveMode.Overwrite
-          ? asset.originalPath
-          : StorageService.getWriteBackend() instanceof DiskStorageBackend
-            ? join(StorageCore.getMediaLocation(), relative)
-            : relative;
-      const publishPath =
-        isAbsolute(path) && operation.mode === AssetEditSaveMode.Overwrite ? await realpath(path) : path;
+      const path = overwriteTarget
+        ? overwriteTarget.path
+        : StorageService.getWriteBackend() instanceof DiskStorageBackend
+          ? join(StorageCore.getMediaLocation(), relative)
+          : relative;
+      const publishPath = overwriteTarget ? overwriteTarget.publishPath : path;
       const originalAsset = await this.assetRepository.getForCopy(asset.id);
-      const oldFiles =
+      const oldDerivativeFiles =
         operation.mode === AssetEditSaveMode.Overwrite
           ? (originalAsset?.files
               .filter(
@@ -333,12 +355,14 @@ export class AssetEditSaveService extends BaseService {
               )
               .map((file) => file.path) ?? [])
           : [];
+      const oldSourceFiles =
+        overwriteTarget && !overwriteTarget.samePath ? [...new Set([asset.originalPath, sourcePublishPath])] : [];
+      const oldFiles = [...oldDerivativeFiles, ...oldSourceFiles];
       const journal: AssetEditSaveJournal = {
         originalPath: asset.originalPath,
         publishPath,
         stagePath: `${publishPath}.gallery-save-${operation.id}.tmp`,
-        backupPath:
-          operation.mode === AssetEditSaveMode.Overwrite ? `${publishPath}.gallery-save-${operation.id}.bak` : null,
+        backupPath: overwriteTarget?.samePath ? `${publishPath}.gallery-save-${operation.id}.bak` : null,
         originalDigest,
         outputDigest: checksum.toString('hex'),
         resultAssetId,
@@ -381,6 +405,8 @@ export class AssetEditSaveService extends BaseService {
         if ((await this.digestStored(journal.backupPath)) !== journal.originalDigest) {
           throw new ConflictException('Source changed before backup');
         }
+      }
+      if (operation.mode === AssetEditSaveMode.Overwrite) {
         const sourceFiles = originalAsset?.files ?? [];
         const sidecar = sourceFiles.find((file) => file.type === AssetFileType.Sidecar);
         if (sidecar) {
@@ -423,7 +449,7 @@ export class AssetEditSaveService extends BaseService {
         (await this.digestStored(asset.originalPath)) !== originalDigest ||
         (operation.mode === AssetEditSaveMode.Overwrite &&
           isAbsolute(asset.originalPath) &&
-          (await realpath(asset.originalPath)) !== publishPath)
+          (await realpath(asset.originalPath)) !== sourcePublishPath)
       ) {
         throw new ConflictException('Source file changed during rendering');
       }
@@ -440,10 +466,9 @@ export class AssetEditSaveService extends BaseService {
       const modifiedAt = publishedStat?.mtime ?? new Date();
       await this.assetEditSaveRepository.commit(operation, source, {
         path,
-        filename:
-          operation.mode === AssetEditSaveMode.Copy
-            ? `${extname(asset.originalFileName) ? asset.originalFileName.slice(0, -extname(asset.originalFileName).length) : asset.originalFileName}-edited.${format}`
-            : asset.originalFileName,
+        filename: overwriteTarget
+          ? overwriteTarget.filename
+          : `${extname(asset.originalFileName) ? asset.originalFileName.slice(0, -extname(asset.originalFileName).length) : asset.originalFileName}-edited.${format}`,
         checksum,
         size,
         ...dimensions,
@@ -576,6 +601,54 @@ export class AssetEditSaveService extends BaseService {
     return digest.toString('hex');
   }
 
+  private async resolveOverwriteTarget(
+    originalPath: string,
+    sourcePublishPath: string,
+    originalFileName: string,
+    format: SavedImageFormat,
+    operationId: string,
+  ): Promise<{ path: string; publishPath: string; filename: string; samePath: boolean }> {
+    if (getSavedImageFormat(originalPath) === format) {
+      return {
+        path: originalPath,
+        publishPath: sourcePublishPath,
+        filename: originalFileName,
+        samePath: true,
+      };
+    }
+    const ext = getSavedImageExtension(format);
+    for (const suffix of ['', '-edited', `-edited-${operationId.slice(0, 8)}`]) {
+      const candidatePublishPath = replaceFilenameExtension(sourcePublishPath, `${suffix}${ext}`);
+      if (candidatePublishPath === sourcePublishPath || !(await this.storedExists(candidatePublishPath))) {
+        return {
+          path: replaceFilenameExtension(originalPath, `${suffix}${ext}`),
+          publishPath: candidatePublishPath,
+          filename: replaceFilenameExtension(originalFileName, `${suffix}${ext}`),
+          samePath: candidatePublishPath === sourcePublishPath,
+        };
+      }
+    }
+    const fallbackSuffix = `-edited-${operationId}`;
+    return {
+      path: replaceFilenameExtension(originalPath, `${fallbackSuffix}${ext}`),
+      publishPath: replaceFilenameExtension(sourcePublishPath, `${fallbackSuffix}${ext}`),
+      filename: replaceFilenameExtension(originalFileName, `${fallbackSuffix}${ext}`),
+      samePath: false,
+    };
+  }
+
+  private async storedExists(path: string): Promise<boolean> {
+    if (isAbsolute(path)) {
+      try {
+        await access(path, constants.F_OK);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+    return StorageService.resolveBackendForKey(path).exists(path);
+  }
+
   private async deleteStored(path: string) {
     if (isAbsolute(path)) {
       await rm(path, { force: true });
@@ -592,14 +665,11 @@ export class AssetEditSaveService extends BaseService {
     if (!journal) {
       return;
     }
-    if (operation.mode === AssetEditSaveMode.Overwrite) {
+    if (operation.mode === AssetEditSaveMode.Overwrite && journal.backupPath) {
       const digest = await this.digestStored(journal.publishPath);
       if (digest === journal.originalDigest) {
         // Rendering/staging failed before publication. The source still contains its old bytes.
       } else if (digest === journal.outputDigest) {
-        if (!journal.backupPath) {
-          throw new Error('Original backup is unavailable');
-        }
         if ((await this.digestStored(journal.backupPath)) !== journal.originalDigest) {
           throw new Error('Original backup failed validation');
         }
@@ -620,24 +690,21 @@ export class AssetEditSaveService extends BaseService {
         // A detectable external modification cancelled the save before any replacement.
         // Leave that version untouched and release this operation after cleaning its temps.
       }
-      if (journal.sidecar) {
-        const digest = await this.digestStored(journal.sidecar.path);
-        if (
-          digest === journal.sidecar.outputDigest &&
-          journal.sidecar.originalDigest !== journal.sidecar.outputDigest
-        ) {
-          if ((await this.digestStored(journal.sidecar.backupPath)) !== journal.sidecar.originalDigest) {
-            throw new Error('Sidecar backup failed validation');
-          }
-          await this.copyStored(journal.sidecar.backupPath, journal.sidecar.stagePath);
-          await this.restoreFileStat(journal.sidecar.stagePath, journal.sidecar.originalStat);
-          await this.publish(journal.sidecar.stagePath, journal.sidecar.path);
-        } else if (digest !== journal.sidecar.originalDigest && journal.publicationStarted) {
-          throw new ConflictException('External sidecar changed; recovery backup retained');
-        }
-      }
     } else {
       await this.deleteStored(journal.publishPath);
+    }
+    if (operation.mode === AssetEditSaveMode.Overwrite && journal.sidecar) {
+      const digest = await this.digestStored(journal.sidecar.path);
+      if (digest === journal.sidecar.outputDigest && journal.sidecar.originalDigest !== journal.sidecar.outputDigest) {
+        if ((await this.digestStored(journal.sidecar.backupPath)) !== journal.sidecar.originalDigest) {
+          throw new Error('Sidecar backup failed validation');
+        }
+        await this.copyStored(journal.sidecar.backupPath, journal.sidecar.stagePath);
+        await this.restoreFileStat(journal.sidecar.stagePath, journal.sidecar.originalStat);
+        await this.publish(journal.sidecar.stagePath, journal.sidecar.path);
+      } else if (digest !== journal.sidecar.originalDigest && journal.publicationStarted) {
+        throw new ConflictException('External sidecar changed; recovery backup retained');
+      }
     }
     await this.cleanupJournal(journal, true);
   }

@@ -27,7 +27,10 @@
     { label: $t('crop_aspect_ratio_square'), value: '1:1', width: 20, height: 20 },
   ];
 
-  let isRotated = $derived(transformManager.normalizedRotation % 180 !== 0);
+  let isRotated = $derived(transformManager.normalizedBaseRotation % 180 !== 0);
+  let formattedFineAngle = $derived(
+    `${transformManager.fineRotation > 0 ? '+' : ''}${transformManager.fineRotation.toFixed(1)}°`,
+  );
 
   function rotatedRatio(ratio: AspectRatioOption): string {
     if (ratio.value === 'free') {
@@ -78,6 +81,17 @@
 <div class="mt-3 px-4">
   <div class="mt-2 flex h-10 w-full items-center justify-between text-sm">
     <h2>{$t('editor_orientation')}</h2>
+    <button
+      type="button"
+      class="rounded-full px-2 py-0.5 font-mono text-xs transition {transformManager.fineRotation === 0
+        ? 'text-gray-400'
+        : 'bg-immich-dark-primary/20 text-immich-dark-primary hover:bg-immich-dark-primary/30'}"
+      onclick={() => transformManager.setFineRotation(0)}
+      disabled={transformManager.fineRotation === 0}
+      aria-label={formattedFineAngle}
+    >
+      {formattedFineAngle}
+    </button>
   </div>
   <HStack>
     <IconButton
@@ -109,6 +123,31 @@
       onclick={() => mirrorImage('vertical')}
     />
   </HStack>
+
+  <div class="mt-3">
+    <input
+      type="range"
+      min="-45"
+      max="45"
+      step="0.1"
+      value={transformManager.fineRotation}
+      aria-label={$t('editor_orientation')}
+      class="h-1.5 w-full cursor-pointer appearance-none rounded-lg bg-gray-700 accent-immich-dark-primary"
+      onpointerdown={() => (transformManager.isInteracting = true)}
+      onpointerup={() => (transformManager.isInteracting = false)}
+      onpointercancel={() => (transformManager.isInteracting = false)}
+      onblur={() => (transformManager.isInteracting = false)}
+      ondblclick={() => transformManager.setFineRotation(0)}
+      oninput={(e) => transformManager.setFineRotation(Number((e.currentTarget as HTMLInputElement).value))}
+    />
+    <div class="mt-1 flex justify-between px-0.5 font-mono text-[10px] text-gray-400 select-none">
+      <span>-45°</span>
+      <span>-15°</span>
+      <span>0°</span>
+      <span>+15°</span>
+      <span>+45°</span>
+    </div>
+  </div>
 
   <div class="mt-6 flex h-10 w-full items-center justify-between text-sm">
     <h2>{$t('crop')}</h2>

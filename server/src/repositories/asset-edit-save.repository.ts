@@ -275,6 +275,7 @@ export class AssetEditSaveRepository {
           .updateTable('asset')
           .set({
             originalPath: output.path,
+            originalFileName: output.filename,
             fileModifiedAt: output.modifiedAt,
             width: output.width,
             height: output.height,

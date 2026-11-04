@@ -1544,7 +1544,7 @@
   "editor_save_failed_storage_full": "存储空间已满，无法保存照片。",
   "editor_save_failed_unsupported_format": "无法保存此格式，请尝试另存为支持的格式。",
   "editor_save_mode_title": "保存编辑后的照片",
-  "editor_save_overwrite": "修改原文件",
+  "editor_save_overwrite": "覆盖原图",
   "editor_save_overwrite_description": "替换原文件。保存后无法撤销这些编辑。",
   "editor_save_pending": "照片仍在保存。再次点击保存可继续查看状态。",
   "editor_save_recovery_required": "无法恢复原文件，恢复备份已保留，请联系管理员处理。",

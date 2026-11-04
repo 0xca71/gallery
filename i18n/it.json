@@ -1556,7 +1556,7 @@
   "editor_save_failed_storage_full": "Lo spazio di archiviazione è esaurito. La foto non è stata salvata.",
   "editor_save_failed_unsupported_format": "Questo formato non può essere salvato. Prova a salvare una copia in un formato supportato.",
   "editor_save_mode_title": "Salva la foto modificata",
-  "editor_save_overwrite": "Modifica il file originale",
+  "editor_save_overwrite": "Sovrascrivi originale",
   "editor_save_overwrite_description": "Sostituisci il file originale. Queste modifiche non possono essere annullate.",
   "editor_save_pending": "La foto è ancora in fase di salvataggio. Seleziona di nuovo Salva per continuare a verificarne lo stato.",
   "editor_save_recovery_required": "Non è stato possibile ripristinare il file originale. La copia di recupero è stata conservata; contatta il tuo amministratore.",

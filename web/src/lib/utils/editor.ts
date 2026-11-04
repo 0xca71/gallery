@@ -12,12 +12,14 @@ export const normalizeTransformEdits = (
   mirrorVertical: boolean;
 } => {
   const { a, b, c, d } = buildAffineFromEdits(edits);
-  const rotation = ((isCloseToZero(a) ? Math.asin(c) : Math.acos(a)) * 180) / Math.PI;
+  const rawAngle = (Math.atan2(c, a) * 180) / Math.PI;
+  const normalizedAngle = rawAngle < 0 ? 360 + rawAngle : rawAngle;
+  const roundedAngle = Math.round(normalizedAngle * 100) / 100;
 
   return {
-    rotation: rotation < 0 ? 360 + rotation : rotation,
+    rotation: isCloseToZero(roundedAngle) || isCloseToZero(roundedAngle - 360) ? 0 : roundedAngle,
     mirrorHorizontal: false,
-    mirrorVertical: isCloseToZero(a) ? b === c : a === -d,
+    mirrorVertical: a * d < b * c,
   };
 };
 

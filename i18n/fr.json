@@ -1554,7 +1554,7 @@
   "editor_save_failed_storage_full": "Le stockage est plein. La photo n’a pas pu être enregistrée.",
   "editor_save_failed_unsupported_format": "Ce format ne peut pas être enregistré. Essayez d’enregistrer une copie dans un format pris en charge.",
   "editor_save_mode_title": "Enregistrer la photo modifiée",
-  "editor_save_overwrite": "Modifier le fichier original",
+  "editor_save_overwrite": "Écraser l’original",
   "editor_save_overwrite_description": "Remplacez le fichier original. Ces modifications ne peuvent pas être annulées.",
   "editor_save_pending": "La photo est toujours en cours d’enregistrement. Sélectionnez à nouveau Enregistrer pour continuer à vérifier son état.",
   "editor_save_recovery_required": "Le fichier original n’a pas pu être restauré. La sauvegarde de récupération a été conservée ; contactez votre administrateur.",
