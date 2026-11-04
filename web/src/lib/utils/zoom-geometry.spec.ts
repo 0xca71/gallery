@@ -5,6 +5,7 @@ import {
   navigatorViewport,
   panToNavigatorPoint,
   resizePhotoViewport,
+  visibleCropRegion,
   zoomAt,
 } from '$lib/utils/zoom-geometry';
 
@@ -46,6 +47,29 @@ describe('photo zoom geometry and patched engine', () => {
     expect(navigatorViewport(image, viewport, state)).toEqual({ x: 0.25, y: 0, width: 0.5, height: 1 });
     expect(constrainPhotoPosition('y', -10_000, 2, 0, image, viewport)).toBe(-400);
     expect(constrainPhotoPosition('x', -10_000, 2, 0, image, viewport)).toBe(-1000);
+  });
+  it('converts the zoomed visible range into source crop coordinates', () => {
+    const image = { width: 4000, height: 3000 };
+    const state = panToNavigatorPoint(image, viewport, { ...base, currentZoom: 4 }, 0.6, 0.4);
+
+    expect(visibleCropRegion(image, viewport, state)).toEqual({ x: 1900, y: 800, width: 1000, height: 800 });
+  });
+  it.each([
+    [0, { x: 1900, y: 800, width: 1000, height: 800 }],
+    [90, { x: 1100, y: 575, width: 1000, height: 1250 }],
+    [180, { x: 1100, y: 1400, width: 1000, height: 800 }],
+    [270, { x: 1900, y: 1175, width: 1000, height: 1250 }],
+  ] as const)('maps the displayed crop rectangle back to source orientation at %i degrees', (rotation, expected) => {
+    const image = { width: 4000, height: 3000 };
+    const state = panToNavigatorPoint(
+      image,
+      viewport,
+      { ...base, currentZoom: 4, currentRotation: rotation },
+      0.6,
+      0.4,
+    );
+
+    expect(visibleCropRegion(image, viewport, state)).toEqual(expected);
   });
   it.each([0, 90, 180, 270])('maps navigation to the same visible point at %i degrees', (rotation) => {
     const image = { width: 4000, height: 3000 };

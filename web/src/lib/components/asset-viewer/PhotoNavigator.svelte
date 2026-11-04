@@ -15,6 +15,7 @@
     limited,
     onRetry,
     onResetFocus,
+    onCrop,
   }: {
     image: Size;
     viewport: Size;
@@ -22,6 +23,7 @@
     limited: boolean;
     onRetry: () => void;
     onResetFocus: () => void;
+    onCrop?: () => void;
   } = $props();
   const zoomState = $derived(assetViewerManager.zoomState);
   const rotation = $derived(zoomState.currentRotation);
@@ -238,6 +240,17 @@
       type="button"
       class="mt-1 w-full rounded-sm py-1 text-xs hover:bg-white/15"
       onclick={() => assetViewerManager.animatedZoom(1)}>{$t('photo_zoom_fit')}</button
+    >
+  {/if}
+  {#if onCrop}
+    <button
+      type="button"
+      class="mt-1 w-full rounded-sm py-1 text-xs hover:bg-white/15"
+      aria-label={$t('crop')}
+      onclick={(event) => {
+        event.stopPropagation();
+        onCrop?.();
+      }}>{$t('crop')}</button
     >
   {/if}
   {#if showExplanation && (failed || limited)}
