@@ -159,7 +159,7 @@ describe('SelectionToolbar', () => {
     expect(screen.queryByLabelText('add_to_album_or_space')).not.toBeInTheDocument();
     expect(screen.queryByLabelText('to_favorite')).not.toBeInTheDocument();
     expect(screen.queryByLabelText('remove_from_favorites')).not.toBeInTheDocument();
-    expect(screen.queryByRole('menuitem', { name: 'delete' })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('delete')).not.toBeInTheDocument();
     expect(screen.queryByLabelText('remove_from_space')).not.toBeInTheDocument();
     expect(screen.queryByRole('menuitem', { name: 'set_as_space_cover' })).not.toBeInTheDocument();
     expect(screen.queryByRole('menuitem', { name: 'set_as_album_cover' })).not.toBeInTheDocument();
@@ -185,9 +185,15 @@ describe('SelectionToolbar', () => {
     expect(screen.getByLabelText('share')).toBeInTheDocument();
     expect(screen.getByLabelText('add_to_album_or_space')).toBeInTheDocument();
     expect(screen.getByLabelText('to_favorite')).toBeInTheDocument();
-    expect(screen.getByRole('menuitem', { name: 'delete' })).toBeInTheDocument();
+    expect(screen.getByLabelText('delete')).toBeInTheDocument();
     expect(screen.getByLabelText('remove_from_space')).toBeInTheDocument();
     expect(screen.getByRole('menuitem', { name: 'set_as_space_cover' })).toBeInTheDocument();
+
+    const favorite = screen.getByLabelText('to_favorite');
+    const deleteButton = screen.getByLabelText('delete');
+    const more = screen.getByLabelText('menu');
+    expect(favorite.compareDocumentPosition(deleteButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(deleteButton.compareDocumentPosition(more) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it('Given the space-person surface (same editor+own-asset context but no onSetCover passed), When the toolbar renders, Then Cover is absent even though caps.canSetCover is true', () => {
@@ -228,7 +234,7 @@ describe('SelectionToolbar', () => {
     // Share is present since #1018 — the space Owner/Editor role carries it, like add-to-album.
     expect(screen.getByLabelText('share')).toBeInTheDocument();
     expect(screen.queryByLabelText('to_favorite')).not.toBeInTheDocument();
-    expect(screen.queryByRole('menuitem', { name: 'delete' })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('delete')).not.toBeInTheDocument();
   });
 
   it('Given a space editor with a MIXED selection, When the toolbar renders, Then both Share and Add-to-album are shown', () => {
@@ -246,7 +252,7 @@ describe('SelectionToolbar', () => {
     expect(screen.getByLabelText('add_to_album_or_space')).toBeInTheDocument();
     // Still hidden: these mutate every selected asset and the server refuses the non-owned ones.
     expect(screen.queryByLabelText('to_favorite')).not.toBeInTheDocument();
-    expect(screen.queryByRole('menuitem', { name: 'delete' })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('delete')).not.toBeInTheDocument();
   });
 
   it("Given a space editor selecting only other members' assets, When the toolbar renders, Then both Add-to-album and Share are shown — the space role covers both (#764 contribution, #1018 link)", () => {

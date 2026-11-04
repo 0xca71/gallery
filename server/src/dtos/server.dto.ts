@@ -127,6 +127,10 @@ const ServerConfigSchema = z
     maintenanceMode: z.boolean().describe('Whether maintenance mode is active'),
     minFaces: z.int().describe('People min faces server default'),
     availableMemoryTypes: z.array(z.string()).describe('Globally-available memory type keys'),
+    webDeleteToastThreshold: z
+      .int()
+      .min(0)
+      .describe('Number of selected assets above which delete notifications stay open'),
   })
   .meta({ id: 'ServerConfigDto' });
 

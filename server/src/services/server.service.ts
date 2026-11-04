@@ -176,6 +176,7 @@ export class ServerService extends BaseService {
       maintenanceMode: false,
       minFaces: config.machineLearning.facialRecognition.minFaces,
       availableMemoryTypes: MEMORY_TYPE_KEYS.filter((key) => getAdminAvailableMemoryTypeKeys(config.memories).has(key)),
+      webDeleteToastThreshold: this.configRepository.getEnv().webDeleteToastThreshold,
     };
   }
 

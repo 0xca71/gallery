@@ -10,6 +10,7 @@ const resetEnv = () => {
   for (const env of [
     'IMMICH_ALLOW_EXTERNAL_PLUGINS',
     'IMMICH_ALLOW_SETUP',
+    'IMMICH_WEB_DELETE_TOAST_THRESHOLD',
     'IMMICH_ENV',
     'IMMICH_WORKERS_INCLUDE',
     'IMMICH_WORKERS_EXCLUDE',
@@ -96,6 +97,19 @@ describe('getEnv', () => {
 
     expect(config.plugins.external).toEqual({ allow: false });
     expect(config.setup).toEqual({ allow: true });
+    expect(config.webDeleteToastThreshold).toBe(20);
+  });
+
+  it('should read the delete toast threshold from the environment', () => {
+    process.env.IMMICH_WEB_DELETE_TOAST_THRESHOLD = '42';
+
+    expect(getEnv().webDeleteToastThreshold).toBe(42);
+  });
+
+  it('should reject a negative delete toast threshold', () => {
+    process.env.IMMICH_WEB_DELETE_TOAST_THRESHOLD = '-1';
+
+    expect(() => getEnv()).toThrowError('[IMMICH_WEB_DELETE_TOAST_THRESHOLD] Too small: expected number to be >=0');
   });
 
   describe('IMMICH_MEDIA_LOCATION', () => {

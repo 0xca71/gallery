@@ -411,7 +411,7 @@ describe('delete selected', () => {
           onclick: expect.any(Function),
         }),
       }),
-      { timeout: 5000 },
+      { timeout: 5000, closable: true },
     );
     expect(selection.clearSelection).toHaveBeenCalledOnce();
   });
@@ -426,6 +426,15 @@ describe('delete selected', () => {
 
     await vi.waitFor(() => expect(restoreAssets).toHaveBeenCalledWith({ bulkIdsDto: { ids: ['asset-1', 'asset-2'] } }));
     expect(selection.onUndoDelete).toHaveBeenCalledWith(assets);
+  });
+
+  it('keeps the delete toast open when more than the configured default threshold is deleted', async () => {
+    const assets = Array.from({ length: 21 }, (_, index) => makeAsset({ id: `asset-${index}` }));
+    const selection = makeSelection({ assets });
+
+    await handleDeleteSelected(makeCtx(selection));
+
+    expect(toastManager.primary).toHaveBeenCalledWith(expect.anything(), { timeout: 0, closable: true });
   });
 
   it('undo restore failure calls handleError and does not call onUndoDelete', async () => {
@@ -496,6 +505,7 @@ describe('delete selected', () => {
 
     expect(toastManager.primary).toHaveBeenCalledWith(expect.objectContaining({ button: undefined }), {
       timeout: 5000,
+      closable: true,
     });
   });
 

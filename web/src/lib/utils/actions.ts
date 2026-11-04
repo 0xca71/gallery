@@ -5,6 +5,7 @@ import { get } from 'svelte/store';
 import { TimelineManager } from '$lib/managers/timeline-manager/timeline-manager.svelte';
 import type { TimelineAsset } from '$lib/managers/timeline-manager/types';
 import type { StackResponse } from '$lib/utils/asset-utils';
+import { getDeleteToastOptions, getDeleteToastThreshold } from '$lib/utils/delete-toast';
 import { handleError } from './handle-error';
 
 export type OnDelete = (assetIds: string[]) => void;
@@ -41,7 +42,7 @@ export const deleteAssets = async (
             ? { label: $t('undo'), color: 'secondary', onclick: () => undoDeleteAssets(onUndoDelete, assets) }
             : undefined,
       },
-      { timeout: 5000 },
+      getDeleteToastOptions(ids.length, getDeleteToastThreshold()),
     );
   } catch (error) {
     handleError(error, $t('errors.unable_to_delete_assets'));

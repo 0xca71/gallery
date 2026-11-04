@@ -32,6 +32,7 @@ final Map<String, Map<String, Object?>> openApiPatches = {
     'mapLightStyleUrl': 'https://tiles.openfreemap.org/styles/positron',
     'mapDarkStyleUrl': 'https://tiles.openfreemap.org/styles/dark',
     'minFaces': 3,
+    'webDeleteToastThreshold': 20,
   },
   'UserResponseDto': {'profileChangedAt': _now},
   'AssetResponseDto': {'visibility': 'timeline', 'createdAt': _now, 'isEdited': false},

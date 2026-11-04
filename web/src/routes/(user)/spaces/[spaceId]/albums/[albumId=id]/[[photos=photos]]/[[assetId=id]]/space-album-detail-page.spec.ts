@@ -1131,7 +1131,7 @@ describe('Space album detail page', () => {
       expect(screen.getByRole('menuitem', { name: 'Change date' })).toBeInTheDocument();
       expect(screen.getByRole('menuitem', { name: 'Change location' })).toBeInTheDocument();
       expect(screen.getByRole('menuitem', { name: 'Archive' })).toBeInTheDocument();
-      expect(screen.getByRole('menuitem', { name: 'Delete' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Delete' })).toBeInTheDocument();
       expect(screen.getByRole('menuitem', { name: 'Set as album cover' })).toBeInTheDocument();
     });
 
@@ -1158,7 +1158,7 @@ describe('Space album detail page', () => {
       // Ownership-gated actions are hidden regardless of manager status.
       expect(screen.queryByRole('menuitem', { name: 'Change date' })).not.toBeInTheDocument();
       expect(screen.queryByRole('menuitem', { name: 'Archive' })).not.toBeInTheDocument();
-      expect(screen.queryByRole('menuitem', { name: 'Delete' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Delete' })).not.toBeInTheDocument();
     });
 
     it('non-manager (viewer) + all-owned selection: metadata-edit affordances present, RemoveFromAlbum + Set-cover absent', async () => {
@@ -1185,7 +1185,7 @@ describe('Space album detail page', () => {
       expect(screen.getByTestId('download-action')).toBeInTheDocument();
       expect(screen.getByRole('menuitem', { name: 'Change date' })).toBeInTheDocument();
       expect(screen.getByRole('menuitem', { name: 'Archive' })).toBeInTheDocument();
-      expect(screen.getByRole('menuitem', { name: 'Delete' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Delete' })).toBeInTheDocument();
 
       // canManage is false for a plain album/space Viewer — Remove and Set-cover stay hidden
       // even though the selection is entirely their own.
@@ -1217,7 +1217,7 @@ describe('Space album detail page', () => {
       await openOverflowMenu();
       expect(screen.getByTestId('download-action')).toBeInTheDocument();
       expect(screen.queryByTestId('album-remove-from-album')).not.toBeInTheDocument();
-      expect(screen.queryByRole('menuitem', { name: 'Delete' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Delete' })).not.toBeInTheDocument();
       expect(screen.queryByRole('menuitem', { name: 'Set as album cover' })).not.toBeInTheDocument();
     });
   });
