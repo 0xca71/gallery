@@ -59,7 +59,7 @@ import { isDeadlockError, retryOnDeadlock, updateLockedColumns } from 'src/utils
 import { asDateTimeString, extractTimeZone } from 'src/utils/date.js';
 import { batched, findOrFail } from 'src/utils/misc.js';
 import { applyResolvedIdentityMetadata } from 'src/utils/person-identity.js';
-import { transformOcrBoundingBox } from 'src/utils/transform.js';
+import { getCropBoundsDimensions, transformOcrBoundingBox } from 'src/utils/transform.js';
 
 @Injectable()
 export class AssetService extends BaseService {
@@ -1008,8 +1008,9 @@ export class AssetService extends BaseService {
           throw new BadRequestException('Crop action must be the first edit action');
         }
 
+        const bounds = getCropBoundsDimensions(edits, { width: assetWidth, height: assetHeight });
         const { x, y, width, height } = crop.parameters;
-        if (x + width > assetWidth || y + height > assetHeight) {
+        if (x + width > bounds.width || y + height > bounds.height) {
           throw new BadRequestException('Crop parameters are out of bounds');
         }
       }

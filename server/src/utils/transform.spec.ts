@@ -84,6 +84,19 @@ describe('transformFaceBoundingBox', () => {
       expect(result.imageWidth).toBe(800);
       expect(result.imageHeight).toBe(1000);
     });
+
+    it('should rotate by an arbitrary angle and apply post-rotation crop', () => {
+      const edits: AssetEditActionItem[] = [
+        { action: AssetEditAction.Crop, parameters: { x: 100, y: 80, width: 800, height: 640 } },
+        { action: AssetEditAction.Rotate, parameters: { angle: 12.5 } },
+      ];
+      const result = transformFaceBoundingBox(baseFace, edits, baseDimensions);
+
+      expect(result.imageWidth).toBe(800);
+      expect(result.imageHeight).toBe(640);
+      expect(result.boundingBoxX2).toBeGreaterThan(result.boundingBoxX1);
+      expect(result.boundingBoxY2).toBeGreaterThan(result.boundingBoxY1);
+    });
   });
 
   describe('with mirror edit', () => {

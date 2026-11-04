@@ -27,6 +27,7 @@ type RegionConvertParams = {
 
 export enum ResizeBoundary {
   None = 'none',
+  Marquee = 'marquee',
   TopLeft = 'top-left',
   TopRight = 'top-right',
   BottomLeft = 'bottom-left',
@@ -45,6 +46,8 @@ class TransformManager implements EditToolManager {
   isDragging = $state(false);
   animationFrame = $state<ReturnType<typeof requestAnimationFrame> | null>(null);
   dragAnchor = $state({ x: 0, y: 0 });
+  marqueeStart = $state({ x: 0, y: 0 });
+  hasMarqueeMoved = $state(false);
   resizeSide = $state(ResizeBoundary.None);
   imgElement = $state<HTMLImageElement | null>(null);
   cropAreaEl = $state<HTMLElement | null>(null);
@@ -55,17 +58,26 @@ class TransformManager implements EditToolManager {
   cropAspectRatio = $state('free');
   originalImageSize = $state<ImageDimensions>({ width: 1000, height: 1000 });
   region = $state({ x: 0, y: 0, width: 100, height: 100 });
+  baseRegion = $state({ x: 0, y: 0, width: 100, height: 100 });
   previewImageSize = $derived({
     width: this.cropImageSize.width * this.cropImageScale,
     height: this.cropImageSize.height * this.cropImageScale,
   });
 
-  imageRotation = $state(0);
+  baseRotation = $state(0);
+  fineRotation = $state(0);
+  imageRotation = $derived(this.baseRotation + this.fineRotation);
   mirrorHorizontal = $state(false);
   mirrorVertical = $state(false);
-  normalizedRotation = $derived.by(() => {
-    const newAngle = this.imageRotation % 360;
+  normalizedBaseRotation = $derived.by(() => {
+    const newAngle = this.baseRotation % 360;
     return newAngle < 0 ? newAngle + 360 : newAngle;
+  });
+  normalizedRotation = $derived.by(() => {
+    const rawAngle = this.imageRotation % 360;
+    const positiveAngle = rawAngle < 0 ? rawAngle + 360 : rawAngle;
+    const rounded = Math.round(positiveAngle * 100) / 100;
+    return rounded >= 360 ? 0 : rounded;
   });
 
   edits = $derived.by(() => this.getEdits());
@@ -78,10 +90,11 @@ class TransformManager implements EditToolManager {
       return;
     }
 
-    const newCrop = this.recalculateCrop(aspectRatio);
+    const newCrop = this.constrainRegionToRotatedImage(this.recalculateCrop(aspectRatio));
     if (newCrop) {
       this.animateCropChange(newCrop);
       this.region = newCrop;
+      this.baseRegion = { ...newCrop };
     }
   }
 
@@ -102,10 +115,29 @@ class TransformManager implements EditToolManager {
     );
   }
 
+  hasManualSubCrop() {
+    const fullRegion = this.constrainRegionToRotatedImage({
+      x: 0,
+      y: 0,
+      width: this.previewImageSize.width,
+      height: this.previewImageSize.height,
+    });
+    return (
+      Math.abs(fullRegion.width - this.region.width) > 2 ||
+      Math.abs(fullRegion.height - this.region.height) > 2
+    );
+  }
+
   getEdits(): EditActions {
     const edits: EditActions = [];
 
-    if (this.checkCropEdits()) {
+    if (Math.abs(this.fineRotation) > 1e-4) {
+      const cropRegion = this.getRotatedOriginalCropRegion();
+      edits.push({
+        action: AssetEditAction.Crop,
+        parameters: cropRegion,
+      });
+    } else if (this.checkCropEdits()) {
       // Convert from display coordinates to loaded preview image coordinates
       let cropRegion = this.getRegionInPreviewCoords(this.region);
 
@@ -163,7 +195,8 @@ class TransformManager implements EditToolManager {
   }
 
   async resetAllChanges() {
-    this.imageRotation = 0;
+    this.baseRotation = 0;
+    this.fineRotation = 0;
     this.mirrorHorizontal = false;
     this.mirrorVertical = false;
     await tick();
@@ -198,7 +231,9 @@ class TransformManager implements EditToolManager {
     // Normalize rotation and mirror edits to single rotation and mirror state
     // This allows edits to be imported in any order and still produce correct state
     const normalizedTransformation = normalizeTransformEdits(transformEdits);
-    this.imageRotation = normalizedTransformation.rotation;
+    const nearestOrthogonal = Math.round(normalizedTransformation.rotation / 90) * 90;
+    this.baseRotation = ((nearestOrthogonal % 360) + 360) % 360;
+    this.fineRotation = Math.round((normalizedTransformation.rotation - nearestOrthogonal) * 10) / 10;
     this.mirrorHorizontal = normalizedTransformation.mirrorHorizontal;
     this.mirrorVertical = normalizedTransformation.mirrorVertical;
 
@@ -217,15 +252,19 @@ class TransformManager implements EditToolManager {
     this.isInteracting = false;
     this.animationFrame = null;
     this.dragAnchor = { x: 0, y: 0 };
+    this.marqueeStart = { x: 0, y: 0 };
+    this.hasMarqueeMoved = false;
     this.resizeSide = ResizeBoundary.None;
     this.imgElement = null;
     this.cropAreaEl = null;
     this.isDragging = false;
     this.overlayEl = null;
-    this.imageRotation = 0;
+    this.baseRotation = 0;
+    this.fineRotation = 0;
     this.mirrorHorizontal = false;
     this.mirrorVertical = false;
     this.region = { x: 0, y: 0, width: 100, height: 100 };
+    this.baseRegion = { x: 0, y: 0, width: 100, height: 100 };
     this.cropImageSize = { width: 1000, height: 1000 };
     this.originalImageSize = { width: 1000, height: 1000 };
     this.cropImageScale = 1;
@@ -236,7 +275,7 @@ class TransformManager implements EditToolManager {
   mirror(axis: 'horizontal' | 'vertical') {
     this.hasChanges = true;
 
-    if (this.imageRotation % 180 !== 0) {
+    if (this.normalizedBaseRotation % 180 !== 0) {
       axis = axis === 'horizontal' ? 'vertical' : 'horizontal';
     }
 
@@ -250,9 +289,16 @@ class TransformManager implements EditToolManager {
   async rotate(angle: number) {
     this.hasChanges = true;
 
-    this.imageRotation += angle;
+    this.baseRotation += angle;
     await tick();
     this.onImageLoad();
+  }
+
+  setFineRotation(angle: number) {
+    this.hasChanges = true;
+    this.fineRotation = clamp(Math.round(angle * 10) / 10, -45, 45);
+    this.region = this.constrainRegionToRotatedImage(this.baseRegion, this.fineRotation);
+    this.draw();
   }
 
   recalculateCrop(aspectRatio: string = this.cropAspectRatio): Region {
@@ -426,14 +472,19 @@ class TransformManager implements EditToolManager {
     if (edits === null) {
       const cropFrameEl = this.cropFrame;
       cropFrameEl?.classList.add('transition');
-      this.region = this.normalizeCropArea(scale);
+      this.baseRegion = this.normalizeCropArea(scale, this.baseRegion);
+      this.region = this.constrainRegionToRotatedImage(this.baseRegion, this.fineRotation, scale);
       cropFrameEl?.addEventListener('transitionend', () => cropFrameEl?.classList.remove('transition'), {
         passive: true,
       });
     } else {
       const cropEdit = edits.find((e) => e.action === AssetEditAction.Crop);
 
-      if (cropEdit) {
+      if (cropEdit && Math.abs(this.fineRotation) > 1e-4) {
+        const params = cropEdit.parameters as CropParameters;
+        this.region = this.convertRotatedCropToDisplayRegion(params, scale);
+        this.baseRegion = { ...this.region };
+      } else if (cropEdit) {
         const params = cropEdit.parameters as CropParameters;
 
         // convert from original image coordinates to loaded preview image coordinates
@@ -461,13 +512,15 @@ class TransformManager implements EditToolManager {
           width: width * scale,
           height: height * scale,
         };
+        this.baseRegion = { ...this.region };
       } else {
-        this.region = {
+        this.baseRegion = {
           x: 0,
           y: 0,
           width: img.width * scale,
           height: img.height * scale,
         };
+        this.region = this.constrainRegionToRotatedImage(this.baseRegion, this.fineRotation, scale);
       }
     }
     this.cropImageScale = scale;
@@ -498,18 +551,18 @@ class TransformManager implements EditToolManager {
     return scale;
   }
 
-  normalizeCropArea(scale: number) {
+  normalizeCropArea(scale: number, sourceRegion: Region = this.region) {
     const img = this.imgElement;
     if (!img) {
-      return this.region;
+      return sourceRegion;
     }
 
     const scaleRatio = scale / this.cropImageScale;
     const scaledRegion = {
-      x: this.region.x * scaleRatio,
-      y: this.region.y * scaleRatio,
-      width: this.region.width * scaleRatio,
-      height: this.region.height * scaleRatio,
+      x: sourceRegion.x * scaleRatio,
+      y: sourceRegion.y * scaleRatio,
+      width: sourceRegion.width * scaleRatio,
+      height: sourceRegion.height * scaleRatio,
     };
 
     // Constrain to scaled image bounds
@@ -528,7 +581,8 @@ class TransformManager implements EditToolManager {
     }
 
     const scale = this.calculateScale();
-    this.region = this.normalizeCropArea(scale);
+    this.baseRegion = this.normalizeCropArea(scale, this.baseRegion);
+    this.region = this.constrainRegionToRotatedImage(this.normalizeCropArea(scale, this.region), this.fineRotation, scale);
     this.cropImageScale = scale;
 
     img.style.width = `${img.width * scale}px`;
@@ -541,13 +595,27 @@ class TransformManager implements EditToolManager {
     if (e.button !== 0) {
       return;
     }
+    e.stopPropagation();
 
+    const { mouseX, mouseY } = this.getMousePosition(e);
     this.isInteracting = true;
-    this.resizeSide = resizeBoundary;
-    if (resizeBoundary === ResizeBoundary.None) {
+
+    const shouldStartMarquee =
+      resizeBoundary === ResizeBoundary.Marquee ||
+      (resizeBoundary === ResizeBoundary.None && (e.shiftKey || !this.hasManualSubCrop()));
+
+    if (shouldStartMarquee) {
+      this.resizeSide = ResizeBoundary.Marquee;
+      this.isDragging = false;
+      this.marqueeStart = { x: mouseX, y: mouseY };
+      this.hasMarqueeMoved = false;
+    } else if (resizeBoundary === ResizeBoundary.None) {
+      this.resizeSide = ResizeBoundary.None;
       this.isDragging = true;
-      const { mouseX, mouseY } = this.getMousePosition(e);
       this.dragAnchor = { x: mouseX - this.region.x, y: mouseY - this.region.y };
+    } else {
+      this.resizeSide = resizeBoundary;
+      this.isDragging = false;
     }
 
     document.body.style.userSelect = 'none';
@@ -563,6 +631,8 @@ class TransformManager implements EditToolManager {
 
     if (this.isDragging) {
       this.moveCrop(mouseX, mouseY);
+    } else if (this.resizeSide === ResizeBoundary.Marquee) {
+      this.updateMarqueeCrop(mouseX, mouseY);
     } else if (this.resizeSide !== ResizeBoundary.None) {
       this.resizeCrop(mouseX, mouseY);
     }
@@ -574,6 +644,7 @@ class TransformManager implements EditToolManager {
 
     this.isInteracting = false;
     this.isDragging = false;
+    this.hasMarqueeMoved = false;
     this.resizeSide = ResizeBoundary.None;
   }
 
@@ -583,7 +654,7 @@ class TransformManager implements EditToolManager {
     }
     const clientRect = this.cropAreaEl.getBoundingClientRect();
 
-    switch (this.normalizedRotation) {
+    switch (this.normalizedBaseRotation) {
       case 90: {
         return {
           mouseX: e.clientY - clientRect.top,
@@ -619,9 +690,62 @@ class TransformManager implements EditToolManager {
     }
 
     this.hasChanges = true;
-    this.region.x = clamp(mouseX - this.dragAnchor.x, 0, cropArea.clientWidth - this.region.width);
-    this.region.y = clamp(mouseY - this.dragAnchor.y, 0, cropArea.clientHeight - this.region.height);
+    const movedRegion = {
+      ...this.region,
+      x: clamp(mouseX - this.dragAnchor.x, 0, cropArea.clientWidth - this.region.width),
+      y: clamp(mouseY - this.dragAnchor.y, 0, cropArea.clientHeight - this.region.height),
+    };
+    this.region = this.constrainRegionToRotatedImage(movedRegion);
+    this.baseRegion = { ...this.region };
 
+    this.draw();
+  }
+
+  updateMarqueeCrop(mouseX: number, mouseY: number) {
+    const canvas = this.cropAreaEl;
+    if (!canvas) {
+      return;
+    }
+
+    const x0 = clamp(this.marqueeStart.x, 0, canvas.clientWidth);
+    const y0 = clamp(this.marqueeStart.y, 0, canvas.clientHeight);
+    const clampedX = clamp(mouseX, 0, canvas.clientWidth);
+    const clampedY = clamp(mouseY, 0, canvas.clientHeight);
+
+    if (!this.hasMarqueeMoved) {
+      if (Math.hypot(clampedX - x0, clampedY - y0) < 6) {
+        return;
+      }
+      this.hasMarqueeMoved = true;
+    }
+
+    this.hasChanges = true;
+    const minSize = 20;
+    const dirX = clampedX >= x0 ? 1 : -1;
+    const dirY = clampedY >= y0 ? 1 : -1;
+    const xLimit = Math.max(minSize, dirX >= 0 ? canvas.clientWidth - x0 : x0);
+    const yLimit = Math.max(minSize, dirY >= 0 ? canvas.clientHeight - y0 : y0);
+    const desiredWidth = Math.max(minSize, Math.abs(clampedX - x0));
+    const desiredHeight = Math.max(minSize, Math.abs(clampedY - y0));
+
+    const { newWidth: w, newHeight: h } = this.adjustDimensions(
+      desiredWidth,
+      desiredHeight,
+      this.cropAspectRatio,
+      xLimit,
+      yLimit,
+      minSize,
+    );
+
+    const newRegion = {
+      x: dirX >= 0 ? x0 : Math.max(0, x0 - w),
+      y: dirY >= 0 ? y0 : Math.max(0, y0 - h),
+      width: w,
+      height: h,
+    };
+
+    this.region = this.constrainRegionToRotatedImage(newRegion);
+    this.baseRegion = { ...this.region };
     this.draw();
   }
 
@@ -635,7 +759,7 @@ class TransformManager implements EditToolManager {
 
     this.hasChanges = true;
     const { x, y, width, height } = currentCrop;
-    const minSize = 50;
+    const minSize = 24;
     let newRegion = { ...currentCrop };
 
     let desiredWidth = width;
@@ -677,7 +801,8 @@ class TransformManager implements EditToolManager {
 
     // Old
     switch (this.resizeSide) {
-      case ResizeBoundary.None: {
+      case ResizeBoundary.None:
+      case ResizeBoundary.Marquee: {
         break;
       }
       case ResizeBoundary.Left: {
@@ -802,24 +927,189 @@ class TransformManager implements EditToolManager {
       }
     }
 
-    // Constrain the region to canvas bounds
-    this.region = {
+    // Constrain the region to canvas and rotated image bounds
+    const boundedRegion = {
       ...newRegion,
       x: Math.max(0, Math.min(newRegion.x, canvas.clientWidth - newRegion.width)),
       y: Math.max(0, Math.min(newRegion.y, canvas.clientHeight - newRegion.height)),
     };
+    this.region = this.constrainRegionToRotatedImage(boundedRegion);
+    this.baseRegion = { ...this.region };
 
     this.draw();
   }
 
   resetCrop() {
+    this.hasChanges = true;
     this.cropAspectRatio = 'free';
-    this.region = {
+    this.baseRegion = {
       x: 0,
       y: 0,
-      width: this.cropImageSize.width * this.cropImageScale - 1,
-      height: this.cropImageSize.height * this.cropImageScale - 1,
+      width: this.cropImageSize.width * this.cropImageScale,
+      height: this.cropImageSize.height * this.cropImageScale,
     };
+    this.region = this.constrainRegionToRotatedImage(this.baseRegion);
+    this.draw();
+  }
+
+  constrainRegionToRotatedImage(
+    region: Region,
+    fineAngleDeg: number = this.fineRotation,
+    scale: number = this.cropImageScale,
+  ): Region {
+    const W = this.cropImageSize.width * scale;
+    const H = this.cropImageSize.height * scale;
+    if (W <= 0 || H <= 0) {
+      return region;
+    }
+    const clamped = this.constrainToBounds(region, { width: W, height: H });
+    if (Math.abs(fineAngleDeg) < 1e-4) {
+      return clamped;
+    }
+
+    const rad = (fineAngleDeg * Math.PI) / 180;
+    const cos = Math.cos(rad);
+    const sin = Math.sin(rad);
+    const absCos = Math.abs(cos);
+    const absSin = Math.abs(sin);
+
+    const k = Math.min(1, W / (clamped.width * absCos + clamped.height * absSin), H / (clamped.width * absSin + clamped.height * absCos));
+    const w = Math.max(1, clamped.width * k);
+    const h = Math.max(1, clamped.height * k);
+
+    const cx = W / 2;
+    const cy = H / 2;
+    const dx = clamped.x + clamped.width / 2 - cx;
+    const dy = clamped.y + clamped.height / 2 - cy;
+
+    const u = dx * cos + dy * sin;
+    const v = -dx * sin + dy * cos;
+
+    const maxU = Math.max(0, W / 2 - (w / 2) * absCos - (h / 2) * absSin);
+    const maxV = Math.max(0, H / 2 - (w / 2) * absSin - (h / 2) * absCos);
+
+    const clampedU = clamp(u, -maxU, maxU);
+    const clampedV = clamp(v, -maxV, maxV);
+
+    const dx2 = clampedU * cos - clampedV * sin;
+    const dy2 = clampedU * sin + clampedV * cos;
+
+    return {
+      x: cx + dx2 - w / 2,
+      y: cy + dy2 - h / 2,
+      width: w,
+      height: h,
+    };
+  }
+
+  getRotatedOriginalCropRegion(): Region {
+    const displayW = this.previewImageSize.width;
+    const displayH = this.previewImageSize.height;
+    const scaleX = this.originalImageSize.width / displayW;
+    const scaleY = this.originalImageSize.height / displayH;
+
+    const dxOrig = (this.region.x + this.region.width / 2 - displayW / 2) * scaleX;
+    const dyOrig = (this.region.y + this.region.height / 2 - displayH / 2) * scaleY;
+    const wOrig = this.region.width * scaleX;
+    const hOrig = this.region.height * scaleY;
+
+    let dxRot = dxOrig;
+    let dyRot = dyOrig;
+    let wRot = wOrig;
+    let hRot = hOrig;
+
+    switch (this.normalizedBaseRotation) {
+      case 90: {
+        dxRot = -dyOrig;
+        dyRot = dxOrig;
+        wRot = hOrig;
+        hRot = wOrig;
+        break;
+      }
+      case 180: {
+        dxRot = -dxOrig;
+        dyRot = -dyOrig;
+        break;
+      }
+      case 270: {
+        dxRot = dyOrig;
+        dyRot = -dxOrig;
+        wRot = hOrig;
+        hRot = wOrig;
+        break;
+      }
+    }
+
+    const rad = (this.normalizedRotation * Math.PI) / 180;
+    const rotW = Math.max(
+      1,
+      Math.round(this.originalImageSize.width * Math.abs(Math.cos(rad)) + this.originalImageSize.height * Math.abs(Math.sin(rad))),
+    );
+    const rotH = Math.max(
+      1,
+      Math.round(this.originalImageSize.width * Math.abs(Math.sin(rad)) + this.originalImageSize.height * Math.abs(Math.cos(rad))),
+    );
+
+    const width = clamp(Math.round(wRot), 1, rotW);
+    const height = clamp(Math.round(hRot), 1, rotH);
+    const x = clamp(Math.round(rotW / 2 + dxRot - width / 2), 0, rotW - width);
+    const y = clamp(Math.round(rotH / 2 + dyRot - height / 2), 0, rotH - height);
+
+    return { x, y, width, height };
+  }
+
+  convertRotatedCropToDisplayRegion(crop: CropParameters, scale: number): Region {
+    const rad = (this.normalizedRotation * Math.PI) / 180;
+    const rotW = Math.max(
+      1,
+      Math.round(this.originalImageSize.width * Math.abs(Math.cos(rad)) + this.originalImageSize.height * Math.abs(Math.sin(rad))),
+    );
+    const rotH = Math.max(
+      1,
+      Math.round(this.originalImageSize.width * Math.abs(Math.sin(rad)) + this.originalImageSize.height * Math.abs(Math.cos(rad))),
+    );
+
+    const dxRot = crop.x + crop.width / 2 - rotW / 2;
+    const dyRot = crop.y + crop.height / 2 - rotH / 2;
+
+    let dxOrig = dxRot;
+    let dyOrig = dyRot;
+    let wOrig = crop.width;
+    let hOrig = crop.height;
+
+    switch (this.normalizedBaseRotation) {
+      case 90: {
+        dxOrig = dyRot;
+        dyOrig = -dxRot;
+        wOrig = crop.height;
+        hOrig = crop.width;
+        break;
+      }
+      case 180: {
+        dxOrig = -dxRot;
+        dyOrig = -dyRot;
+        break;
+      }
+      case 270: {
+        dxOrig = -dyRot;
+        dyOrig = dxRot;
+        wOrig = crop.height;
+        hOrig = crop.width;
+        break;
+      }
+    }
+
+    const displayW = this.cropImageSize.width * scale;
+    const displayH = this.cropImageSize.height * scale;
+    const scaleX = displayW / this.originalImageSize.width;
+    const scaleY = displayH / this.originalImageSize.height;
+
+    const width = wOrig * scaleX;
+    const height = hOrig * scaleY;
+    const x = displayW / 2 + dxOrig * scaleX - width / 2;
+    const y = displayH / 2 + dyOrig * scaleY - height / 2;
+
+    return this.constrainRegionToRotatedImage({ x, y, width, height }, this.fineRotation, scale);
   }
 
   rotateAspectRatio() {

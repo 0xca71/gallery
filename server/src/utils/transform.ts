@@ -3,13 +3,62 @@ import type { ImageDimensions } from 'src/types.js';
 import { AssetEditAction, AssetEditActionItem } from 'src/dtos/editing.dto.js';
 import { AssetOcrResponseDto } from 'src/dtos/ocr.dto.js';
 
+export const isOrthogonalRotation = (angleDegrees: number): boolean => {
+  const remainder = ((angleDegrees % 90) + 90) % 90;
+  return remainder < 1e-6 || Math.abs(remainder - 90) < 1e-6;
+};
+
+export const hasArbitraryRotation = (edits: AssetEditActionItem[]): boolean =>
+  edits.some((edit) => edit.action === AssetEditAction.Rotate && !isOrthogonalRotation(edit.parameters.angle));
+
+export const getRotatedDimensions = (dimensions: ImageDimensions, angleDegrees: number): ImageDimensions => {
+  if (isOrthogonalRotation(angleDegrees)) {
+    const normalized = ((Math.round(angleDegrees) % 360) + 360) % 360;
+    return normalized === 90 || normalized === 270
+      ? { width: dimensions.height, height: dimensions.width }
+      : { width: dimensions.width, height: dimensions.height };
+  }
+
+  const angleRadians = (angleDegrees * Math.PI) / 180;
+  const cos = Math.abs(Math.cos(angleRadians));
+  const sin = Math.abs(Math.sin(angleRadians));
+  return {
+    width: Math.max(1, Math.round(dimensions.width * cos + dimensions.height * sin)),
+    height: Math.max(1, Math.round(dimensions.width * sin + dimensions.height * cos)),
+  };
+};
+
+export const getCropBoundsDimensions = (
+  edits: AssetEditActionItem[],
+  startingDimensions: ImageDimensions,
+): ImageDimensions => {
+  if (!hasArbitraryRotation(edits)) {
+    return startingDimensions;
+  }
+
+  let dims = { ...startingDimensions };
+  for (const edit of edits) {
+    if (edit.action === AssetEditAction.Rotate) {
+      dims = getRotatedDimensions(dims, edit.parameters.angle);
+    }
+  }
+  return dims;
+};
+
 export const getOutputDimensions = (
   edits: AssetEditActionItem[],
   startingDimensions: ImageDimensions,
 ): ImageDimensions => {
-  let { width, height } = startingDimensions;
-
   const crop = edits.find((edit) => edit.action === AssetEditAction.Crop);
+
+  if (hasArbitraryRotation(edits)) {
+    if (crop) {
+      return { width: crop.parameters.width, height: crop.parameters.height };
+    }
+    return getCropBoundsDimensions(edits, startingDimensions);
+  }
+
+  let { width, height } = startingDimensions;
   if (crop) {
     width = crop.parameters.width;
     height = crop.parameters.height;
@@ -20,10 +69,7 @@ export const getOutputDimensions = (
       continue;
     }
 
-    const angleDegrees = edit.parameters.angle;
-    if (angleDegrees === 90 || angleDegrees === 270) {
-      [width, height] = [height, width];
-    }
+    ({ width, height } = getRotatedDimensions({ width, height }, edit.parameters.angle));
   }
 
   return { width, height };
@@ -84,12 +130,20 @@ export const transformPoints = (
   let currentWidth = startingDimensions.width;
   let currentHeight = startingDimensions.height;
   let transformedPoints = [...points];
+  const arbitraryRotation = hasArbitraryRotation(edits);
+  const crop = edits.find((edit) => edit.action === 'crop');
 
-  // Handle crop first if not inverting
-  if (!inverse) {
-    const crop = edits.find((edit) => edit.action === 'crop');
-    if (crop) {
-      const { x: cropX, y: cropY, width: cropWidth, height: cropHeight } = crop.parameters;
+  const applyCrop = () => {
+    if (!crop) {
+      return;
+    }
+    const { x: cropX, y: cropY, width: cropWidth, height: cropHeight } = crop.parameters;
+    if (inverse) {
+      transformedPoints = transformedPoints.map((p) => ({
+        x: p.x + cropX,
+        y: p.y + cropY,
+      }));
+    } else {
       transformedPoints = transformedPoints.map((p) => ({
         x: p.x - cropX,
         y: p.y - cropY,
@@ -97,6 +151,10 @@ export const transformPoints = (
       currentWidth = cropWidth;
       currentHeight = cropHeight;
     }
+  };
+
+  if (arbitraryRotation ? inverse : !inverse) {
+    applyCrop();
   }
 
   // Apply rotate and mirror transforms
@@ -106,8 +164,10 @@ export const transformPoints = (
     if (edit.action === 'rotate') {
       const angleDegrees = edit.parameters.angle;
       const angleRadians = (angleDegrees * Math.PI) / 180;
-      const newWidth = angleDegrees === 90 || angleDegrees === 270 ? currentHeight : currentWidth;
-      const newHeight = angleDegrees === 90 || angleDegrees === 270 ? currentWidth : currentHeight;
+      const { width: newWidth, height: newHeight } = getRotatedDimensions(
+        { width: currentWidth, height: currentHeight },
+        angleDegrees,
+      );
 
       matrix = compose(
         translate(newWidth / 2, newHeight / 2),
@@ -131,16 +191,8 @@ export const transformPoints = (
     transformedPoints = transformedPoints.map((p) => applyToPoint(matrix, p));
   }
 
-  // Handle crop last if inverting
-  if (inverse) {
-    const crop = edits.find((edit) => edit.action === 'crop');
-    if (crop) {
-      const { x: cropX, y: cropY } = crop.parameters;
-      transformedPoints = transformedPoints.map((p) => ({
-        x: p.x + cropX,
-        y: p.y + cropY,
-      }));
-    }
+  if (arbitraryRotation ? !inverse : inverse) {
+    applyCrop();
   }
 
   return {

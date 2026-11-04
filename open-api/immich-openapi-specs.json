@@ -37157,9 +37157,10 @@
         "properties": {
           "angle": {
             "description": "Rotation angle in degrees",
-            "maximum": 270,
+            "format": "double",
+            "maximum": 360,
             "minimum": 0,
-            "type": "integer"
+            "type": "number"
           }
         },
         "required": [

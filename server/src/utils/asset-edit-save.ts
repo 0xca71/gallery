@@ -3,7 +3,7 @@ import { extname } from 'node:path';
 import type { ImageDimensions } from 'src/types.js';
 import { AssetEditActionItem } from 'src/dtos/editing.dto.js';
 import { boundingBoxOverlap } from 'src/utils/editor.js';
-import { transformPoints } from 'src/utils/transform.js';
+import { getCropBoundsDimensions, hasArbitraryRotation, transformPoints } from 'src/utils/transform.js';
 
 export type SavedImageFormat = 'jpeg' | 'png' | 'webp';
 
@@ -38,11 +38,12 @@ export const validateSavedImageEdits = (edits: AssetEditActionItem[], dimensions
     throw new BadRequestException('Only image transformations can be saved to a file');
   }
   const crop = edits.find((edit) => edit.action === 'crop');
+  const bounds = getCropBoundsDimensions(edits, dimensions);
   if (
     crop &&
     (edits[0] !== crop ||
-      crop.parameters.x + crop.parameters.width > dimensions.width ||
-      crop.parameters.y + crop.parameters.height > dimensions.height)
+      crop.parameters.x + crop.parameters.width > bounds.width ||
+      crop.parameters.y + crop.parameters.height > bounds.height)
   ) {
     throw new BadRequestException('Crop parameters are out of bounds or not the first action');
   }
@@ -74,6 +75,7 @@ export const transformSavedFace = (
   const crop = edits.find((edit) => edit.action === 'crop');
   if (
     crop &&
+    !hasArbitraryRotation(edits) &&
     boundingBoxOverlap(box, {
       x1: crop.parameters.x,
       y1: crop.parameters.y,
@@ -93,6 +95,28 @@ export const transformSavedFace = (
     edits,
     dimensions,
   );
+  if (crop && hasArbitraryRotation(edits)) {
+    const rawXs = transformed.points.map((point) => point.x);
+    const rawYs = transformed.points.map((point) => point.y);
+    if (
+      boundingBoxOverlap(
+        {
+          x1: Math.min(...rawXs),
+          y1: Math.min(...rawYs),
+          x2: Math.max(...rawXs),
+          y2: Math.max(...rawYs),
+        },
+        {
+          x1: 0,
+          y1: 0,
+          x2: transformed.currentWidth,
+          y2: transformed.currentHeight,
+        },
+      ) < 0.5
+    ) {
+      return;
+    }
+  }
   const xs = transformed.points.map((point) => Math.min(transformed.currentWidth, Math.max(0, point.x)));
   const ys = transformed.points.map((point) => Math.min(transformed.currentHeight, Math.max(0, point.y)));
   const result = {
