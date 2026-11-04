@@ -19,7 +19,7 @@ export const normalizeTransformEdits = (
   return {
     rotation: isCloseToZero(roundedAngle) || isCloseToZero(roundedAngle - 360) ? 0 : roundedAngle,
     mirrorHorizontal: false,
-    mirrorVertical: a * d - b * c < 0,
+    mirrorVertical: a * d < b * c,
   };
 };
 

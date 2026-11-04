@@ -128,7 +128,7 @@
         {#if saveMenuOpen}
           <div
             role="menu"
-            class="absolute end-0 top-full z-20 mt-1.5 w-72 rounded-xl border border-gray-200 bg-light p-1.5 text-immich-fg shadow-lg dark:border-gray-700 dark:bg-immich-dark-gray dark:text-immich-dark-fg"
+            class="absolute inset-e-0 top-full z-20 mt-1.5 w-72 rounded-xl border border-gray-200 bg-light p-1.5 text-immich-fg shadow-lg dark:border-gray-700 dark:bg-immich-dark-gray dark:text-immich-dark-fg"
           >
             <button
               type="button"

@@ -73,7 +73,7 @@
 <div class="flex size-full flex-col items-center justify-center p-8" bind:this={canvasContainer}>
   <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
   <div
-    class="crop-area cursor-crosshair overflow-hidden max-h-full max-w-full transition-transform motion-reduce:transition-none"
+    class="crop-area max-h-full max-w-full cursor-crosshair overflow-hidden transition-transform motion-reduce:transition-none"
     class:rotated={transformManager.normalizedBaseRotation % 180 > 0}
     style:rotate={transformManager.baseRotation + 'deg'}
     bind:this={transformManager.cropAreaEl}

@@ -291,9 +291,13 @@ export class AssetEditSaveService extends BaseService {
       if (asset.checksumAlgorithm === ChecksumAlgorithm.sha1File && originalDigest !== asset.checksum.toString('hex')) {
         throw new ConflictException('Original image content changed before rendering');
       }
-      const format: SavedImageFormat =
-        nativeFormat ??
-        ((await this.mediaRepository.getImageMetadata(original.localPath)).isTransparent ? 'png' : 'jpeg');
+      let format: SavedImageFormat;
+      if (nativeFormat) {
+        format = nativeFormat;
+      } else {
+        const { isTransparent } = await this.mediaRepository.getImageMetadata(original.localPath);
+        format = isTransparent ? 'png' : 'jpeg';
+      }
       const output = join(workdir, `image.${format}`);
       validateSavedImageEdits(operation.edits, getDimensions(exif));
       const dimensions = await this.mediaRepository.renderSavedImage(
