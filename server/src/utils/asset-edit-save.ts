@@ -24,8 +24,7 @@ export const getSavedImageFormat = (filename: string): SavedImageFormat | undefi
   }
 };
 
-export const getSavedImageExtension = (format: SavedImageFormat): string =>
-  format === 'jpeg' ? '.jpg' : `.${format}`;
+export const getSavedImageExtension = (format: SavedImageFormat): string => (format === 'jpeg' ? '.jpg' : `.${format}`);
 
 export const replaceFilenameExtension = (filename: string, extension: string): string => {
   const ext = extname(filename);

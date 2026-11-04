@@ -283,7 +283,7 @@ describe('image save worker on real files', () => {
     expect(files.some((file) => file.includes('_save-'))).toBe(false);
   });
 
-  it('converts non-native formats in overwrite mode, updates path and filename, and removes the old file after commit', async () => {
+  it('converts non-native formats on overwrite and removes the old file after commit', async () => {
     const { sut, mocks, source, operation } = await setup(AssetEditSaveMode.Overwrite);
     const tiffPath = join(directory, 'IMG_5183.tiff');
     await sharp({ create: { width: 8, height: 6, channels: 3, background: { r: 10, g: 120, b: 200 } } })
@@ -319,9 +319,7 @@ describe('image save worker on real files', () => {
     source.asset.originalPath = tiffPath;
     source.asset.originalFileName = 'IMG_5183.HEIC';
     source.asset.fileModifiedAt = tiffStat.mtime;
-    source.asset.checksum = createHash('sha1')
-      .update(tiffBytes)
-      .digest();
+    source.asset.checksum = createHash('sha1').update(tiffBytes).digest();
     mocks.assetEditSave.commit.mockRejectedValueOnce(new Error('Injected commit failure'));
 
     expect(await sut.handleSave({ id: operation.id })).toBe(JobStatus.Failed);

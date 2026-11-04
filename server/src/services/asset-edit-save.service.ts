@@ -40,10 +40,10 @@ import {
 import { BaseService } from 'src/services/base.service.js';
 import { StorageService } from 'src/services/storage.service.js';
 import {
+  type SavedImageFormat,
   getSavedImageExtension,
   getSavedImageFormat,
   replaceFilenameExtension,
-  type SavedImageFormat,
   validateSavedImageEdits,
 } from 'src/utils/asset-edit-save.js';
 import { getDimensions, isPanorama } from 'src/utils/asset.util.js';
@@ -691,10 +691,7 @@ export class AssetEditSaveService extends BaseService {
     }
     if (operation.mode === AssetEditSaveMode.Overwrite && journal.sidecar) {
       const digest = await this.digestStored(journal.sidecar.path);
-      if (
-        digest === journal.sidecar.outputDigest &&
-        journal.sidecar.originalDigest !== journal.sidecar.outputDigest
-      ) {
+      if (digest === journal.sidecar.outputDigest && journal.sidecar.originalDigest !== journal.sidecar.outputDigest) {
         if ((await this.digestStored(journal.sidecar.backupPath)) !== journal.sidecar.originalDigest) {
           throw new Error('Sidecar backup failed validation');
         }

@@ -122,10 +122,7 @@ class TransformManager implements EditToolManager {
       width: this.previewImageSize.width,
       height: this.previewImageSize.height,
     });
-    return (
-      Math.abs(fullRegion.width - this.region.width) > 2 ||
-      Math.abs(fullRegion.height - this.region.height) > 2
-    );
+    return Math.abs(fullRegion.width - this.region.width) > 2 || Math.abs(fullRegion.height - this.region.height) > 2;
   }
 
   getEdits(): EditActions {
@@ -582,7 +579,11 @@ class TransformManager implements EditToolManager {
 
     const scale = this.calculateScale();
     this.baseRegion = this.normalizeCropArea(scale, this.baseRegion);
-    this.region = this.constrainRegionToRotatedImage(this.normalizeCropArea(scale, this.region), this.fineRotation, scale);
+    this.region = this.constrainRegionToRotatedImage(
+      this.normalizeCropArea(scale, this.region),
+      this.fineRotation,
+      scale,
+    );
     this.cropImageScale = scale;
 
     img.style.width = `${img.width * scale}px`;
@@ -973,7 +974,11 @@ class TransformManager implements EditToolManager {
     const absCos = Math.abs(cos);
     const absSin = Math.abs(sin);
 
-    const k = Math.min(1, W / (clamped.width * absCos + clamped.height * absSin), H / (clamped.width * absSin + clamped.height * absCos));
+    const k = Math.min(
+      1,
+      W / (clamped.width * absCos + clamped.height * absSin),
+      H / (clamped.width * absSin + clamped.height * absCos),
+    );
     const w = Math.max(1, clamped.width * k);
     const h = Math.max(1, clamped.height * k);
 
@@ -1043,11 +1048,17 @@ class TransformManager implements EditToolManager {
     const rad = (this.normalizedRotation * Math.PI) / 180;
     const rotW = Math.max(
       1,
-      Math.round(this.originalImageSize.width * Math.abs(Math.cos(rad)) + this.originalImageSize.height * Math.abs(Math.sin(rad))),
+      Math.round(
+        this.originalImageSize.width * Math.abs(Math.cos(rad)) +
+          this.originalImageSize.height * Math.abs(Math.sin(rad)),
+      ),
     );
     const rotH = Math.max(
       1,
-      Math.round(this.originalImageSize.width * Math.abs(Math.sin(rad)) + this.originalImageSize.height * Math.abs(Math.cos(rad))),
+      Math.round(
+        this.originalImageSize.width * Math.abs(Math.sin(rad)) +
+          this.originalImageSize.height * Math.abs(Math.cos(rad)),
+      ),
     );
 
     const width = clamp(Math.round(wRot), 1, rotW);
@@ -1062,11 +1073,17 @@ class TransformManager implements EditToolManager {
     const rad = (this.normalizedRotation * Math.PI) / 180;
     const rotW = Math.max(
       1,
-      Math.round(this.originalImageSize.width * Math.abs(Math.cos(rad)) + this.originalImageSize.height * Math.abs(Math.sin(rad))),
+      Math.round(
+        this.originalImageSize.width * Math.abs(Math.cos(rad)) +
+          this.originalImageSize.height * Math.abs(Math.sin(rad)),
+      ),
     );
     const rotH = Math.max(
       1,
-      Math.round(this.originalImageSize.width * Math.abs(Math.sin(rad)) + this.originalImageSize.height * Math.abs(Math.cos(rad))),
+      Math.round(
+        this.originalImageSize.width * Math.abs(Math.sin(rad)) +
+          this.originalImageSize.height * Math.abs(Math.cos(rad)),
+      ),
     );
 
     const dxRot = crop.x + crop.width / 2 - rotW / 2;

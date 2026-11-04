@@ -34,13 +34,11 @@ const RotateParametersSchema = z
   .object({
     angle: z
       .number()
-      .meta({ format: 'double' })
-      .min(0)
-      .max(360)
       .refine((v) => Number.isFinite(v) && v >= 0 && v < 360, {
         error: 'Angle must be between 0 and 360 degrees',
       })
-      .describe('Rotation angle in degrees'),
+      .describe('Rotation angle in degrees')
+      .meta({ type: 'integer', minimum: 0, maximum: 270 }),
   })
   .meta({ id: 'RotateParameters' });
 
