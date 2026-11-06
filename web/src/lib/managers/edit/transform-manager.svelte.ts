@@ -6,6 +6,7 @@ import { getAssetMediaUrl } from '$lib/utils';
 import { getDimensions } from '$lib/utils/asset-utils';
 import { normalizeTransformEdits } from '$lib/utils/editor';
 import { handleError } from '$lib/utils/handle-error';
+import type { CropRegion } from '$lib/utils/zoom-geometry';
 
 type Region = {
   x: number;
@@ -56,6 +57,7 @@ class TransformManager implements EditToolManager {
   cropImageSize = $state<ImageDimensions>({ width: 1000, height: 1000 });
   cropImageScale = $state(1);
   cropAspectRatio = $state('free');
+  initialCropRegion = $state<CropRegion | null>(null);
   originalImageSize = $state<ImageDimensions>({ width: 1000, height: 1000 });
   region = $state({ x: 0, y: 0, width: 100, height: 100 });
   baseRegion = $state({ x: 0, y: 0, width: 100, height: 100 });
@@ -239,6 +241,10 @@ class TransformManager implements EditToolManager {
     this.resizeCanvas();
   }
 
+  setInitialCropRegion(region: CropRegion) {
+    this.initialCropRegion = region;
+  }
+
   onDeactivate() {
     removeEventListener('mousemove', transformManager.handleMouseMove);
 
@@ -266,6 +272,7 @@ class TransformManager implements EditToolManager {
     this.originalImageSize = { width: 1000, height: 1000 };
     this.cropImageScale = 1;
     this.cropAspectRatio = 'free';
+    this.initialCropRegion = null;
     this.hasChanges = false;
   }
 
@@ -466,7 +473,24 @@ class TransformManager implements EditToolManager {
     this.cropImageSize = { width: img.width, height: img.height };
     const scale = this.calculateScale();
 
-    if (edits === null) {
+    const initialCropRegion = this.initialCropRegion;
+    this.initialCropRegion = null;
+
+    if (initialCropRegion) {
+      const cropRegion = this.convertRegion({
+        region: initialCropRegion,
+        from: this.originalImageSize.width > 0 ? this.originalImageSize : this.cropImageSize,
+        to: this.cropImageSize,
+      });
+      this.region = {
+        x: cropRegion.x * scale,
+        y: cropRegion.y * scale,
+        width: cropRegion.width * scale,
+        height: cropRegion.height * scale,
+      };
+      this.baseRegion = { ...this.region };
+      this.hasChanges = true;
+    } else if (edits === null) {
       const cropFrameEl = this.cropFrame;
       cropFrameEl?.classList.add('transition');
       this.baseRegion = this.normalizeCropArea(scale, this.baseRegion);

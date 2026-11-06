@@ -6,6 +6,13 @@ export const MAX_PHOTO_ZOOM = 10;
 export const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
 export const swapsDimensions = (rotation: number) => Math.abs(rotation % 180) === 90;
 
+export type CropRegion = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
 export function rotatePoint(x: number, y: number, rotation: number) {
   const radians = (rotation * Math.PI) / 180;
   return { x: x * Math.cos(radians) - y * Math.sin(radians), y: x * Math.sin(radians) + y * Math.cos(radians) };
@@ -73,6 +80,51 @@ export function navigatorViewport(image: Size, viewport: Size, state: ZoomImageW
     y,
     width: clamp((viewport.width - left) / width, 0, 1) - x,
     height: clamp((viewport.height - top) / height, 0, 1) - y,
+  };
+}
+
+/**
+ * Converts the image portion visible in the photo viewer into source-image pixels.
+ * Navigator coordinates are expressed in the displayed orientation, while editor
+ * crop parameters are always expressed in the unrotated source orientation.
+ */
+export function visibleCropRegion(image: Size, viewport: Size, state: ZoomImageWheelState): CropRegion {
+  const frame = navigatorViewport(image, viewport, state);
+  const oriented = swapsDimensions(state.currentRotation) ? { width: image.height, height: image.width } : image;
+  const left = frame.x * oriented.width;
+  const top = frame.y * oriented.height;
+  const right = (frame.x + frame.width) * oriented.width;
+  const bottom = (frame.y + frame.height) * oriented.height;
+  const rotation = (((Math.round(state.currentRotation / 90) * 90) % 360) + 360) % 360;
+
+  const mapPoint = (x: number, y: number) => {
+    switch (rotation) {
+      case 90: {
+        return { x: y, y: image.height - x };
+      }
+      case 180: {
+        return { x: image.width - x, y: image.height - y };
+      }
+      case 270: {
+        return { x: image.width - y, y: x };
+      }
+      default: {
+        return { x, y };
+      }
+    }
+  };
+
+  const points = [mapPoint(left, top), mapPoint(right, top), mapPoint(left, bottom), mapPoint(right, bottom)];
+  const x = Math.min(...points.map((point) => point.x));
+  const y = Math.min(...points.map((point) => point.y));
+  const maxX = Math.max(...points.map((point) => point.x));
+  const maxY = Math.max(...points.map((point) => point.y));
+
+  return {
+    x: clamp(x, 0, image.width),
+    y: clamp(y, 0, image.height),
+    width: clamp(maxX - x, 0, image.width),
+    height: clamp(maxY - y, 0, image.height),
   };
 }
 

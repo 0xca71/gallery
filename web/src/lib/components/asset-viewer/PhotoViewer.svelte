@@ -3,13 +3,16 @@
   import { zoomImageAction } from '$lib/actions/zoom-image';
   import AdaptiveImage from '$lib/components/AdaptiveImage.svelte';
   import PhotoNavigator from '$lib/components/asset-viewer/PhotoNavigator.svelte';
+  import { transformManager } from '$lib/managers/edit/transform-manager.svelte';
+  import { ProjectionType } from '$lib/constants';
   import { getAssetMediaUrl } from '$lib/utils';
-  import { fittedPhoto, resizePhotoViewport } from '$lib/utils/zoom-geometry';
+  import { fittedPhoto, resizePhotoViewport, visibleCropRegion } from '$lib/utils/zoom-geometry';
   import FaceEditor from '$lib/components/asset-viewer/face-editor/FaceEditor.svelte';
   import OcrBoundingBox from '$lib/components/asset-viewer/OcrBoundingBox.svelte';
   import AssetViewerEvents from '$lib/components/AssetViewerEvents.svelte';
   import Thumbhash from '$lib/components/Thumbhash.svelte';
   import { assetViewerManager, type Faces } from '$lib/managers/asset-viewer-manager.svelte';
+  import { authManager } from '$lib/managers/auth-manager.svelte';
   import { castManager } from '$lib/managers/cast-manager.svelte';
   import { faceManager } from '$lib/stores/face.svelte';
   import { ocrManager } from '$lib/stores/ocr.svelte';
@@ -20,7 +23,7 @@
   import { handleError } from '$lib/utils/handle-error';
   import { getOcrBoundingBoxes } from '$lib/utils/ocr-utils';
   import { getBoundingBox, type BoundingBox } from '$lib/utils/people-utils';
-  import { AssetMediaSize, type SharedLinkResponseDto } from '@immich/sdk';
+  import { AssetMediaSize, AssetTypeEnum, type SharedLinkResponseDto } from '@immich/sdk';
   import { toastManager } from '@immich/ui';
   import { onDestroy, untrack } from 'svelte';
   import { useSwipe, type SwipeCustomEvent } from 'svelte-gestures';
@@ -49,6 +52,17 @@
     getAssetMediaUrl({ id: asset.id, cacheKey: asset.thumbhash, size: AssetMediaSize.Preview }),
   );
   const limited = $derived(!!sharedLink && (!sharedLink.allowDownload || !sharedLink.showMetadata));
+  const canCrop = $derived(
+    !sharedLink &&
+      authManager.authenticated &&
+      authManager.user.id === asset.ownerId &&
+      asset.type === AssetTypeEnum.Image &&
+      !asset.livePhotoVideoId &&
+      asset.exifInfo?.projectionType !== ProjectionType.EQUIRECTANGULAR &&
+      !asset.originalPath.toLowerCase().endsWith('.insp') &&
+      !asset.originalPath.toLowerCase().endsWith('.gif') &&
+      !asset.originalPath.toLowerCase().endsWith('.svg'),
+  );
   const showNavigator = $derived(
     assetViewerManager.zoom > 1 &&
       !assetViewerManager.isFaceEditMode &&
@@ -139,6 +153,15 @@
   const onZoom = () => {
     const targetZoom = assetViewerManager.zoom > 1 ? 1 : 2;
     assetViewerManager.animatedZoom(targetZoom);
+  };
+
+  const onCrop = () => {
+    if (!canCrop) {
+      return;
+    }
+
+    transformManager.setInitialCropRegion(visibleCropRegion(imageSize, container, assetViewerManager.zoomState));
+    assetViewerManager.openEditor();
   };
 
   const onFaceEditModeChange = (isFaceEditMode: boolean) => {
@@ -345,6 +368,7 @@
       {limited}
       onRetry={() => retryOriginal++}
       onResetFocus={() => zoomElement?.focus({ preventScroll: true })}
+      onCrop={canCrop ? onCrop : undefined}
     />
   {/if}
 
