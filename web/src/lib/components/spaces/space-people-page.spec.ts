@@ -191,8 +191,11 @@ describe('Spaces people page', () => {
     featureFlagsMock.value.peopleStatistics = true;
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     vi.unstubAllGlobals();
+    // bits-ui's dismissible-layer schedules a short debounce after menus unmount. Keep the
+    // happy-dom globals alive until that callback has run instead of letting it race teardown.
+    await new Promise((resolve) => setTimeout(resolve, 50));
   });
 
   it('shows the visible person count and detected face count next to the heading', () => {

@@ -79,7 +79,7 @@ describe('EditManager', () => {
     });
 
     it('generates a UUID v4 with getRandomValues when randomUUID is unavailable', () => {
-      const bytes = Uint8Array.from([...Array(16).keys()]);
+      const bytes = Uint8Array.from({ length: 16 }, (_, index) => index);
       vi.stubGlobal('crypto', {
         getRandomValues: vi.fn((array: Uint8Array) => {
           array.set(bytes);
