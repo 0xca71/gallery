@@ -10,7 +10,7 @@ import {
 } from '@immich/sdk';
 import { toastManager } from '@immich/ui';
 import type { MessageFormatter } from 'svelte-i18n';
-import { EditManager } from '$lib/managers/edit/edit-manager.svelte';
+import { EditManager, generateIdempotencyKey } from '$lib/managers/edit/edit-manager.svelte';
 import { eventManager } from '$lib/managers/event-manager.svelte';
 import { getFormatter } from '$lib/utils/i18n';
 import { assetFactory } from '@test-data/factories/asset-factory';
@@ -65,6 +65,32 @@ describe('EditManager', () => {
     vi.mocked(getFormatter).mockResolvedValue(((key: string) => key) as MessageFormatter);
     websocketMock.waitForWebsocketEvent.mockResolvedValue(undefined as never);
     editManager = new EditManager();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  describe('generateIdempotencyKey', () => {
+    it('uses the native UUID generator when available', () => {
+      vi.stubGlobal('crypto', { randomUUID: vi.fn(() => 'native-uuid') });
+
+      expect(generateIdempotencyKey()).toBe('native-uuid');
+    });
+
+    it('generates a UUID v4 with getRandomValues when randomUUID is unavailable', () => {
+      const bytes = Uint8Array.from({ length: 16 }, (_, index) => index);
+      vi.stubGlobal('crypto', {
+        getRandomValues: vi.fn((array: Uint8Array) => {
+          array.set(bytes);
+          return array;
+        }),
+      });
+
+      const idempotencyKey = generateIdempotencyKey();
+
+      expect(idempotencyKey).toBe('00010203-0405-4607-8809-0a0b0c0d0e0f');
+    });
   });
 
   describe('applyEdits', () => {
