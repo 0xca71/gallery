@@ -14,7 +14,9 @@
   import { assetViewerManager, type Faces } from '$lib/managers/asset-viewer-manager.svelte';
   import { authManager } from '$lib/managers/auth-manager.svelte';
   import { castManager } from '$lib/managers/cast-manager.svelte';
+  import { editManager } from '$lib/managers/edit/edit-manager.svelte';
   import { faceManager } from '$lib/stores/face.svelte';
+  import { mediaQueryManager } from '$lib/stores/media-query-manager.svelte';
   import { ocrManager } from '$lib/stores/ocr.svelte';
   import { SlideshowLook, SlideshowState, slideshowStore } from '$lib/stores/slideshow.store';
   import { handlePromiseError } from '$lib/utils';
@@ -160,7 +162,13 @@
       return;
     }
 
-    transformManager.setInitialCropRegion(visibleCropRegion(imageSize, container, assetViewerManager.zoomState));
+    const crop = visibleCropRegion(imageSize, container, assetViewerManager.zoomState);
+    if (mediaQueryManager.maxMd) {
+      handlePromiseError(editManager.saveImageCropFromViewer(asset, crop));
+      return;
+    }
+
+    transformManager.setInitialCropRegion(crop);
     assetViewerManager.openEditor();
   };
 
