@@ -1,4 +1,5 @@
 import {
+  AssetEditAction,
   AssetTypeEnum,
   AssetEditSaveMode,
   AssetEditSaveStatus,
@@ -24,6 +25,7 @@ import { trimManager } from '$lib/managers/edit/trim-manager.svelte';
 import { eventManager } from '$lib/managers/event-manager.svelte';
 import { waitForWebsocketEvent } from '$lib/stores/websocket';
 import { getFormatter } from '$lib/utils/i18n';
+import type { CropRegion } from '$lib/utils/zoom-geometry';
 
 export type EditAction = AssetEditsCreateDto['edits'][number];
 export type EditActions = EditAction[];
@@ -219,7 +221,7 @@ export class EditManager {
     }
   }
 
-  async saveImageEdits(requestedMode?: AssetEditSaveMode): Promise<boolean> {
+  async saveImageEdits(requestedMode?: AssetEditSaveMode, editsOverride?: EditActions): Promise<boolean> {
     if (!this.currentAsset || this.isApplyingEdits || this.isShowingConfirmDialog) {
       return false;
     }
@@ -257,7 +259,7 @@ export class EditManager {
               mode,
               expectedVersion: this.currentAsset.updatedAt,
               idempotencyKey: generateIdempotencyKey(),
-              edits: structuredClone($state.snapshot(this.selectedTool?.manager.edits ?? [])),
+              edits: structuredClone($state.snapshot(editsOverride ?? this.selectedTool?.manager.edits ?? [])),
             },
           };
         }
@@ -320,6 +322,27 @@ export class EditManager {
     } finally {
       this.isApplyingEdits = false;
       this.isShowingConfirmDialog = false;
+    }
+  }
+
+  async saveImageCropFromViewer(asset: AssetResponseDto, crop: CropRegion): Promise<boolean> {
+    if (asset.type !== AssetTypeEnum.Image || this.isApplyingEdits || this.isShowingConfirmDialog) {
+      return false;
+    }
+
+    this.currentAsset = asset;
+    this.saveCapabilities = null;
+    this.selectedTool = this.tools.find((tool) => tool.type === EditToolType.Transform) ?? null;
+
+    try {
+      return await this.saveImageEdits(AssetEditSaveMode.Overwrite, [
+        {
+          action: AssetEditAction.Crop,
+          parameters: crop,
+        },
+      ]);
+    } finally {
+      this.cleanup();
     }
   }
 }

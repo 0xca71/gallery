@@ -1,6 +1,8 @@
 import {
+  AssetEditAction,
   AssetEditSaveMode,
   AssetEditSaveStatus,
+  AssetTypeEnum,
   editAsset,
   getAssetInfo,
   removeAssetEdits,
@@ -316,6 +318,24 @@ describe('EditManager', () => {
       expect(await editManager.saveImageEdits()).toBe(false);
       expect(editManager.pendingSave?.operationId).toBe('operation-id');
       expect(toastManager.danger).toHaveBeenCalledWith('editor_save_recovery_required');
+    });
+
+    it('saves a mobile viewer crop directly as an overwrite', async () => {
+      const asset = assetFactory.build({ id: 'source-id', type: AssetTypeEnum.Image });
+      const refreshed = assetFactory.build({ id: 'source-id', type: AssetTypeEnum.Image });
+      const crop = { x: 120, y: 80, width: 640, height: 480 };
+      vi.mocked(getAssetEditSave).mockResolvedValue(operation(AssetEditSaveStatus.Completed, asset.id));
+      vi.mocked(getAssetInfo).mockResolvedValue(refreshed);
+
+      expect(await editManager.saveImageCropFromViewer(asset, crop)).toBe(true);
+      expect(saveAssetEdits).toHaveBeenCalledWith({
+        id: asset.id,
+        assetEditSaveCreateDto: expect.objectContaining({
+          mode: AssetEditSaveMode.Overwrite,
+          edits: [{ action: AssetEditAction.Crop, parameters: crop }],
+        }),
+      });
+      expect(editManager.currentAsset).toBeNull();
     });
   });
 });
