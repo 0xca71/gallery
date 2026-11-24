@@ -19,6 +19,7 @@
   import { EditToolType, editManager } from '#lib/managers/edit/edit-manager.svelte.ts';
   import { eventManager } from '#lib/managers/event-manager.svelte.ts';
   import type { TimelineAsset } from '#lib/managers/timeline-manager/types.ts';
+  import { Route } from '#lib/route.ts';
   import { getAssetActions } from '#lib/services/asset.service.ts';
   import { faceManager } from '#lib/stores/face.svelte.ts';
   import { ocrManager } from '#lib/stores/ocr.svelte.ts';
@@ -45,11 +46,15 @@
   import { onDestroy, onMount, untrack } from 'svelte';
   import type { SwipeCustomEvent } from 'svelte-gestures';
   import { t } from 'svelte-i18n';
+  import { SvelteSet } from 'svelte/reactivity';
   import { fly } from 'svelte/transition';
   import { browser } from '$app/env';
+  import { goto } from '$app/navigation';
+  import { page } from '$app/state';
   import Thumbnail from '../assets/thumbnail/Thumbnail.svelte';
   import ActivityStatus from './ActivityStatus.svelte';
   import ActivityViewer from './ActivityViewer.svelte';
+  import AssetViewerFilmstrip, { type FilmstripAsset } from './AssetViewerFilmstrip.svelte';
   import DetailPanel from './DetailPanel.svelte';
   import ImagePanoramaViewer from './ImagePanoramaViewer.svelte';
   import OcrButton from './OcrButton.svelte';
@@ -67,6 +72,16 @@
     previousAsset?: AssetResponseDto;
   };
 
+  export type SlideshowAssetOrder = 'previous' | 'next';
+  export type SlideshowStepAssetResolver = (
+    asset: AssetResponseDto,
+    order: SlideshowAssetOrder,
+  ) => AssetResponseDto | undefined | Promise<AssetResponseDto | undefined>;
+  export type SlideshowRandomAssetResolver = (
+    isPlayable: (asset: AssetResponseDto) => boolean,
+  ) => AssetResponseDto | undefined | Promise<AssetResponseDto | undefined>;
+  export type FilmstripAssetResolver = (asset: FilmstripAsset) => void | Promise<void>;
+
   interface Props {
     cursor: AssetCursor;
     showNavigation?: boolean;
@@ -80,6 +95,10 @@
     onUndoDelete?: OnUndoDelete;
     onClose?: (assetId: string) => void;
     onRandom?: () => Promise<{ id: string } | undefined>;
+    resolveSlideshowStepAsset?: SlideshowStepAssetResolver;
+    resolveSlideshowRandomAsset?: SlideshowRandomAssetResolver;
+    filmstripAssets?: FilmstripAsset[];
+    onFilmstripAssetSelect?: FilmstripAssetResolver;
   }
 
   let {
@@ -95,6 +114,10 @@
     onUndoDelete,
     onClose,
     onRandom,
+    resolveSlideshowStepAsset,
+    resolveSlideshowRandomAsset,
+    filmstripAssets = [],
+    onFilmstripAssetSelect,
   }: Props = $props();
 
   const {
@@ -104,6 +127,8 @@
     slideshowState,
     slideshowRepeat,
     slideshowAutoplay,
+    slideshowSkipVideos,
+    slideshowSkipMotionPhotos,
   } = slideshowStore;
   const stackThumbnailSize = 60;
   const stackSelectedThumbnailSize = 65;
@@ -118,13 +143,34 @@
   const previousAsset = $derived(cursor.previousAsset);
   const { spaceId } = $derived.by(getViewerSpace());
   let sharedLink = getSharedLink();
-  let fullscreenElement = $state<Element>();
 
   let isPlayingOriginalVideo = $state($alwaysLoadOriginalVideo);
+  let filmstripVisible = $state(false);
   let slideshowStartAssetId = $state<string>();
+  const wheelZoomSpeedDivisor = 300;
+  const wheelZoomSpeedLimit = 0.35;
 
   const setPlayOriginalVideo = (value: boolean) => {
     isPlayingOriginalVideo = value;
+  };
+
+  const toggleFilmstrip = () => {
+    if (filmstripAssets.length < 2 || $slideshowState !== SlideshowState.None) {
+      return;
+    }
+
+    filmstripVisible = !filmstripVisible;
+  };
+
+  const selectFilmstripAsset: FilmstripAssetResolver = async (targetAsset) => {
+    if (onFilmstripAssetSelect) {
+      await onFilmstripAssetSelect(targetAsset);
+      return;
+    }
+
+    if ('type' in targetAsset) {
+      await navigateToViewerAsset(targetAsset);
+    }
   };
 
   const refreshStack = async () => {
@@ -195,15 +241,38 @@
     await faceManager.getAssetFaces(asset.id);
   };
 
+  const navigateToViewerAsset = async (targetAsset: AssetResponseDto | undefined | null) => {
+    if (!targetAsset) {
+      return false;
+    }
+
+    // Explore and Random render the viewer as an in-page overlay and have no asset-bearing route.
+    // Keep those surfaces on their page while changing the viewer's reactive current asset.
+    if (!page.route.id?.includes('[[assetId=id]]')) {
+      assetViewerManager.setAsset(targetAsset);
+      return true;
+    }
+
+    return navigateToAsset(targetAsset);
+  };
+
   onMount(() => {
     syncAssetViewerOpenClass(true);
+    const wheelAbortController = new AbortController();
+    assetViewerHtmlElement?.addEventListener('wheel', handleAssetViewerWheel, {
+      capture: true,
+      passive: false,
+      signal: wheelAbortController.signal,
+    });
     const slideshowStateUnsubscribe = slideshowState.subscribe((value) => {
       if (value === SlideshowState.PlaySlideshow) {
         slideshowHistory.reset();
-        slideshowHistory.queue(toTimelineAsset(asset));
+        if (isSlideshowAssetPlayable(asset)) {
+          slideshowHistory.queue(toTimelineAsset(asset));
+        }
         handlePromiseError(handlePlaySlideshow());
       } else if (value === SlideshowState.StopSlideshow) {
-        handlePromiseError(handleStopSlideshow());
+        handleStopSlideshow();
       }
     });
 
@@ -213,10 +282,13 @@
       }
 
       slideshowHistory.reset();
-      slideshowHistory.queue(toTimelineAsset(asset));
+      if (isSlideshowAssetPlayable(asset)) {
+        slideshowHistory.queue(toTimelineAsset(asset));
+      }
     });
 
     return () => {
+      wheelAbortController.abort();
       slideshowStateUnsubscribe();
       slideshowNavigationUnsubscribe();
     };
@@ -235,14 +307,92 @@
 
   const closeEditor = async () => {
     if (editManager.hasAppliedEdits) {
-      const refreshedAsset = await getAssetInfo({ id: asset.id, spaceId });
+      const resultId = editManager.resultAssetId ?? asset.id;
+      const refreshedAsset = await getAssetInfo({ id: resultId, spaceId: resultId === asset.id ? spaceId : undefined });
       onAssetChange?.(refreshedAsset);
-      assetViewerManager.setAsset(refreshedAsset);
+      if (resultId === asset.id) {
+        assetViewerManager.setAsset(refreshedAsset);
+      } else if (spaceId || sharedLink) {
+        await goto(Route.viewAsset({ id: refreshedAsset.id }));
+      } else {
+        await navigateToViewerAsset(refreshedAsset);
+      }
     }
     assetViewerManager.closeEditor();
   };
 
   const tracker = new InvocationTracker();
+  const slideshowAlignmentTracker = new InvocationTracker();
+
+  const isSlideshowAssetPlayable = (candidate: AssetResponseDto) => {
+    if ($slideshowSkipVideos && candidate.type === AssetTypeEnum.Video) {
+      return false;
+    }
+
+    if ($slideshowSkipMotionPhotos && !!candidate.livePhotoVideoId) {
+      return false;
+    }
+
+    return true;
+  };
+
+  const getAdjacentSlideshowAsset = async (candidate: AssetResponseDto, order: SlideshowAssetOrder) => {
+    if (candidate.id === cursor.current.id) {
+      return order === 'previous' ? cursor.previousAsset : cursor.nextAsset;
+    }
+
+    return await resolveSlideshowStepAsset?.(candidate, order);
+  };
+
+  const resolvePlayableSlideshowAsset = async (order: SlideshowAssetOrder) => {
+    const visitedAssetIds = new SvelteSet<string>();
+    let nextCandidate = await getAdjacentSlideshowAsset(asset, order);
+
+    while (nextCandidate && !visitedAssetIds.has(nextCandidate.id)) {
+      if (isSlideshowAssetPlayable(nextCandidate)) {
+        return nextCandidate;
+      }
+
+      visitedAssetIds.add(nextCandidate.id);
+      nextCandidate = await resolveSlideshowStepAsset?.(nextCandidate, order);
+    }
+  };
+
+  const resolveRandomPlayableSlideshowAsset = async () => {
+    return await resolveSlideshowRandomAsset?.(isSlideshowAssetPlayable);
+  };
+
+  const alignSlideshowToPlayableAsset = async () => {
+    if ($slideshowState !== SlideshowState.PlaySlideshow || isSlideshowAssetPlayable(asset)) {
+      return true;
+    }
+
+    if ($slideshowNavigation === SlideshowNavigation.Shuffle) {
+      const randomAsset = await resolveRandomPlayableSlideshowAsset();
+      if (randomAsset) {
+        slideshowHistory.reset();
+        slideshowHistory.queue(toTimelineAsset(randomAsset));
+        await assetViewerManager.setAssetId(randomAsset.id, spaceId);
+        $restartSlideshowProgress = true;
+        return true;
+      }
+
+      handleStopSlideshow();
+      return false;
+    }
+
+    const order = $slideshowNavigation === SlideshowNavigation.AscendingOrder ? 'previous' : 'next';
+    const nextPlayableAsset = await resolvePlayableSlideshowAsset(order);
+    if (nextPlayableAsset) {
+      await navigateToViewerAsset(nextPlayableAsset);
+      $restartSlideshowProgress = true;
+      return true;
+    }
+
+    handleStopSlideshow();
+    return false;
+  };
+
   const navigateAsset = (order?: 'previous' | 'next') => {
     if (!order) {
       if ($slideshowState === SlideshowState.PlaySlideshow) {
@@ -267,15 +417,27 @@
       if (isShuffle) {
         hasNext = order === 'previous' ? slideshowHistory.previous() : slideshowHistory.next();
         if (!hasNext) {
-          const asset = await onRandom?.();
-          if (asset) {
-            slideshowHistory.queue(asset);
+          const randomAsset = await resolveRandomPlayableSlideshowAsset();
+          if (randomAsset) {
+            slideshowHistory.queue(toTimelineAsset(randomAsset));
+            await assetViewerManager.setAssetId(randomAsset.id, spaceId);
             hasNext = true;
+          } else {
+            const randomAssetId = $slideshowSkipVideos || $slideshowSkipMotionPhotos ? undefined : await onRandom?.();
+            if (randomAssetId) {
+              slideshowHistory.queue(randomAssetId);
+              hasNext = true;
+            }
           }
         }
+      } else if ($slideshowState === SlideshowState.PlaySlideshow) {
+        const nextPlayableAsset = await resolvePlayableSlideshowAsset(order);
+        hasNext = await navigateToViewerAsset(nextPlayableAsset);
       } else {
         hasNext =
-          order === 'previous' ? await navigateToAsset(cursor.previousAsset) : await navigateToAsset(cursor.nextAsset);
+          order === 'previous'
+            ? await navigateToViewerAsset(cursor.previousAsset)
+            : await navigateToViewerAsset(cursor.nextAsset);
       }
 
       if ($slideshowState !== SlideshowState.PlaySlideshow) {
@@ -289,11 +451,14 @@
 
       if ($slideshowRepeat && slideshowStartAssetId) {
         await assetViewerManager.setAssetId(slideshowStartAssetId, spaceId);
-        $restartSlideshowProgress = true;
+        const isPlayable = await alignSlideshowToPlayableAsset();
+        if (isPlayable) {
+          $restartSlideshowProgress = true;
+        }
         return;
       }
 
-      await handleStopSlideshow();
+      handleStopSlideshow();
     }, $t('error_while_navigating'));
   };
 
@@ -330,26 +495,14 @@
     slideshowStartAssetId = asset.id;
     if (!$slideshowAutoplay) {
       $slideshowState = SlideshowState.PauseSlideshow;
+      return;
     }
-    try {
-      await assetViewerHtmlElement?.requestFullscreen?.();
-    } catch (error) {
-      handleError(error, $t('errors.unable_to_enter_fullscreen'));
-      $slideshowState = SlideshowState.StopSlideshow;
-    }
+    await alignSlideshowToPlayableAsset();
   };
 
-  const handleStopSlideshow = async () => {
-    try {
-      if (document.fullscreenElement) {
-        await document.exitFullscreen();
-      }
-    } catch (error) {
-      handleError(error, $t('errors.unable_to_exit_fullscreen'));
-    } finally {
-      $stopSlideshowProgress = true;
-      $slideshowState = SlideshowState.None;
-    }
+  const handleStopSlideshow = () => {
+    $stopSlideshowProgress = true;
+    $slideshowState = SlideshowState.None;
   };
 
   const handleStackedAssetMouseEvent = (isMouseOver: boolean, stackedAsset: AssetResponseDto) => {
@@ -382,8 +535,6 @@
 
     onAction?.(action);
   };
-
-  let isFullScreen = $derived(!!fullscreenElement);
 
   $effect(() => {
     if (album && !album.isActivityEnabled && activityManager.commentCount === 0) {
@@ -501,6 +652,82 @@
       navigateAsset('previous');
     }
   };
+
+  const handleWheelNavigation = (event: WheelEvent) => {
+    if (event.ctrlKey || event.metaKey || Math.abs(event.deltaX) > Math.abs(event.deltaY) || event.deltaY === 0) {
+      return;
+    }
+    event.stopPropagation();
+    event.preventDefault();
+    navigateAsset(event.deltaY > 0 ? 'next' : 'previous');
+  };
+
+  const handlePhotoViewerWheelZoom = (event: WheelEvent) => {
+    if (viewerKind !== 'PhotoViewer' || event.ctrlKey || event.metaKey) {
+      return;
+    }
+    event.stopPropagation();
+    event.preventDefault();
+    assetViewerManager.cancelZoomAnimation();
+
+    const zoomDelta = Math.max(
+      -wheelZoomSpeedLimit,
+      Math.min(wheelZoomSpeedLimit, -event.deltaY / wheelZoomSpeedDivisor),
+    );
+    const nextZoom = Math.max(1, Math.min(10, assetViewerManager.zoom + zoomDelta));
+    if (nextZoom === assetViewerManager.zoom) {
+      return;
+    }
+
+    assetViewerManager.zoom = zoomDelta < 0 && nextZoom < 1.01 ? 1 : nextZoom;
+  };
+
+  const handleAssetViewerWheel = (event: WheelEvent) => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement) || !target.closest('[data-viewer-content]')) {
+      return;
+    }
+    if (target.closest('[data-overlay-interactive]')) {
+      return;
+    }
+    if ($slideshowState === SlideshowState.PlaySlideshow) {
+      handleWheelNavigation(event);
+      return;
+    }
+    if (viewerKind !== 'PhotoViewer' || assetViewerManager.isShowEditor || assetViewerManager.isFaceEditMode) {
+      return;
+    }
+    if (event.altKey) {
+      handlePhotoViewerWheelZoom(event);
+      return;
+    }
+    handleWheelNavigation(event);
+  };
+
+  $effect(() => {
+    const slideshowStateValue = $slideshowState;
+    const currentAssetId = asset.id;
+    const skipVideos = $slideshowSkipVideos;
+    const skipMotionPhotos = $slideshowSkipMotionPhotos;
+
+    if (slideshowStateValue !== SlideshowState.PlaySlideshow || isSlideshowAssetPlayable(asset)) {
+      return;
+    }
+
+    void currentAssetId;
+    void skipVideos;
+    void skipMotionPhotos;
+
+    untrack(() => {
+      if (slideshowAlignmentTracker.isActive()) {
+        return;
+      }
+
+      void slideshowAlignmentTracker.invoke(async () => {
+        await alignSlideshowToPlayableAsset();
+      }, $t('error_while_navigating'));
+    });
+  });
 </script>
 
 <CommandPaletteDefaultProvider name={$t('assets')} actions={[Tag, TagPeople]} />
@@ -514,7 +741,6 @@
 />
 
 <svelte:document
-  bind:fullscreenElement
   use:shortcuts={[
     { shortcut: { key: 'ArrowUp' }, onShortcut: () => navigateStack('previous') },
     { shortcut: { key: 'ArrowDown' }, onShortcut: () => navigateStack('next') },
@@ -548,9 +774,7 @@
   {#if $slideshowState !== SlideshowState.None}
     <div class="absolute inset-s-0 top-0 flex w-full justify-start">
       <SlideshowBar
-        {isFullScreen}
         assetType={previewStackedAsset?.type ?? asset.type}
-        onSetToFullScreen={() => assetViewerHtmlElement?.requestFullscreen?.()}
         onPrevious={() => navigateAsset('previous')}
         onNext={() => navigateAsset('next')}
         onClose={() => ($slideshowState = SlideshowState.StopSlideshow)}
@@ -565,7 +789,19 @@
   {/if}
 
   <!-- Asset Viewer -->
-  <div data-testid="viewer-content" class="relative z-[-1] col-span-4 col-start-1 row-span-full row-start-1">
+  <div
+    data-testid="viewer-content"
+    data-viewer-content
+    class="relative z-[-1] col-span-4 col-start-1 row-span-full row-start-1"
+    role="presentation"
+    tabindex="-1"
+    onclick={toggleFilmstrip}
+    onkeydown={(event) => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        toggleFilmstrip();
+      }
+    }}
+  >
     {#if viewerKind === 'StackVideoViewer'}
       <VideoViewer
         asset={previewStackedAsset!}
@@ -639,6 +875,10 @@
       <SlideshowMetadataOverlay {asset} />
     {/if}
   </div>
+
+  {#if filmstripVisible && filmstripAssets.length > 1 && !assetViewerManager.isShowEditor && !assetViewerManager.isFaceEditMode}
+    <AssetViewerFilmstrip assets={filmstripAssets} currentAssetId={asset.id} onAssetSelect={selectFilmstripAsset} />
+  {/if}
 
   {#if $slideshowState === SlideshowState.None && showNavigation && !assetViewerManager.isShowEditor && !assetViewerManager.isFaceEditMode && nextAsset}
     <div class="col-span-1 col-start-4 row-span-full row-start-1 my-auto justify-self-end">

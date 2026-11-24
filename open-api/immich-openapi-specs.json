@@ -5749,6 +5749,63 @@
         "x-immich-state": "Stable"
       }
     },
+    "/assets/{id}/address": {
+      "post": {
+        "description": "Resolve and store a missing detailed address without changing GPS or location filters.",
+        "operationId": "ensureAssetAddress",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssetAddressResponseDto"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "cookie": []
+          },
+          {
+            "api_key": []
+          }
+        ],
+        "summary": "Ensure asset detailed address",
+        "tags": [
+          "Assets"
+        ],
+        "x-immich-history": [
+          {
+            "version": "v1",
+            "state": "Added"
+          },
+          {
+            "version": "v1",
+            "state": "Beta"
+          }
+        ],
+        "x-immich-permission": "asset.read",
+        "x-immich-state": "Beta"
+      }
+    },
     "/assets/{id}/adjust": {
       "delete": {
         "description": "Restores the image colours; any crop, rotate or mirror stays.",
@@ -5993,6 +6050,194 @@
         "x-immich-state": "Beta"
       }
     },
+    "/assets/{id}/edit-save": {
+      "post": {
+        "operationId": "saveAssetEdits",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssetEditSaveCreateDto"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssetEditSaveResponseDto"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "cookie": []
+          },
+          {
+            "api_key": []
+          }
+        ],
+        "summary": "Save image edits to a new or original file",
+        "tags": [
+          "Assets"
+        ],
+        "x-immich-history": [
+          {
+            "version": "v3.2.0",
+            "state": "Added"
+          },
+          {
+            "version": "v3.2.0",
+            "state": "Beta"
+          }
+        ],
+        "x-immich-permission": "asset.edit.create",
+        "x-immich-state": "Beta"
+      }
+    },
+    "/assets/{id}/edit-save/capabilities": {
+      "get": {
+        "operationId": "getAssetEditSaveCapabilities",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssetEditSaveCapabilitiesDto"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "cookie": []
+          },
+          {
+            "api_key": []
+          }
+        ],
+        "summary": "Get image file save capabilities",
+        "tags": [
+          "Assets"
+        ],
+        "x-immich-history": [
+          {
+            "version": "v3.2.0",
+            "state": "Added"
+          },
+          {
+            "version": "v3.2.0",
+            "state": "Beta"
+          }
+        ],
+        "x-immich-permission": "asset.read",
+        "x-immich-state": "Beta"
+      }
+    },
+    "/assets/{id}/edit-save/{operationId}": {
+      "get": {
+        "operationId": "getAssetEditSave",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$",
+              "type": "string"
+            }
+          },
+          {
+            "name": "operationId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssetEditSaveResponseDto"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "cookie": []
+          },
+          {
+            "api_key": []
+          }
+        ],
+        "summary": "Get an image file save operation",
+        "tags": [
+          "Assets"
+        ],
+        "x-immich-history": [
+          {
+            "version": "v3.2.0",
+            "state": "Added"
+          },
+          {
+            "version": "v3.2.0",
+            "state": "Beta"
+          }
+        ],
+        "x-immich-permission": "asset.read",
+        "x-immich-state": "Beta"
+      }
+    },
     "/assets/{id}/edits": {
       "delete": {
         "description": "Removes all edit actions (crop, rotate, mirror) associated with the specified asset.",
@@ -6161,6 +6406,58 @@
         ],
         "x-immich-permission": "asset.edit.create",
         "x-immich-state": "Beta"
+      }
+    },
+    "/assets/{id}/live-photo": {
+      "delete": {
+        "description": "Keeps the photo and permanently deletes its associated video, including the source file for uploaded and external-library assets. Photo metadata is not rewritten.",
+        "operationId": "unlinkAndDeleteLivePhoto",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssetResponseDto"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "cookie": []
+          },
+          {
+            "api_key": []
+          }
+        ],
+        "summary": "Unlink and permanently delete a Live Photo video",
+        "tags": [
+          "Assets"
+        ],
+        "x-immich-history": [
+          {
+            "version": "v3",
+            "state": "Added"
+          }
+        ],
+        "x-immich-permission": "asset.delete"
       }
     },
     "/assets/{id}/metadata": {
@@ -6602,6 +6899,15 @@
             "required": false,
             "in": "query",
             "description": "Return edited asset if available",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "fallback",
+            "required": false,
+            "in": "query",
+            "description": "Allow missing fullsize image to fall back to preview (default true)",
             "schema": {
               "type": "boolean"
             }
@@ -31623,6 +31929,19 @@
         },
         "type": "object"
       },
+      "AssetAddressResponseDto": {
+        "properties": {
+          "formattedAddress": {
+            "description": "Detailed address, or null when unavailable",
+            "nullable": true,
+            "type": "string"
+          }
+        },
+        "required": [
+          "formattedAddress"
+        ],
+        "type": "object"
+      },
       "AssetBulkDeleteDto": {
         "properties": {
           "force": {
@@ -31917,6 +32236,138 @@
           "parameters"
         ],
         "type": "object"
+      },
+      "AssetEditSaveCapabilitiesDto": {
+        "properties": {
+          "canCopy": {
+            "type": "boolean"
+          },
+          "canOverwrite": {
+            "type": "boolean"
+          },
+          "outputFormat": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/AssetEditSaveFormat"
+              }
+            ],
+            "nullable": true
+          },
+          "overwriteUnavailableReason": {
+            "nullable": true,
+            "type": "string"
+          }
+        },
+        "required": [
+          "canCopy",
+          "canOverwrite",
+          "outputFormat",
+          "overwriteUnavailableReason"
+        ],
+        "type": "object"
+      },
+      "AssetEditSaveCreateDto": {
+        "properties": {
+          "adjust": {
+            "$ref": "#/components/schemas/AssetImageAdjustDto",
+            "description": "Colour adjustment to bake into the saved original; omitted uses the current saved adjustment"
+          },
+          "edits": {
+            "items": {
+              "$ref": "#/components/schemas/AssetEditActionItemDto"
+            },
+            "type": "array"
+          },
+          "expectedVersion": {
+            "description": "Asset updatedAt when the editor was opened",
+            "example": "2024-01-01T00:00:00.000Z",
+            "format": "date-time",
+            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$",
+            "type": "string"
+          },
+          "idempotencyKey": {
+            "description": "Reuse this key when retrying the same save",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$",
+            "type": "string"
+          },
+          "mode": {
+            "$ref": "#/components/schemas/AssetEditSaveMode"
+          }
+        },
+        "required": [
+          "edits",
+          "expectedVersion",
+          "idempotencyKey",
+          "mode"
+        ],
+        "type": "object"
+      },
+      "AssetEditSaveFormat": {
+        "enum": [
+          "jpeg",
+          "png",
+          "webp"
+        ],
+        "type": "string"
+      },
+      "AssetEditSaveMode": {
+        "enum": [
+          "copy",
+          "overwrite"
+        ],
+        "type": "string"
+      },
+      "AssetEditSaveResponseDto": {
+        "properties": {
+          "assetId": {
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$",
+            "type": "string"
+          },
+          "error": {
+            "nullable": true,
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$",
+            "type": "string"
+          },
+          "mode": {
+            "$ref": "#/components/schemas/AssetEditSaveMode"
+          },
+          "resultAssetId": {
+            "format": "uuid",
+            "nullable": true,
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$",
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/AssetEditSaveStatus"
+          }
+        },
+        "required": [
+          "assetId",
+          "error",
+          "id",
+          "mode",
+          "resultAssetId",
+          "status"
+        ],
+        "type": "object"
+      },
+      "AssetEditSaveStatus": {
+        "enum": [
+          "queued",
+          "rendering",
+          "publishing",
+          "processing",
+          "completed",
+          "failed",
+          "conflict"
+        ],
+        "type": "string"
       },
       "AssetEditableDto": {
         "properties": {
@@ -34698,6 +35149,12 @@
             "nullable": true,
             "type": "number"
           },
+          "formattedAddress": {
+            "default": null,
+            "description": "Detailed display address",
+            "nullable": true,
+            "type": "string"
+          },
           "iso": {
             "default": null,
             "description": "ISO sensitivity",
@@ -36428,7 +36885,8 @@
           "AssetAnalyzeQualityQueueAll",
           "AssetAnalyzeQuality",
           "MemoryRuleGenerate",
-          "AssetVideoTrimGenerate"
+          "AssetVideoTrimGenerate",
+          "AssetEditSave"
         ],
         "type": "string"
       },
@@ -36967,6 +37425,11 @@
           },
           "country": {
             "description": "Country name",
+            "nullable": true,
+            "type": "string"
+          },
+          "formattedAddress": {
+            "description": "Detailed display address",
             "nullable": true,
             "type": "string"
           },
@@ -40267,6 +40730,11 @@
           },
           "server": {
             "$ref": "#/components/schemas/PublicConfigServerDto"
+          },
+          "webDeleteToastThreshold": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
           }
         },
         "required": [
@@ -40275,7 +40743,8 @@
           "oauth",
           "passkey",
           "passwordLogin",
-          "server"
+          "server",
+          "webDeleteToastThreshold"
         ],
         "type": "object"
       },
@@ -41646,9 +42115,10 @@
         "properties": {
           "angle": {
             "description": "Rotation angle in degrees",
-            "maximum": 270,
-            "minimum": 0,
-            "type": "integer"
+            "format": "double",
+            "maximum": 360,
+            "minimum": -360,
+            "type": "number"
           }
         },
         "required": [
@@ -42856,6 +43326,12 @@
             "maximum": 9007199254740991,
             "minimum": -9007199254740991,
             "type": "integer"
+          },
+          "webDeleteToastThreshold": {
+            "description": "Number of selected assets above which delete notifications stay open",
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
           }
         },
         "required": [
@@ -42871,7 +43347,8 @@
           "oauthButtonText",
           "publicUsers",
           "trashDays",
-          "userDeleteDelay"
+          "userDeleteDelay",
+          "webDeleteToastThreshold"
         ],
         "type": "object"
       },

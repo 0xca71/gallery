@@ -81,7 +81,11 @@ export const withGalleryAdminConfig =
       adminConfig(overrides) as Record<string, unknown>,
     ) as unknown as AdminConfig;
 
-export const galleryServerConfig = { availableMemoryTypes: [] } satisfies Partial<ResponseOf<'getServerConfig'>>;
+export const galleryServerConfig = { availableMemoryTypes: [], webDeleteToastThreshold: 20 } satisfies Partial<
+  ResponseOf<'getServerConfig'>
+>;
+
+export const galleryPublicConfig = { webDeleteToastThreshold: 20 } satisfies Partial<ResponseOf<'getPublicConfig'>>;
 
 export const galleryServerFeatures = {
   peopleStatistics: false,

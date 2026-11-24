@@ -21,12 +21,20 @@
   let canvasContainer = $state<HTMLElement | null>(null);
 
   let imageSrc = $derived(
-    getAssetMediaUrl({ id: asset.id, cacheKey: asset.thumbhash, edited: false, size: AssetMediaSize.Preview }),
+    getAssetMediaUrl({
+      id: asset.id,
+      cacheKey: `${asset.thumbhash ?? ''}:${asset.fileModifiedAt}`,
+      edited: false,
+      size: AssetMediaSize.Preview,
+    }),
   );
 
   let imageTransform = $derived.by(() => {
     const transforms: string[] = [];
 
+    if (transformManager.fineRotation !== 0) {
+      transforms.push(`rotate(${transformManager.fineRotation}deg)`);
+    }
     if (transformManager.mirrorHorizontal) {
       transforms.push('scaleX(-1)');
     }
@@ -36,6 +44,8 @@
 
     return transforms.join(' ');
   });
+
+  let hasSubCrop = $derived(transformManager.hasManualSubCrop());
 
   const edges = [ResizeBoundary.Top, ResizeBoundary.Right, ResizeBoundary.Bottom, ResizeBoundary.Left];
   const corners = [
@@ -62,18 +72,29 @@
 </script>
 
 <div class="flex size-full flex-col items-center justify-center p-8" bind:this={canvasContainer}>
+  <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
   <div
-    class="crop-area max-h-full max-w-full transition-transform motion-reduce:transition-none"
-    class:rotated={transformManager.normalizedRotation % 180 > 0}
-    style:rotate={transformManager.imageRotation + 'deg'}
+    class="crop-area max-h-full max-w-full cursor-crosshair overflow-hidden transition-transform motion-reduce:transition-none"
+    class:rotated={transformManager.normalizedBaseRotation % 180 > 0}
+    style:rotate={transformManager.baseRotation + 'deg'}
     bind:this={transformManager.cropAreaEl}
+    onmousedown={(e) => {
+      if (imageAdjustManager.mode === 'crop') transformManager.handleMouseDownOn(e, ResizeBoundary.Marquee);
+    }}
+    ondblclick={() => {
+      if (imageAdjustManager.mode === 'crop') transformManager.resetCrop();
+    }}
+    role="application"
     aria-label="Crop area"
   >
     <img
       draggable="false"
       src={imageSrc}
       alt={$getAltText(toTimelineAsset(asset))}
-      class="h-full transition-transform select-none motion-reduce:transition-none"
+      class={[
+        'h-full select-none',
+        !transformManager.isInteracting && 'transition-transform motion-reduce:transition-none',
+      ]}
       style:transform={imageTransform}
       style:filter={imageAdjustManager.filter}
     />
@@ -94,14 +115,15 @@
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div
         class={[
-          'grid size-full cursor-move transition-opacity motion-reduce:transition-none',
+          'grid size-full transition-opacity motion-reduce:transition-none',
+          hasSubCrop ? 'cursor-move' : 'cursor-crosshair',
           transformManager.isInteracting ? 'opacity-100' : 'opacity-0',
         ]}
         onmousedown={(e) => transformManager.handleMouseDownOn(e, ResizeBoundary.None)}
       ></div>
 
       {#each edges as edge (edge)}
-        {const rotatedEdge = $derived(rotateBoundary(edges, edge, transformManager.normalizedRotation / 90))}
+        {const rotatedEdge = $derived(rotateBoundary(edges, edge, transformManager.normalizedBaseRotation / 90))}
         <button
           class={['absolute', edge]}
           style={`${edge}: -10px`}
@@ -112,7 +134,7 @@
       {/each}
 
       {#each corners as corner (corner)}
-        {const rotatedCorner = $derived(rotateBoundary(corners, corner, transformManager.normalizedRotation / 90))}
+        {const rotatedCorner = $derived(rotateBoundary(corners, corner, transformManager.normalizedBaseRotation / 90))}
         <button
           class={['corner', corner]}
           onmousedown={(e) => transformManager.handleMouseDownOn(e, corner)}

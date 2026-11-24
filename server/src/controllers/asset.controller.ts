@@ -19,6 +19,7 @@ import {
 } from 'src/dtos/asset.dto.js';
 import type { AuthDto } from 'src/dtos/auth.dto.js';
 import { AssetEditsCreateDto, AssetEditsResponseDto } from 'src/dtos/editing.dto.js';
+import { AssetAddressResponseDto } from 'src/dtos/exif.dto.js';
 import { AssetOcrResponseDto } from 'src/dtos/ocr.dto.js';
 import { ApiTag, Permission, RouteKey } from 'src/enum.js';
 import { AssetInfoQueryDto } from 'src/gallery/dtos/asset.dto.js';
@@ -86,6 +87,18 @@ export class AssetController {
     return this.service.deleteAll(auth, dto);
   }
 
+  @Post(':id/address')
+  @Authenticated({ permission: Permission.AssetRead })
+  @HttpCode(HttpStatus.OK)
+  @Endpoint({
+    summary: 'Ensure asset detailed address',
+    description: 'Resolve and store a missing detailed address without changing GPS or location filters.',
+    history: new HistoryBuilder().added('v1').beta('v1'),
+  })
+  ensureAssetAddress(@Auth() auth: AuthDto, @Param() { id }: UUIDParamDto): Promise<AssetAddressResponseDto> {
+    return this.service.ensureAssetAddress(auth, id);
+  }
+
   @Get(':id')
   @Authenticated({ permission: Permission.AssetRead, sharedLink: true })
   @Endpoint({
@@ -99,6 +112,19 @@ export class AssetController {
     @Query() { spaceId }: AssetInfoQueryDto,
   ): Promise<AssetResponseDto> {
     return this.service.get(auth, id, spaceId) as Promise<AssetResponseDto>;
+  }
+
+  @Delete(':id/live-photo')
+  @Authenticated({ permission: Permission.AssetDelete })
+  @HttpCode(HttpStatus.OK)
+  @Endpoint({
+    summary: 'Unlink and permanently delete a Live Photo video',
+    description:
+      'Keeps the photo and permanently deletes its associated video, including the source file for uploaded and external-library assets. Photo metadata is not rewritten.',
+    history: new HistoryBuilder().added('v3'),
+  })
+  unlinkAndDeleteLivePhoto(@Auth() auth: AuthDto, @Param() { id }: UUIDParamDto): Promise<AssetResponseDto> {
+    return this.service.unlinkAndDeleteLivePhoto(auth, id);
   }
 
   @Put('copy')

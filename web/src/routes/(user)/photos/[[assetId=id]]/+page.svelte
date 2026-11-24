@@ -29,7 +29,7 @@
   import { getAssetBulkActions } from '#lib/services/asset.service.ts';
   import { getStackBulkActions } from '#lib/services/stack.service.ts';
   import { getAssetMediaUrl, memoryLaneTitle } from '#lib/utils.ts';
-  import { type OnLink, type OnUnlink } from '#lib/utils/actions.ts';
+  import { type OnLink, type OnUnlink, type OnUnlinkAndDelete } from '#lib/utils/actions.ts';
   import { openFileUploadDialog } from '#lib/utils/file-uploader.ts';
   import { getAltText } from '#lib/utils/thumbnail-util.ts';
   import { toTimelineAsset } from '#lib/utils/timeline-util.ts';
@@ -71,6 +71,11 @@
 
   const handleUnlink: OnUnlink = ({ still, motion }) => {
     timelineManager.upsertAssets([motion]);
+    timelineManager.upsertAssets([still]);
+  };
+
+  const handleUnlinkAndDelete: OnUnlinkAndDelete = ({ still, motionId }) => {
+    filtered.onAssetDelete([motionId]);
     timelineManager.upsertAssets([still]);
   };
 
@@ -146,6 +151,7 @@
     <FavoriteAction removeFavorite={assetMultiSelectManager.isAllFavorite} onFavorite={filtered.onFavorite} />
 
     {#if assetMultiSelectManager.isAllUserOwned}
+      <DeleteAssets onAssetDelete={filtered.onAssetDelete} onUndoDelete={filtered.onUndoDelete} />
       <ButtonContextMenu icon={mdiDotsVertical} title={$t('menu')}>
         <DownloadAction menuItem />
         <ActionMenuItem action={StackActions.Stack} />
@@ -157,6 +163,16 @@
             onLink={handleLink}
             onUnlink={handleUnlink}
           />
+          {#if assetMultiSelectManager.assets.length === 1}
+            <LinkLivePhotoAction
+              menuItem
+              unlink
+              deleteVideo
+              onLink={handleLink}
+              onUnlink={handleUnlink}
+              onUnlinkAndDelete={handleUnlinkAndDelete}
+            />
+          {/if}
         {/if}
         <RotateAction />
         <ChangeDate menuItem />
@@ -164,7 +180,6 @@
         <ChangeLocation menuItem />
         <ArchiveAction menuItem onArchive={filtered.onArchive} />
         <ActionMenuItem action={Actions.Tag} />
-        <DeleteAssets menuItem onAssetDelete={filtered.onAssetDelete} onUndoDelete={filtered.onUndoDelete} />
         <SetVisibilityAction menuItem onVisibilitySet={handleSetVisibility} />
         <hr />
         <ActionMenuItem action={Actions.RegenerateThumbnailJob} />

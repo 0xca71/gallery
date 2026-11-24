@@ -89,6 +89,15 @@ export class SpatialSceneService extends BaseService {
 
   @OnJob({ name: JobName.SpatialScene, queue: QueueName.SpatialScene })
   async handleSpatialScene({ id }: JobOf<JobName.SpatialScene>): Promise<JobStatus> {
+    return this.databaseRepository.withAssetLock(id, async () => {
+      if (await this.assetEditSaveRepository.isSaving(id, false)) {
+        return JobStatus.Skipped;
+      }
+      return this.handleSpatialSceneUnlocked({ id });
+    });
+  }
+
+  private async handleSpatialSceneUnlocked({ id }: JobOf<JobName.SpatialScene>): Promise<JobStatus> {
     const { machineLearning } = await this.getConfig({ withCache: true });
     if (!isSpatialSceneEnabled(machineLearning)) {
       return JobStatus.Skipped;

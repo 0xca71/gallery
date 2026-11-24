@@ -36,6 +36,22 @@ describe('utils', () => {
   });
 
   describe(getAssetUrl.name, () => {
+    it('invalidates every image URL after overwrite even if the thumbhash stays identical', () => {
+      const asset = factory.asset({ thumbhash: 'same', fileModifiedAt: '2024-01-01T00:00:00Z' });
+      const modified = { ...asset, fileModifiedAt: '2025-01-01T00:00:00Z' };
+      expect(getAssetUrl({ asset })).not.toBe(getAssetUrl({ asset: modified }));
+      expect(getAssetUrl({ asset, forceOriginal: true })).not.toBe(
+        getAssetUrl({ asset: modified, forceOriginal: true }),
+      );
+    });
+
+    it('requests full-resolution conversion without silently falling back to a preview', () => {
+      const asset = factory.asset({ originalMimeType: 'image/x-sony-arw', originalPath: '/photo.arw' });
+      const url = new URL(getAssetUrl({ asset, forceOriginal: true })!, 'https://gallery.test');
+      expect(url.searchParams.get('size')).toBe('fullsize');
+      expect(url.searchParams.get('fallback')).toBe('false');
+    });
+
     const image = { originalPath: 'image.jpg', originalMimeType: 'image/jpeg', type: AssetTypeEnum.Image };
     const gif = { originalPath: 'image.gif', originalMimeType: 'image/gif', type: AssetTypeEnum.Image };
     const animatedGif = { ...gif, duration: 2000 };
@@ -46,8 +62,9 @@ describe('utils', () => {
       duration: 2000,
     };
     const video = { originalPath: 'video.mp4', originalMimeType: 'video/mp4', type: AssetTypeEnum.Video };
-    const preview = (id: string) => `/api/assets/${id}/thumbnail?size=preview&c=${validThumbhash}&edited=true`;
-    const original = (id: string) => `/api/assets/${id}/original?c=${validThumbhash}&edited=true`;
+    const preview = (id: string) =>
+      `/api/assets/${id}/thumbnail?size=preview&c=${validThumbhash}%3Aversion&edited=true`;
+    const original = (id: string) => `/api/assets/${id}/original?c=${validThumbhash}%3Aversion&edited=true`;
 
     it.each([
       { name: 'a static image', overrides: image, expected: preview },
@@ -57,13 +74,13 @@ describe('utils', () => {
       { name: 'an animated webp', overrides: animatedWebp, expected: original },
       { name: 'a video', overrides: video, expected: preview },
     ])('serves the preview or the original for $name', ({ overrides, expected }) => {
-      const asset = factory.asset(overrides);
+      const asset = factory.asset({ ...overrides, fileModifiedAt: 'version' });
 
       expect(getAssetUrl({ asset })).toBe(expected(asset.id));
     });
 
     it('serves the original for a video when forced', () => {
-      const asset = factory.asset(video);
+      const asset = factory.asset({ ...video, fileModifiedAt: 'version' });
 
       expect(getAssetUrl({ asset, forceOriginal: true })).toBe(original(asset.id));
     });
@@ -89,7 +106,7 @@ describe('utils', () => {
         expected: preview,
       },
     ])('on a shared link serves the preview or the original for $name', ({ overrides, link, expected }) => {
-      const asset = factory.asset(overrides);
+      const asset = factory.asset({ ...overrides, fileModifiedAt: 'version' });
       const sharedLink = factory.sharedLink({ ...link, assets: [asset] });
 
       expect(getAssetUrl({ asset, sharedLink })).toBe(expected(asset.id));

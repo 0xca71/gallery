@@ -32,6 +32,7 @@ export interface EnvData {
   logLevel?: LogLevel;
   logFormat?: LogFormat;
   peopleStatistics: boolean;
+  webDeleteToastThreshold: number;
 
   buildMetadata: {
     build?: string;
@@ -311,6 +312,7 @@ const getEnv = (): EnvData => {
     logLevel: dto.IMMICH_LOG_LEVEL,
     logFormat: dto.IMMICH_LOG_FORMAT || LogFormat.Console,
     peopleStatistics: dto.IMMICH_PEOPLE_STATISTICS_ENABLED ?? false,
+    webDeleteToastThreshold: dto.IMMICH_WEB_DELETE_TOAST_THRESHOLD ?? 20,
 
     buildMetadata: {
       build: dto.IMMICH_BUILD,

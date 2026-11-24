@@ -6,7 +6,9 @@ import { readFile } from 'node:fs/promises';
 import readLine from 'node:readline';
 import { citiesFile, reverseGeocodeMaxDistance } from 'src/constants.js';
 import { DummyValue, GenerateSql } from 'src/decorators.js';
+import { MapMarkerResponseDto } from 'src/dtos/map.dto.js';
 import { AssetVisibility, SystemMetadataKey } from 'src/enum.js';
+import { AmapRepository } from 'src/repositories/amap.repository.js';
 import { ConfigRepository } from 'src/repositories/config.repository.js';
 import { LoggingRepository } from 'src/repositories/logging.repository.js';
 import { SystemMetadataRepository } from 'src/repositories/system-metadata.repository.js';
@@ -59,6 +61,7 @@ export class MapRepository {
     private metadataRepository: SystemMetadataRepository,
     private logger: LoggingRepository,
     @InjectKysely() private db: Kysely<MapDB>,
+    private amapRepository: AmapRepository,
   ) {
     this.logger.setContext(MapRepository.name);
   }
@@ -85,7 +88,7 @@ export class MapRepository {
   }
 
   @GenerateSql({ params: [DummyValue.UUID] })
-  getAlbumMapMarkers(albumId: string) {
+  getAlbumMapMarkers(albumId: string): Promise<MapMarkerResponseDto[]> {
     // security-2: never expose GPS / city / state / country of Hidden or Locked album assets. Flat
     // gate (no owner exception), consistent with the album grid (withDefaultVisibility) and the album
     // download path (downloadAlbumId). mapMarkersQuery() is asset-rooted, so asset.visibility is
@@ -103,7 +106,7 @@ export class MapRepository {
     ownerIds: string[],
     albumIds: string[],
     { isArchived, isFavorite, fileCreatedAfter, fileCreatedBefore, timelineSpaceIds }: MapMarkerSearchOptions = {},
-  ) {
+  ): Promise<MapMarkerResponseDto[]> {
     return this.mapMarkersQuery()
       .$if(isArchived === true, (qb) =>
         qb.where((eb) =>
@@ -173,8 +176,13 @@ export class MapRepository {
         'asset_exif.city',
         'asset_exif.state',
         'asset_exif.country',
+        'asset_exif.formattedAddress',
       ])
       .$narrowType<{ lat: NotNull; lon: NotNull }>();
+  }
+
+  ensureDetailedAddress(assetId: string, source: 'metadata' | 'detail' = 'detail') {
+    return this.amapRepository.ensureAddress(assetId, source);
   }
 
   async reverseGeocode(point: GeoPoint): Promise<ReverseGeocodeResult> {

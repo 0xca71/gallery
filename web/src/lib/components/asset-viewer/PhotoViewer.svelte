@@ -5,19 +5,28 @@
   import AssetViewerEvents from '#lib/components/AssetViewerEvents.svelte';
   import Thumbhash from '#lib/components/Thumbhash.svelte';
   import OcrBoundingBox from '#lib/components/asset-viewer/OcrBoundingBox.svelte';
+  import PhotoNavigator from '#lib/components/asset-viewer/PhotoNavigator.svelte';
   import FaceEditorPanel from '#lib/components/asset-viewer/face-editor/FaceEditorPanel.svelte';
+  import { ProjectionType } from '#lib/constants.ts';
+  import { getViewerSpace } from '#lib/gallery/viewer-space.ts';
   import { assetViewerManager, type Faces } from '#lib/managers/asset-viewer-manager.svelte.ts';
+  import { authManager } from '#lib/managers/auth-manager.svelte.ts';
   import { castManager } from '#lib/managers/cast-manager.svelte.ts';
+  import { editManager } from '#lib/managers/edit/edit-manager.svelte.ts';
+  import { transformManager } from '#lib/managers/edit/transform-manager.svelte.ts';
   import { faceManager } from '#lib/stores/face.svelte.ts';
+  import { mediaQueryManager } from '#lib/stores/media-query-manager.svelte.ts';
   import { ocrManager } from '#lib/stores/ocr.svelte.ts';
   import { SlideshowLook, SlideshowState, slideshowStore } from '#lib/stores/slideshow.store.ts';
-  import { handlePromiseError } from '#lib/utils.ts';
+  import { getAssetMediaUrl, handlePromiseError } from '#lib/utils.ts';
+  import { canEditAsset } from '#lib/utils/asset-editability.ts';
   import { canCopyImageToClipboard, copyImageToClipboard } from '#lib/utils/asset-utils.ts';
-  import { getNaturalSize, scaleToFit, type Size } from '#lib/utils/container-utils.ts';
+  import { getNaturalSize, type Size } from '#lib/utils/container-utils.ts';
   import { handleError } from '#lib/utils/handle-error.ts';
   import { getOcrBoundingBoxes } from '#lib/utils/ocr-utils.ts';
   import { getBoundingBox, type BoundingBox } from '#lib/utils/people-utils.ts';
-  import { type SharedLinkResponseDto } from '@immich/sdk';
+  import { fittedPhoto, resizePhotoViewport, visibleCropRegion } from '#lib/utils/zoom-geometry.ts';
+  import { AssetMediaSize, AssetTypeEnum, type SharedLinkResponseDto } from '@immich/sdk';
   import { toastManager } from '@immich/ui';
   import { onDestroy, untrack } from 'svelte';
   import { useSwipe, type SwipeCustomEvent } from 'svelte-gestures';
@@ -37,12 +46,44 @@
 
   const { slideshowState, slideshowLook } = slideshowStore;
   const asset = $derived(cursor.current);
+  const viewerSpace = getViewerSpace();
 
   let visibleImageReady: boolean = $state(false);
+  let retryOriginal = $state(0);
+  let zoomElement = $state<HTMLDivElement>();
+  const imageSize = $derived({ width: asset.width || 1, height: asset.height || 1 });
+  const navigatorUrl = $derived(
+    getAssetMediaUrl({
+      id: asset.id,
+      cacheKey: `${asset.thumbhash ?? ''}:${asset.fileModifiedAt}`,
+      size: AssetMediaSize.Preview,
+    }),
+  );
+  const limited = $derived(!!sharedLink && (!sharedLink.allowDownload || !sharedLink.showMetadata));
+  const canCrop = $derived(
+    !sharedLink &&
+      authManager.authenticated &&
+      canEditAsset(asset, { userId: authManager.user.id }) &&
+      asset.type === AssetTypeEnum.Image &&
+      !asset.livePhotoVideoId &&
+      asset.exifInfo?.projectionType !== ProjectionType.EQUIRECTANGULAR &&
+      !asset.originalPath.toLowerCase().endsWith('.insp') &&
+      !asset.originalPath.toLowerCase().endsWith('.gif') &&
+      !asset.originalPath.toLowerCase().endsWith('.svg'),
+  );
+  const showNavigator = $derived(
+    assetViewerManager.zoom > 1 &&
+      !assetViewerManager.isFaceEditMode &&
+      !assetViewerManager.isShowEditor &&
+      $slideshowState === SlideshowState.None,
+  );
+  $effect(() => {
+    assetViewerManager.zoomViewport = container;
+  });
 
   let previousAssetId: string | undefined;
   $effect.pre(() => {
-    const id = asset.id;
+    const id = `${asset.id}:${asset.fileModifiedAt}`;
     if (id === previousAssetId) {
       return;
     }
@@ -50,6 +91,7 @@
     untrack(() => {
       assetViewerManager.resetZoomState();
       visibleImageReady = false;
+      retryOriginal = 0;
       assetViewerManager.clearHighlightedFaces();
     });
   });
@@ -57,6 +99,8 @@
   onDestroy(() => {
     assetViewerManager.clearHighlightedFaces();
     assetViewerManager.hideHiddenPeople();
+    assetViewerManager.resetZoomState();
+    assetViewerManager.imageLoaderStatus = undefined;
   });
 
   let containerWidth = $state(0);
@@ -68,12 +112,26 @@
     height: containerHeight,
   });
 
+  let previousViewport = { width: 0, height: 0 };
+  $effect(() => {
+    const viewport = container;
+    untrack(() => {
+      const state = assetViewerManager.zoomState;
+      assetViewerManager.zoomState = resizePhotoViewport(imageSize, previousViewport, viewport, state);
+      previousViewport = viewport;
+    });
+  });
+
   const overlaySize = $derived.by((): Size => {
     if (!assetViewerManager.imgRef || !visibleImageReady) {
       return { width: 0, height: 0 };
     }
 
-    return scaleToFit(getNaturalSize(assetViewerManager.imgRef), { width: containerWidth, height: containerHeight });
+    return fittedPhoto(
+      getNaturalSize(assetViewerManager.imgRef),
+      container,
+      assetViewerManager.zoomState.currentRotation,
+    );
   });
 
   const highlightedBoxes = $derived(getBoundingBox(assetViewerManager.highlightedFaces, overlaySize));
@@ -104,6 +162,21 @@
   const onZoom = () => {
     const targetZoom = assetViewerManager.zoom > 1 ? 1 : 2;
     assetViewerManager.animatedZoom(targetZoom);
+  };
+
+  const onCrop = () => {
+    if (!canCrop) {
+      return;
+    }
+
+    const crop = visibleCropRegion(imageSize, container, assetViewerManager.zoomState);
+    if (mediaQueryManager.maxMd) {
+      handlePromiseError(editManager.saveImageCropFromViewer(asset, crop, viewerSpace().spaceId));
+      return;
+    }
+
+    transformManager.setInitialCropRegion(crop);
+    assetViewerManager.openEditor();
   };
 
   const onFaceEditModeChange = (isFaceEditMode: boolean) => {
@@ -221,84 +294,106 @@
   bind:clientWidth={containerWidth}
   bind:clientHeight={containerHeight}
   role="presentation"
-  ondblclick={onZoom}
-  use:zoomImageAction={{ zoomTarget: adaptiveImage }}
-  {...useSwipe((event) => onSwipe?.(event))}
 >
-  <AdaptiveImage
-    {asset}
-    {sharedLink}
-    {container}
-    objectFit={$slideshowState !== SlideshowState.None && $slideshowLook === SlideshowLook.Cover ? 'cover' : 'contain'}
-    {onUrlChange}
-    onImageReady={() => {
-      visibleImageReady = true;
-      onReady?.();
-    }}
-    onError={() => {
-      onError?.();
-      onReady?.();
-    }}
-    bind:imgRef={assetViewerManager.imgRef}
-    bind:ref={adaptiveImage}
+  <div
+    bind:this={zoomElement}
+    class="size-full"
+    role="presentation"
+    tabindex="-1"
+    use:zoomImageAction={{ zoomTarget: adaptiveImage, image: imageSize }}
+    {...useSwipe((event) => onSwipe?.(event))}
   >
-    {#snippet backdrop()}
-      {#if blurredSlideshow}
-        <Thumbhash base64ThumbHash={asset.thumbhash!} class="absolute inset-s-0 top-0 left-0 h-dvh w-dvw" />
-      {/if}
-    {/snippet}
-    {#snippet overlays()}
-      <div
-        class="pointer-events-none absolute inset-0 transition-opacity duration-150"
-        style:opacity={isHighlighting ? 1 : 0}
-      >
-        <svg class="absolute inset-0 size-full">
-          <defs>
-            <mask id="face-dim-mask">
-              <rect width="100%" height="100%" fill="white" />
-              {#each visibleBoxes as box (box.id)}
-                <rect x={box.left} y={box.top} width={box.width} height={box.height} fill="black" rx="8" />
-              {/each}
-            </mask>
-          </defs>
-          <rect width="100%" height="100%" fill="rgba(0,0,0,0.4)" mask="url(#face-dim-mask)" />
-        </svg>
-      </div>
-      {#each boundingBoxes as boundingbox (boundingbox.id)}
-        {const isActive = $derived(assetViewerManager.highlightedFaces.some((f) => f.id === boundingbox.id))}
-        <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <AdaptiveImage
+      {asset}
+      {sharedLink}
+      {container}
+      rotation={assetViewerManager.zoomState.currentRotation}
+      {retryOriginal}
+      objectFit={$slideshowState !== SlideshowState.None && $slideshowLook === SlideshowLook.Cover
+        ? 'cover'
+        : 'contain'}
+      {onUrlChange}
+      onImageReady={() => {
+        visibleImageReady = true;
+        onReady?.();
+      }}
+      onError={() => {
+        onError?.();
+        onReady?.();
+      }}
+      bind:imgRef={assetViewerManager.imgRef}
+      bind:ref={adaptiveImage}
+    >
+      {#snippet backdrop()}
+        {#if blurredSlideshow}
+          <Thumbhash base64ThumbHash={asset.thumbhash!} class="absolute inset-s-0 top-0 left-0 h-dvh w-dvw" />
+        {/if}
+      {/snippet}
+      {#snippet overlays()}
         <div
-          class="pointer-events-auto absolute rounded-lg {isActive && 'border-3 border-solid border-white'}"
-          style="top: {boundingbox.top}px; left: {boundingbox.left}px; height: {boundingbox.height}px; width: {boundingbox.width}px;"
-          onpointerenter={() => assetViewerManager.setHighlightedFaces([boundingbox.face])}
-          onpointerleave={() => assetViewerManager.clearHighlightedFaces()}
+          class="pointer-events-none absolute inset-0 transition-opacity duration-150"
+          style:opacity={isHighlighting ? 1 : 0}
         >
-          {#if isActive && boundingbox.name}
-            {const labelAbove = $derived(
-              boundingbox.top + boundingbox.height + faceLabelOffset > overlaySize.height &&
-                boundingbox.top >= faceLabelOffset,
-            )}
-            <div
-              aria-hidden="true"
-              class="absolute rounded-sm bg-white/90 px-2 py-1 text-sm font-medium whitespace-nowrap text-black shadow-lg"
-              bind:clientWidth={boundingbox.labelWidth}
-              style="{labelAbove ? 'bottom' : 'top'}: {boundingbox.height + 4}px; {assetViewerManager.imgRef
-                ? boundingbox.left >= boundingbox.labelWidth - boundingbox.width
-                  ? `right: ${Math.max(boundingbox.left + boundingbox.width - assetViewerManager.imgRef.clientWidth, 0)}px;`
-                  : `left: ${-boundingbox.left}px;`
-                : ''}"
-            >
-              {boundingbox.name}
-            </div>
-          {/if}
+          <svg class="absolute inset-0 size-full">
+            <defs>
+              <mask id="face-dim-mask">
+                <rect width="100%" height="100%" fill="white" />
+                {#each visibleBoxes as box (box.id)}
+                  <rect x={box.left} y={box.top} width={box.width} height={box.height} fill="black" rx="8" />
+                {/each}
+              </mask>
+            </defs>
+            <rect width="100%" height="100%" fill="rgba(0,0,0,0.4)" mask="url(#face-dim-mask)" />
+          </svg>
         </div>
-      {/each}
+        {#each boundingBoxes as boundingbox (boundingbox.id)}
+          {const isActive = $derived(assetViewerManager.highlightedFaces.some((f) => f.id === boundingbox.id))}
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <div
+            class="pointer-events-auto absolute rounded-lg {isActive && 'border-3 border-solid border-white'}"
+            style="top: {boundingbox.top}px; left: {boundingbox.left}px; height: {boundingbox.height}px; width: {boundingbox.width}px;"
+            onpointerenter={() => assetViewerManager.setHighlightedFaces([boundingbox.face])}
+            onpointerleave={() => assetViewerManager.clearHighlightedFaces()}
+          >
+            {#if isActive && boundingbox.name}
+              {const labelAbove = $derived(
+                boundingbox.top + boundingbox.height + faceLabelOffset > overlaySize.height &&
+                  boundingbox.top >= faceLabelOffset,
+              )}
+              <div
+                aria-hidden="true"
+                class="absolute rounded-sm bg-white/90 px-2 py-1 text-sm font-medium whitespace-nowrap text-black shadow-lg"
+                bind:clientWidth={boundingbox.labelWidth}
+                style="{labelAbove ? 'bottom' : 'top'}: {boundingbox.height + 4}px; {assetViewerManager.imgRef
+                  ? boundingbox.left >= boundingbox.labelWidth - boundingbox.width
+                    ? `right: ${Math.max(boundingbox.left + boundingbox.width - assetViewerManager.imgRef.clientWidth, 0)}px;`
+                    : `left: ${-boundingbox.left}px;`
+                  : ''}"
+              >
+                {boundingbox.name}
+              </div>
+            {/if}
+          </div>
+        {/each}
 
-      {#each ocrBoxes as ocrBox (ocrBox.id)}
-        <OcrBoundingBox {ocrBox} />
-      {/each}
-    {/snippet}
-  </AdaptiveImage>
+        {#each ocrBoxes as ocrBox (ocrBox.id)}
+          <OcrBoundingBox {ocrBox} />
+        {/each}
+      {/snippet}
+    </AdaptiveImage>
+  </div>
+
+  {#if showNavigator && containerWidth > 0 && containerHeight > 0}
+    <PhotoNavigator
+      image={imageSize}
+      viewport={container}
+      src={navigatorUrl}
+      {limited}
+      onRetry={() => retryOriginal++}
+      onResetFocus={() => zoomElement?.focus({ preventScroll: true })}
+      onCrop={canCrop ? onCrop : undefined}
+    />
+  {/if}
 
   {#if assetViewerManager.isFaceEditMode && assetViewerManager.imgRef}
     <FaceEditorPanel

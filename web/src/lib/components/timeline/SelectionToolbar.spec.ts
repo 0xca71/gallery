@@ -176,7 +176,7 @@ describe('SelectionToolbar', () => {
     // Shown even for a viewer on someone else's asset: a favorite is the viewer's own
     // `asset_favorite` overlay row (#763), so it is not owner-gated.
     await expect.element(page.getByLabelText('to_favorite')).toBeInTheDocument();
-    expect(page.getByRole('menuitem', { name: 'delete' }).query()).toBeNull();
+    expect(page.getByLabelText('delete').query()).toBeNull();
     expect(page.getByLabelText('remove_from_space').query()).toBeNull();
     expect(page.getByRole('menuitem', { name: 'set_as_space_cover' }).query()).toBeNull();
     expect(page.getByRole('menuitem', { name: 'set_as_album_cover' }).query()).toBeNull();
@@ -202,9 +202,14 @@ describe('SelectionToolbar', () => {
     await expect.element(page.getByLabelText('share')).toBeInTheDocument();
     await expect.element(page.getByLabelText('add_to_album_or_space')).toBeInTheDocument();
     await expect.element(page.getByLabelText('to_favorite')).toBeInTheDocument();
-    await expect.element(page.getByRole('menuitem', { name: 'delete' })).toBeInTheDocument();
+    await expect.element(page.getByLabelText('delete')).toBeInTheDocument();
     await expect.element(page.getByLabelText('remove_from_space')).toBeInTheDocument();
     await expect.element(page.getByRole('menuitem', { name: 'set_as_space_cover' })).toBeInTheDocument();
+    const favorite = page.getByLabelText('to_favorite').element();
+    const deleteButton = page.getByLabelText('delete').element();
+    const menu = page.getByLabelText('menu').element();
+    expect(favorite.compareDocumentPosition(deleteButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(deleteButton.compareDocumentPosition(menu) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it('Given the space-person surface (same editor+own-asset context but no onSetCover passed), When the toolbar renders, Then Cover is absent even though caps.canSetCover is true', async () => {
@@ -246,7 +251,7 @@ describe('SelectionToolbar', () => {
     await expect.element(page.getByLabelText('share')).toBeInTheDocument();
     // Favorites are a per-user overlay row (#763), so they are never owner-gated.
     await expect.element(page.getByLabelText('to_favorite')).toBeInTheDocument();
-    expect(page.getByRole('menuitem', { name: 'delete' }).query()).toBeNull();
+    expect(page.getByLabelText('delete').query()).toBeNull();
   });
 
   it('Given a space editor with a MIXED selection, When the toolbar renders, Then both Share and Add-to-album are shown', async () => {
@@ -265,7 +270,7 @@ describe('SelectionToolbar', () => {
     // Shown regardless of ownership: a favorite is the viewer's own `asset_favorite` row (#763).
     await expect.element(page.getByLabelText('to_favorite')).toBeInTheDocument();
     // Still hidden: this mutates every selected asset and the server refuses the non-owned ones.
-    expect(page.getByRole('menuitem', { name: 'delete' }).query()).toBeNull();
+    expect(page.getByLabelText('delete').query()).toBeNull();
   });
 
   it("Given a space editor selecting only other members' assets, When the toolbar renders, Then both Add-to-album and Share are shown — the space role covers both (#764 contribution, #1018 link)", async () => {

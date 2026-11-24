@@ -43,3 +43,50 @@ describe('mapAsset — per-user favorite (#763)', () => {
   // reach non-owners or anonymous callers. The fail-safe-false coverage above (row without
   // isFavoriteForUser) and favorite-grep-gate.spec.ts cover it.
 });
+
+describe('mapAsset — detailed address', () => {
+  const address = '中国湖北省武汉市硚口区长丰街道解放大道22号';
+
+  it('projects the detailed address with the original GPS and geographic filter fields', () => {
+    const asset = getForAsset(
+      AssetFactory.from()
+        .exif({
+          formattedAddress: address,
+          latitude: 30.6,
+          longitude: 114.18,
+          city: '武汉市',
+          state: '湖北省',
+          country: '中国',
+        })
+        .build(),
+    );
+    expect(mapAsset(asset, { auth: authStub.user1 }).exifInfo).toMatchObject({
+      formattedAddress: address,
+      latitude: 30.6,
+      longitude: 114.18,
+      city: '武汉市',
+      state: '湖北省',
+      country: '中国',
+    });
+  });
+
+  it('preserves a saved address for a shared link that permits EXIF', () => {
+    const asset = getForAsset(AssetFactory.from().exif({ formattedAddress: address }).build());
+    const auth = {
+      ...authStub.adminSharedLink,
+      sharedLink: { ...authStub.adminSharedLink.sharedLink!, showExif: true },
+    };
+    expect(mapAsset(asset, { auth }).exifInfo?.formattedAddress).toBe(address);
+  });
+
+  it('does not leak the address when shared-link EXIF is hidden', () => {
+    const asset = getForAsset(AssetFactory.from().exif({ formattedAddress: address }).build());
+    const auth = {
+      ...authStub.adminSharedLink,
+      sharedLink: { ...authStub.adminSharedLink.sharedLink!, showExif: false },
+    };
+    const result = mapAsset(asset, { auth });
+    expect(result.hasMetadata).toBe(false);
+    expect(result).not.toHaveProperty('exifInfo');
+  });
+});

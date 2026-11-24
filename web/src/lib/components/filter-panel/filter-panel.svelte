@@ -38,6 +38,7 @@
     config: FilterPanelConfig;
     timeBuckets: Array<{ timeBucket: string; count: number }>;
     filters?: FilterState;
+    temporalSortOrder?: FilterState['sortOrder'];
     personNames?: Map<string, string>;
     tagNames?: Map<string, string>;
     onFiltersChange?: (filters: FilterState) => void;
@@ -57,6 +58,7 @@
   let {
     config,
     timeBuckets,
+    temporalSortOrder = 'asc',
     filters = $bindable(createFilterState()),
     personNames,
     tagNames,
@@ -837,6 +839,7 @@
                     dateBefore={filters.dateBefore}
                     selectedYear={filters.selectedYear}
                     selectedMonth={filters.selectedMonth}
+                    sortOrder={temporalSortOrder}
                     onCustomRangeChange={handleCustomDateRangeChange}
                     onYearSelect={handleYearSelect}
                     onMonthSelect={handleMonthSelect}
@@ -856,6 +859,8 @@
                     selectedCountry={filters.country}
                     selectedState={filters.state}
                     context={locationFilterContext}
+                    scopeKey={config.locationScopeKey?.()}
+                    onStateFetch={providers.states}
                     onCityFetch={async (country, ctx) => {
                       if (providers.cities) {
                         return providers.cities(country, ctx);

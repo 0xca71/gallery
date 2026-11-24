@@ -331,6 +331,12 @@ export class QueueMaintenanceRepository {
   /** Gallery job options, consulted before upstream's switch; null leaves the job to upstream. */
   getJobOptions(item: JobItem): JobsOptions | null {
     switch (item.name) {
+      case JobName.AssetEditSave: {
+        return { jobId: item.data.id, removeOnComplete: true, removeOnFail: true };
+      }
+      case JobName.AssetDelete: {
+        return { delay: item.data.delay };
+      }
       case JobName.FacialRecognitionQueueAll: {
         return { jobId: JobName.FacialRecognitionQueueAll, removeOnComplete: true };
       }

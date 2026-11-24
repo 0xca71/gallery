@@ -1680,7 +1680,7 @@ export class SharedSpaceService extends BaseService {
     return this.sharedSpaceRepository.getLinkedAlbumsContainingAssets(spaceId, dto.assetIds);
   }
 
-  async getMapMarkers(auth: AuthDto, id: string) {
+  async getMapMarkers(auth: AuthDto, id: string): Promise<MapMarkerResponseDto[]> {
     await this.requireAccess({ auth, permission: Permission.SharedSpaceRead, ids: [id] });
 
     const markers = await this.sharedSpaceRepository.getMapMarkers(id);
@@ -1691,6 +1691,7 @@ export class SharedSpaceService extends BaseService {
       city: marker.city ?? null,
       state: marker.state ?? null,
       country: marker.country ?? null,
+      formattedAddress: marker.formattedAddress ?? null,
     }));
   }
 
@@ -1783,6 +1784,7 @@ export class SharedSpaceService extends BaseService {
       city: marker.city ?? null,
       state: marker.state ?? null,
       country: marker.country ?? null,
+      formattedAddress: marker.formattedAddress ?? null,
     }));
   }
 

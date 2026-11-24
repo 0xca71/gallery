@@ -9,6 +9,7 @@ import {
 } from '#lib/components/filter-panel/filter-panel.ts';
 import { getTimelineTopVisibleAnchor } from '#lib/gallery/timeline/timeline-anchor.ts';
 import { assetMultiSelectManager } from '#lib/managers/asset-multi-select-manager.svelte.ts';
+import { assetViewerManager } from '#lib/managers/asset-viewer-manager.svelte.ts';
 import {
   registerSelectionContext,
   type RegisterSelectionContextOptions,
@@ -28,6 +29,8 @@ import { isEnabled } from '#lib/utils.ts';
 import { withNameCapture } from '#lib/utils/filter-name-capture.ts';
 import { resolveFilterNames } from '#lib/utils/filter-name-resolution.ts';
 import { buildFilterStateUrl, isFilterStateUrlUnchanged, withoutAtParam } from '#lib/utils/filter-target.ts';
+import { handleError } from '#lib/utils/handle-error.ts';
+import { navigate } from '#lib/utils/navigation.ts';
 import { handlePhotosRemoveFilter } from '#lib/utils/photos-filter-options.ts';
 import {
   removeSearchResults,
@@ -44,22 +47,22 @@ import {
   buildSmartSearchFacetsParams,
   mapSmartSearchFacetsToFilterSuggestions,
 } from '#lib/utils/space-search.ts';
+import { pickRandomTimelineAsset } from '#lib/utils/timeline-random-jump.ts';
 import { clearTimelineTemporalFilter } from '#lib/utils/timeline-temporal-filters.ts';
-import {
-  getTimelineBucketZoomTarget,
-  getTimelineManagerTimeBuckets,
-  type ActivatableTimelineBucket,
-} from '#lib/utils/timeline-zoom-navigation.ts';
+import { getTimelineBucketZoomTarget, type ActivatableTimelineBucket } from '#lib/utils/timeline-zoom-navigation.ts';
 import { consumeTypedSearchNamesInto } from '#lib/utils/typed-search/typed-search-name-cache.ts';
 import {
+  TimeBucketSize,
+  getTimeBuckets,
   searchSmartFacets,
   type AssetResponseDto,
   type AssetVisibility,
   type SmartSearchFacetsResponseDto,
 } from '@immich/sdk';
-import { modalManager, type ActionItem } from '@immich/ui';
+import { modalManager, toastManager, type ActionItem } from '@immich/ui';
 import { mapValues } from 'lodash-es';
-import { untrack } from 'svelte';
+import { tick, untrack } from 'svelte';
+import { t } from 'svelte-i18n';
 import { SvelteMap } from 'svelte/reactivity';
 import { get } from 'svelte/store';
 import { goto } from '$app/navigation';
@@ -76,6 +79,7 @@ type TimeBucket = { timeBucket: string; count: number };
 export type FilteredTimelineConfig = {
   /** Panel key prefix and the `gallery-filter-visible-sections-<name>` storage key. */
   name: string;
+  randomJump?: boolean;
   /** Overrides the panel's section-visibility storage key. */
   storageKey?: string;
   /** Id of the entity a persistent route component shows (space, album); remounts the panel. */
@@ -157,6 +161,13 @@ export class FilteredTimelineController {
   filters = $state<FilterState>(createFilterState());
   query = $state('');
   isLoading = $state(false);
+  isRandomJumping = $state(false);
+  #randomJumpSequence = 0;
+  #pickerBuckets = $state<TimeBucket[]>([]);
+  readonly pickerOptions = $derived.by(() => ({
+    ...this.config.timelineOptions({ ...this.filters, selectedYear: undefined, selectedMonth: undefined }),
+    bucketSize: TimeBucketSize.Month,
+  }));
   /** Loaded smart-search results; the multi-select toolbar acts on these in query mode (#908). */
   searchResults = $state<AssetResponseDto[]>([]);
   /** Bumped to re-run the search (undo-delete restores the removed assets). */
@@ -217,6 +228,39 @@ export class FilteredTimelineController {
       });
     }
     $effect(() => this.#onUrlChange());
+    $effect(() => {
+      const options = this.pickerOptions;
+      if (this.showSearchResults || this.config.browseTimeBuckets) {
+        return;
+      }
+      const controller = new AbortController();
+      void getTimeBuckets(options, { signal: controller.signal })
+        .then((buckets) => {
+          if (!controller.signal.aborted) {
+            this.#pickerBuckets = buckets;
+          }
+        })
+        .catch((error: unknown) => {
+          if (!controller.signal.aborted) {
+            console.error('Failed to fetch temporal picker buckets:', error);
+          }
+        });
+      return () => controller.abort();
+    });
+    $effect(() => {
+      this.#randomContext();
+      void this.showSearchResults;
+      void this.grouping;
+      void assetMultiSelectManager.selectionActive;
+      void assetViewerManager.isViewing;
+      untrack(() => {
+        this.#randomJumpSequence++;
+        this.isRandomJumping = false;
+      });
+    });
+    $effect(() => () => {
+      this.#randomJumpSequence++;
+    });
   }
 
   /** Remount key for the panel: a mode or query switch swaps its whole suggestions provider. */
@@ -335,6 +379,75 @@ export class FilteredTimelineController {
     this.temporalAnchor = undefined;
   }
 
+  handleRandomJump = async () => {
+    const manager = this.#timeline();
+    if (
+      !this.config.randomJump ||
+      this.isRandomJumping ||
+      this.query.trim().length > 0 ||
+      assetMultiSelectManager.selectionActive ||
+      assetViewerManager.isViewing ||
+      !manager
+    ) {
+      return;
+    }
+    const context = this.#randomContext();
+    this.temporalAnchor = undefined;
+    this.grouping = 'day';
+    await tick();
+    if (
+      context !== this.#randomContext() ||
+      manager !== this.#timeline() ||
+      this.query.trim().length > 0 ||
+      assetMultiSelectManager.selectionActive ||
+      assetViewerManager.isViewing
+    ) {
+      return;
+    }
+    const sequence = ++this.#randomJumpSequence;
+    this.isRandomJumping = true;
+    const isCurrent = () =>
+      sequence === this.#randomJumpSequence &&
+      context === this.#randomContext() &&
+      manager === this.#timeline() &&
+      this.grouping === 'day' &&
+      this.query.trim().length === 0 &&
+      !assetMultiSelectManager.selectionActive &&
+      !assetViewerManager.isViewing;
+    try {
+      await manager.initTask.waitUntilCompletion();
+      if (!isCurrent()) {
+        return;
+      }
+      if (!manager.isInitializedForOptions({ ...this.#timelineOptions(), grouping: this.grouping })) {
+        throw new Error('The filtered timeline is not ready');
+      }
+      if (manager.assetCount === 0) {
+        toastManager.info(get(t)('no_results'));
+        return;
+      }
+      const asset = await pickRandomTimelineAsset(manager, page.url.searchParams.get('at'), isCurrent);
+      if (!isCurrent()) {
+        return;
+      }
+      if (!asset) {
+        throw new Error('The random timeline asset could not be loaded');
+      }
+      await navigate(
+        { targetRoute: 'current', assetId: null, assetGridRouteSearchParams: { at: asset.id } },
+        { forceNavigate: true, reset: false },
+      );
+    } catch (error) {
+      if (isCurrent()) {
+        handleError(error, get(t)('errors.failed_to_load_assets'));
+      }
+    } finally {
+      if (sequence === this.#randomJumpSequence) {
+        this.isRandomJumping = false;
+      }
+    }
+  };
+
   // --- grouping and zoom -----------------------------------------------------------------------
 
   onTimelineBucketActivate = (bucket: ActivatableTimelineBucket) => {
@@ -446,12 +559,24 @@ export class FilteredTimelineController {
     return this.config.isBrowse?.() ?? true;
   }
 
+  #randomContext() {
+    return JSON.stringify([
+      page.url.pathname,
+      withoutAtParam(page.url.search),
+      this.query,
+      this.filters,
+      this.config.entityKey?.(),
+      this.config.scope(),
+      this.#timelineOptions(),
+    ]);
+  }
+
   #timelineOptions() {
     return this.config.timelineOptions(this.filters);
   }
 
   #browseTimeBuckets() {
-    return this.config.browseTimeBuckets?.() ?? getTimelineManagerTimeBuckets(this.#timeline());
+    return this.config.browseTimeBuckets?.() ?? this.#pickerBuckets;
   }
 
   #urlToken() {
@@ -616,6 +741,13 @@ export class FilteredTimelineController {
 
     const panelConfig: FilterPanelConfig = {
       ...browse,
+      providers: {
+        ...browse.providers,
+        states: (country, context) =>
+          this.showSearchResults ? Promise.resolve([]) : browseList(browse.providers?.states?.(country, context)),
+      },
+      locationScopeKey: () =>
+        JSON.stringify([this.panelKey, this.config.scope(), this.timelineQuery.libraryView, get(lang)]),
       suggestionsProvider: (filters) =>
         this.showSearchResults ? facetSuggestions(filters) : browse.suggestionsProvider!(filters),
     };
@@ -626,8 +758,10 @@ export class FilteredTimelineController {
         ...browse.providers,
         cities: (country, context) =>
           this.showSearchResults
-            ? facetList({ country }, 'cities')
+            ? facetList({ country, state: context?.state, city: undefined }, 'cities')
             : browseList(browse.providers?.cities?.(country, context)),
+        states: (country, context) =>
+          this.showSearchResults ? Promise.resolve([]) : browseList(browse.providers?.states?.(country, context)),
         cameraModels: (make, context) =>
           this.showSearchResults
             ? facetList({ make }, 'cameraModels')

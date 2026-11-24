@@ -269,6 +269,9 @@ export class LibraryService extends BaseService {
     await Promise.all(
       job.paths.map(async (path) => {
         try {
+          if (await this.assetEditSaveRepository.isPathSaving(path)) {
+            return;
+          }
           const asset = await this.processEntity(path, library.ownerId, job.libraryId);
           assetImports.push(asset);
         } catch (error) {
@@ -492,6 +495,7 @@ export class LibraryService extends BaseService {
     const assetIdsToOnline: string[] = [];
     const trashedAssetIdsToOnline: string[] = [];
     const assetIdsToUpdate: string[] = [];
+    const savingAssetIds = await this.assetEditSaveRepository.getSavingAssetIds(assets.map((asset) => asset.id));
 
     this.logger.debug(`Checking batch of ${assets.length} existing asset(s) in library ${job.libraryId}`);
 
@@ -502,6 +506,9 @@ export class LibraryService extends BaseService {
     for (let i = 0; i < assets.length; i++) {
       const asset = assets[i];
       const stat = stats[i];
+      if (savingAssetIds.has(asset.id)) {
+        continue;
+      }
       const action = this.checkExistingAsset(asset, stat);
       switch (action) {
         case AssetSyncResult.DO_NOTHING: {
@@ -684,6 +691,13 @@ export class LibraryService extends BaseService {
     // This is only for handling file unlink events via the file watcher
     this.logger.verbose(`Deleting asset(s) ${job.paths} from library ${job.libraryId}`);
     for (const assetPath of job.paths) {
+      // Atomic publication emits unlink/add. A present replacement must retain its existing asset identity.
+      if (
+        (await this.assetEditSaveRepository.isPathSaving(assetPath)) ||
+        (await this.storageRepository.checkFileExists(assetPath))
+      ) {
+        continue;
+      }
       const asset = await this.assetRepository.getByLibraryIdAndOriginalPath(job.libraryId, assetPath);
       if (asset) {
         await this.assetRepository.remove(asset);

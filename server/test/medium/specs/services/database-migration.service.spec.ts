@@ -187,6 +187,44 @@ describe('Database Migration Scenarios', { timeout: 60_000 }, () => {
       await expectIdempotentBoot(db);
     }));
 
+  it('preserves custom file-save recovery rows when moving their original names to the Gallery ledger', () =>
+    withDatabase('migration_test_custom_edit_save', async (db) => {
+      const { error } = await preSplitGalleryMigrator(db).migrateTo('1793500000000-AddAssetEditSave');
+      expect(error).toBeUndefined();
+      const ownerId = '00000000-0000-4000-8000-000000000001';
+      const operationId = '00000000-0000-4000-8000-000000000002';
+      const sourceId = '00000000-0000-4000-8000-000000000003';
+      const journal = { originalPath: '/library/photo.jpg', stagePath: '/library/.photo-stage.jpg' };
+      // SQL admits the historical row shape without requiring the current schema's new adjust column.
+      await sql`INSERT INTO "cluster_group" ("id") VALUES (${ownerId})`.execute(db);
+      await sql`INSERT INTO "user" ("id", "email", "name", "clusterGroupId")
+        VALUES (${ownerId}, 'migration-custom@example.com', 'Custom migration owner', ${ownerId})`.execute(db);
+      await sql`INSERT INTO "asset_edit_save"
+        ("id", "ownerId", "assetId", "idempotencyKey", "mode", "status", "expectedVersion", "edits", "journal")
+        VALUES (${operationId}, ${ownerId}, ${sourceId}, ${operationId}, 'overwrite', 'publishing',
+          '2026-11-01T00:00:00Z', '[]'::jsonb, ${journal}::jsonb)`.execute(db);
+
+      await createRepo(db).runMigrations();
+
+      await expectSplitLedgers(db);
+      const operation = await db
+        .selectFrom('asset_edit_save')
+        .selectAll()
+        .where('id', '=', operationId)
+        .executeTakeFirstOrThrow();
+      expect(operation).toMatchObject({
+        id: operationId,
+        assetId: sourceId,
+        status: 'publishing',
+        journal,
+        adjust: null,
+      });
+      const columns = await sql<{ column_name: string }>`SELECT column_name FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'asset_exif' AND column_name = 'formattedAddress'`.execute(db);
+      expect(columns.rows).toEqual([{ column_name: 'formattedAddress' }]);
+      await expectIdempotentBoot(db);
+    }));
+
   // Scenario C2: a Gallery database that recorded ChangeDurationToInteger only under its pre-rename
   // name. Without a rename the old row has no file and Kysely refuses to boot; the bootstrap renames it
   // so the migration's own already-integer guard is never relied on.

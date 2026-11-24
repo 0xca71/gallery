@@ -24,6 +24,7 @@ import {
   isAssetResponseDto,
   setDifference,
   toTimelineAsset,
+  type TimelineDate,
   type TimelineDateTime,
   type TimelineYearMonth,
 } from '#lib/utils/timeline-util.ts';
@@ -309,6 +310,33 @@ export class TimelineManager extends VirtualScrollManager {
     }
   }
 
+  async ensureScrubberMonthGeometry(yearMonth: TimelineYearMonth) {
+    if (this.grouping !== 'day') {
+      return;
+    }
+    const month = getTimelineMonthByDate(this, yearMonth);
+    if (!month) {
+      return;
+    }
+    await this.loadTimelineMonth(yearMonth, { cancelable: false });
+    this.clearDeferredLayout(month);
+    this.updateViewportGeometry(false);
+  }
+
+  getScrubberDateAtMonthScrollPercent(yearMonth: TimelineYearMonth, percent: number): TimelineDate | undefined {
+    if (this.grouping !== 'day') {
+      return;
+    }
+    const month = getTimelineMonthByDate(this, yearMonth);
+    if (!month?.isLoaded || !month.isHeightActual || month.timelineDays.length === 0) {
+      return;
+    }
+    const monthY = clamp(percent, 0, 0.999999) * month.height;
+    const day =
+      month.timelineDays.find((day) => monthY < day.top + this.headerHeight + day.height) ?? month.timelineDays.at(-1)!;
+    return { ...yearMonth, day: day.day };
+  }
+
   async #initializeTimelineMonths(signal: AbortSignal, sequence: number) {
     const timebuckets = await this.bucketLayout.fetch(this.#options, this.grouping, signal);
     if (signal.aborted || this.#destroyed || sequence !== this.#initSequence) {
@@ -339,12 +367,11 @@ export class TimelineManager extends VirtualScrollManager {
   user is typing in. Gating on the loaded options closing that window.
   */
   isEmptyForOptions(options: TimelineManagerOptions): boolean {
-    return (
-      this.isInitialized &&
-      this.assetCount === 0 &&
-      this.#options !== TimelineManager.#INIT_OPTIONS &&
-      isEqual(this.#options, options)
-    );
+    return this.assetCount === 0 && this.isInitializedForOptions(options);
+  }
+
+  isInitializedForOptions(options: TimelineManagerOptions): boolean {
+    return this.isInitialized && this.#options !== TimelineManager.#INIT_OPTIONS && isEqual(this.#options, options);
   }
 
   async updateOptions(options: TimelineManagerOptions) {

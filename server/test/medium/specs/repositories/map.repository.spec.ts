@@ -48,6 +48,7 @@ describe(MapRepository.name, () => {
           city: 'Paris',
           state: null,
           country: 'France',
+          formattedAddress: '10 Avenue de Paris',
         })
         .execute();
       await ctx.newSharedSpaceAsset({ spaceId: space.id, assetId: asset.id });
@@ -55,7 +56,12 @@ describe(MapRepository.name, () => {
       const results = await sut.getMapMarkers(member.id, [member.id], [], { timelineSpaceIds: [space.id] });
 
       expect(results).toHaveLength(1);
-      expect(results[0]).toMatchObject({ id: asset.id, lat: 48.8566, lon: 2.3522 });
+      expect(results[0]).toMatchObject({
+        id: asset.id,
+        lat: 48.8566,
+        lon: 2.3522,
+        formattedAddress: '10 Avenue de Paris',
+      });
     });
 
     it('should include a library-linked asset via shared_space_library for a member', async () => {

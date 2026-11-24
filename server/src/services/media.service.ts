@@ -144,6 +144,15 @@ export class MediaService extends BaseService {
 
   @OnJob({ name: JobName.AssetFileMigration, queue: QueueName.Migration })
   async handleAssetMigration({ id }: JobOf<JobName.AssetFileMigration>): Promise<JobStatus> {
+    return this.databaseRepository.withAssetLock(id, async () => {
+      if (await this.assetEditSaveRepository.isSaving(id, false)) {
+        return JobStatus.Skipped;
+      }
+      return this.handleAssetMigrationUnlocked({ id });
+    });
+  }
+
+  private async handleAssetMigrationUnlocked({ id }: JobOf<JobName.AssetFileMigration>): Promise<JobStatus> {
     const { image } = await this.getConfig({ withCache: true });
     const asset = await this.assetJobRepository.getForMigrationJob(id);
     if (!asset) {
@@ -159,7 +168,16 @@ export class MediaService extends BaseService {
   }
 
   @OnJob({ name: JobName.AssetEditThumbnailGeneration, queue: QueueName.Editor })
-  async handleAssetEditThumbnailGeneration({
+  async handleAssetEditThumbnailGeneration(job: JobOf<JobName.AssetEditThumbnailGeneration>): Promise<JobStatus> {
+    return this.databaseRepository.withAssetLock(job.id, async () => {
+      if (await this.assetEditSaveRepository.isSaving(job.id, false)) {
+        return JobStatus.Skipped;
+      }
+      return this.handleAssetEditThumbnailGenerationUnlocked(job);
+    });
+  }
+
+  private async handleAssetEditThumbnailGenerationUnlocked({
     id,
     ...editJob
   }: JobOf<JobName.AssetEditThumbnailGeneration>): Promise<JobStatus> {
@@ -215,6 +233,15 @@ export class MediaService extends BaseService {
 
   @OnJob({ name: JobName.AssetGenerateThumbnails, queue: QueueName.ThumbnailGeneration })
   async handleGenerateThumbnails({ id }: JobOf<JobName.AssetGenerateThumbnails>): Promise<JobStatus> {
+    return this.databaseRepository.withAssetLock(id, async () => {
+      if (await this.assetEditSaveRepository.isSaving(id, false)) {
+        return JobStatus.Skipped;
+      }
+      return this.handleGenerateThumbnailsUnlocked({ id });
+    });
+  }
+
+  private async handleGenerateThumbnailsUnlocked({ id }: JobOf<JobName.AssetGenerateThumbnails>): Promise<JobStatus> {
     const asset = await this.assetJobRepository.getForGenerateThumbnailJob(id);
     const config = await this.getConfig({ withCache: true });
 

@@ -5132,7 +5132,15 @@ describe(SharedSpaceRepository.name, () => {
       const { space } = await ctx.newSharedSpace({ createdById: owner.id });
       await ctx.newSharedSpaceMember({ spaceId: space.id, userId: member.id });
       const { asset } = await ctx.newAsset({ ownerId: owner.id, visibility: AssetVisibility.Timeline });
-      await ctx.database.insertInto('asset_exif').values({ assetId: asset.id, latitude: 20, longitude: 20 }).execute();
+      await ctx.database
+        .insertInto('asset_exif')
+        .values({
+          assetId: asset.id,
+          latitude: 20,
+          longitude: 20,
+          formattedAddress: 'saved detailed address',
+        })
+        .execute();
       await ctx.newSharedSpaceAsset({ spaceId: space.id, assetId: asset.id });
 
       const results = await sut.getFilteredMapMarkers({
@@ -5141,7 +5149,9 @@ describe(SharedSpaceRepository.name, () => {
         visibility: AssetVisibility.Timeline,
       });
 
-      expect(results.find((r) => r.id === asset.id)).toBeDefined();
+      expect(results.find((r) => r.id === asset.id)?.formattedAddress).toBe('saved detailed address');
+      const mapMarkers = await sut.getMapMarkers(space.id);
+      expect(mapMarkers.find((r) => r.id === asset.id)?.formattedAddress).toBe('saved detailed address');
     });
 
     it('should include a library-linked asset via timelineSpaceIds (row 4)', async () => {

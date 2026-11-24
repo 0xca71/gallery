@@ -525,7 +525,20 @@ export class PersonService extends BaseService {
   }
 
   @OnJob({ name: JobName.AssetDetectFaces, queue: QueueName.FaceDetection })
-  async handleDetectFaces({ id, force }: JobOf<JobName.AssetDetectFaces>): Promise<JobStatus> {
+  async handleDetectFaces({ id, force, refreshEmbeddings }: JobOf<JobName.AssetDetectFaces>): Promise<JobStatus> {
+    return this.databaseRepository.withAssetLock(id, async () => {
+      if (await this.assetEditSaveRepository.isSaving(id, false)) {
+        return JobStatus.Skipped;
+      }
+      return this.handleDetectFacesUnlocked({ id, force, refreshEmbeddings });
+    });
+  }
+
+  private async handleDetectFacesUnlocked({
+    id,
+    force,
+    refreshEmbeddings,
+  }: JobOf<JobName.AssetDetectFaces>): Promise<JobStatus> {
     const { machineLearning } = await this.getConfig({ withCache: true });
     if (!isFacialRecognitionEnabled(machineLearning)) {
       return JobStatus.Skipped;
@@ -555,6 +568,7 @@ export class PersonService extends BaseService {
     const facesToAdd: (Insertable<AssetFaceTable> & { id: string })[] = [];
     const embeddings: FaceSearchTable[] = [];
     const mlFaceIds = new Set<string>();
+    const refreshedUnassignedFaceIds: string[] = [];
 
     for (const face of asset.faces) {
       // Pet faces carry the same machine-learning sourceType as human faces, so without the isPet
@@ -573,8 +587,11 @@ export class PersonService extends BaseService {
       // prefer metadata faces over machine learning duplicates
       const match = matches.find((face) => face.sourceType !== SourceType.MachineLearning) ?? matches[0];
 
-      if (match && !mlFaceIds.delete(match.id)) {
+      if (match && (!mlFaceIds.delete(match.id) || refreshEmbeddings)) {
         embeddings.push({ faceId: match.id, embedding });
+        if (refreshEmbeddings && match.sourceType === SourceType.MachineLearning && !match.personGroupId) {
+          refreshedUnassignedFaceIds.push(match.id);
+        }
       } else if (!match) {
         const faceId = this.cryptoRepository.randomUUID();
         facesToAdd.push({
@@ -614,6 +631,15 @@ export class PersonService extends BaseService {
       }
     } else if (embeddings.length > 0) {
       this.logger.log(`Added ${embeddings.length} face embeddings for asset ${id}`);
+    }
+
+    if (refreshedUnassignedFaceIds.length > 0) {
+      await this.jobRepository.queueAll(
+        refreshedUnassignedFaceIds.map((faceId) => ({
+          name: JobName.FacialRecognition,
+          data: { id: faceId },
+        })),
+      );
     }
 
     await this.assetRepository.upsertJobStatus({ assetId: asset.id, facesRecognizedAt: new Date() });
@@ -785,7 +811,24 @@ export class PersonService extends BaseService {
   }
 
   @OnJob({ name: JobName.FacialRecognition, queue: QueueName.FacialRecognition })
-  async handleRecognizeFaces({
+  async handleRecognizeFaces(job: JobOf<JobName.FacialRecognition>): Promise<JobStatus> {
+    const { machineLearning } = await this.getConfig({ withCache: true });
+    if (!isFacialRecognitionEnabled(machineLearning)) {
+      return JobStatus.Skipped;
+    }
+    const face = await this.personRepository.getFaceForFacialRecognitionJob(job.id);
+    if (!face) {
+      return this.handleRecognizeFacesUnlocked(job);
+    }
+    return this.databaseRepository.withAssetLock(face.assetId, async () => {
+      if (await this.assetEditSaveRepository.isSaving(face.assetId, false)) {
+        return JobStatus.Skipped;
+      }
+      return this.handleRecognizeFacesUnlocked(job);
+    });
+  }
+
+  private async handleRecognizeFacesUnlocked({
     id,
     deferred,
     skipSharedSpaceMatch,

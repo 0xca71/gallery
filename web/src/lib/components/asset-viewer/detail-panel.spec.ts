@@ -447,12 +447,14 @@ describe('DetailPanel', () => {
         longitude: lon,
         city: 'Paris',
         country: 'France',
+        formattedAddress: '10 Avenue de Paris',
       },
     });
 
     await renderWithTooltips(DetailPanel, { asset });
 
     await expect.element(page.getByTestId('map-popup')).toBeInTheDocument();
+    await expect.element(page.getByTestId('map-popup').getByText('10 Avenue de Paris')).toBeInTheDocument();
 
     const googleLink = page.getByRole('link', { name: 'open_in_google_maps' });
     const appleLink = page.getByRole('link', { name: 'open_in_apple_maps' });

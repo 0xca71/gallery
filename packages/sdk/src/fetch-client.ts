@@ -1468,6 +1468,8 @@ export type MapMarkerResponseDto = {
     city: string | null;
     /** Country name */
     country: string | null;
+    /** Detailed display address */
+    formattedAddress?: string | null;
     /** Asset ID */
     id: string;
     /** Latitude */
@@ -1498,6 +1500,8 @@ export type ExifResponseDto = {
     fileSizeInByte?: number | null;
     /** Focal length in mm */
     focalLength?: number | null;
+    /** Detailed display address */
+    formattedAddress?: string | null;
     /** ISO sensitivity */
     iso?: number | null;
     /** GPS latitude */
@@ -1938,6 +1942,10 @@ export type UpdateAssetDto = {
     rating?: number | null;
     visibility?: AssetVisibility;
 };
+export type AssetAddressResponseDto = {
+    /** Detailed address, or null when unavailable */
+    formattedAddress: string | null;
+};
 export type AssetImageAdjustResponseDto = {
     /** Contrast, -100 to 100 (CSS contrast, 0 = unchanged) */
     contrast: number;
@@ -1975,6 +1983,35 @@ export type RotateParameters = {
 export type MirrorParameters = {
     axis: MirrorAxis;
 };
+export type AssetEditActionItemDto = {
+    action: AssetEditAction;
+    /** List of edit actions to apply (crop, rotate, or mirror) */
+    parameters: CropParameters | RotateParameters | MirrorParameters;
+};
+export type AssetEditSaveCreateDto = {
+    /** Colour adjustment to bake into the saved original; omitted uses the current saved adjustment */
+    adjust?: AssetImageAdjustDto;
+    edits: AssetEditActionItemDto[];
+    /** Asset updatedAt when the editor was opened */
+    expectedVersion: string;
+    /** Reuse this key when retrying the same save */
+    idempotencyKey: string;
+    mode: AssetEditSaveMode;
+};
+export type AssetEditSaveResponseDto = {
+    assetId: string;
+    error: string | null;
+    id: string;
+    mode: AssetEditSaveMode;
+    resultAssetId: string | null;
+    status: AssetEditSaveStatus;
+};
+export type AssetEditSaveCapabilitiesDto = {
+    canCopy: boolean;
+    canOverwrite: boolean;
+    outputFormat: (AssetEditSaveFormat) | null;
+    overwriteUnavailableReason: string | null;
+};
 export type AssetEditActionItemResponseDto = {
     action: AssetEditAction;
     /** Asset edit ID */
@@ -1987,11 +2024,6 @@ export type AssetEditsResponseDto = {
     assetId: string;
     /** List of edit actions applied to the asset */
     edits: AssetEditActionItemResponseDto[];
-};
-export type AssetEditActionItemDto = {
-    action: AssetEditAction;
-    /** List of edit actions to apply (crop, rotate, or mirror) */
-    parameters: CropParameters | RotateParameters | MirrorParameters;
 };
 export type AssetEditsCreateDto = {
     /** List of edit actions to apply (crop, rotate, or mirror) */
@@ -3111,6 +3143,7 @@ export type PublicConfigDto = {
     passkey: PublicConfigPasskeyDto;
     passwordLogin: PublicConfigPasswordLoginDto;
     server: PublicConfigServerDto;
+    webDeleteToastThreshold: number;
 };
 export type QueueJobTypeCountsDto = {
     /** Number of sampled active jobs with this name */
@@ -4076,6 +4109,8 @@ export type ServerConfigDto = {
     trashDays: number;
     /** Delay in days before deleted users are permanently removed */
     userDeleteDelay: number;
+    /** Number of selected assets above which delete notifications stay open */
+    webDeleteToastThreshold: number;
 };
 export type ServerFeaturesDto = {
     /** Whether the backups feature is enabled */
@@ -7159,6 +7194,20 @@ export function updateAsset({ id, updateAssetDto }: {
     })));
 }
 /**
+ * Ensure asset detailed address
+ */
+export function ensureAssetAddress({ id }: {
+    id: string;
+}, opts?: Oazapfts.RequestOpts) {
+    return oazapfts.ok(oazapfts.fetchJson<{
+        status: 200;
+        data: AssetAddressResponseDto;
+    }>(`/assets/${encodeURIComponent(id)}/address`, {
+        ...opts,
+        method: "POST"
+    }));
+}
+/**
  * Remove the colour adjustment of an image
  */
 export function removeAssetAdjust({ id }: {
@@ -7217,6 +7266,49 @@ export function viewAssetDepth({ id, key, slug }: {
     }));
 }
 /**
+ * Save image edits to a new or original file
+ */
+export function saveAssetEdits({ id, assetEditSaveCreateDto }: {
+    id: string;
+    assetEditSaveCreateDto: AssetEditSaveCreateDto;
+}, opts?: Oazapfts.RequestOpts) {
+    return oazapfts.ok(oazapfts.fetchJson<{
+        status: 201;
+        data: AssetEditSaveResponseDto;
+    }>(`/assets/${encodeURIComponent(id)}/edit-save`, oazapfts.json({
+        ...opts,
+        method: "POST",
+        body: assetEditSaveCreateDto
+    })));
+}
+/**
+ * Get image file save capabilities
+ */
+export function getAssetEditSaveCapabilities({ id }: {
+    id: string;
+}, opts?: Oazapfts.RequestOpts) {
+    return oazapfts.ok(oazapfts.fetchJson<{
+        status: 200;
+        data: AssetEditSaveCapabilitiesDto;
+    }>(`/assets/${encodeURIComponent(id)}/edit-save/capabilities`, {
+        ...opts
+    }));
+}
+/**
+ * Get an image file save operation
+ */
+export function getAssetEditSave({ id, operationId }: {
+    id: string;
+    operationId: string;
+}, opts?: Oazapfts.RequestOpts) {
+    return oazapfts.ok(oazapfts.fetchJson<{
+        status: 200;
+        data: AssetEditSaveResponseDto;
+    }>(`/assets/${encodeURIComponent(id)}/edit-save/${encodeURIComponent(operationId)}`, {
+        ...opts
+    }));
+}
+/**
  * Remove edits from an existing asset
  */
 export function removeAssetEdits({ id }: {
@@ -7255,6 +7347,20 @@ export function editAsset({ id, assetEditsCreateDto }: {
         method: "PUT",
         body: assetEditsCreateDto
     })));
+}
+/**
+ * Unlink and permanently delete a Live Photo video
+ */
+export function unlinkAndDeleteLivePhoto({ id }: {
+    id: string;
+}, opts?: Oazapfts.RequestOpts) {
+    return oazapfts.ok(oazapfts.fetchJson<{
+        status: 200;
+        data: AssetResponseDto;
+    }>(`/assets/${encodeURIComponent(id)}/live-photo`, {
+        ...opts,
+        method: "DELETE"
+    }));
 }
 /**
  * Get asset metadata
@@ -7349,8 +7455,9 @@ export function downloadAsset({ download, edited, id, key, slug }: {
 /**
  * View asset thumbnail
  */
-export function viewAsset({ edited, id, key, size, slug }: {
+export function viewAsset({ edited, fallback, id, key, size, slug }: {
     edited?: boolean;
+    fallback?: boolean;
     id: string;
     key?: string;
     size?: AssetMediaSize;
@@ -7361,6 +7468,7 @@ export function viewAsset({ edited, id, key, size, slug }: {
         data: Blob;
     }>(`/assets/${encodeURIComponent(id)}/thumbnail${QS.query(QS.explode({
         edited,
+        fallback,
         key,
         size,
         slug
@@ -12776,6 +12884,24 @@ export enum MirrorAxis {
     Horizontal = "horizontal",
     Vertical = "vertical"
 }
+export enum AssetEditSaveMode {
+    Copy = "copy",
+    Overwrite = "overwrite"
+}
+export enum AssetEditSaveStatus {
+    Queued = "queued",
+    Rendering = "rendering",
+    Publishing = "publishing",
+    Processing = "processing",
+    Completed = "completed",
+    Failed = "failed",
+    Conflict = "conflict"
+}
+export enum AssetEditSaveFormat {
+    Jpeg = "jpeg",
+    Png = "png",
+    Webp = "webp"
+}
 export enum AssetMediaSize {
     Original = "original",
     Fullsize = "fullsize",
@@ -13033,7 +13159,8 @@ export enum JobName {
     AssetAnalyzeQualityQueueAll = "AssetAnalyzeQualityQueueAll",
     AssetAnalyzeQuality = "AssetAnalyzeQuality",
     MemoryRuleGenerate = "MemoryRuleGenerate",
-    AssetVideoTrimGenerate = "AssetVideoTrimGenerate"
+    AssetVideoTrimGenerate = "AssetVideoTrimGenerate",
+    AssetEditSave = "AssetEditSave"
 }
 export enum QueueJobStatus {
     Active = "active",

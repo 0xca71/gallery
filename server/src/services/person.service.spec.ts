@@ -2606,6 +2606,40 @@ describe(PersonService.name, () => {
       expectNoFaceDetectionMutation();
     });
 
+    it('refreshes embeddings of IoU-matching ML faces after durable overwrite without a global recognition sweep', async () => {
+      const asset = AssetFactory.from()
+        .file({ type: AssetFileType.Preview, path: '/preview.jpg' })
+        .exif()
+        .face({ personGroupId: factory.uuid() })
+        .build();
+      const face = asset.faces[0];
+      mocks.assetJob.getForDetectFacesJob.mockResolvedValue(getForDetectedFaces(asset));
+      mocks.machineLearning.detectFaces.mockResolvedValue(getAsDetectedFace(face));
+      mocks.person.refreshFaces.mockResolvedValue();
+      expect(await sut.handleDetectFaces({ id: asset.id, refreshEmbeddings: true })).toBe(JobStatus.Success);
+      expect(mocks.person.refreshFaces).toHaveBeenCalledWith([], [], [{ faceId: face.id, embedding: '[1, 2, 3, 4]' }]);
+      expect(mocks.job.queueAll).not.toHaveBeenCalled();
+      expect(mocks.job.queue).not.toHaveBeenCalledWith({
+        name: JobName.FacialRecognitionQueueAll,
+        data: { force: true },
+      });
+    });
+
+    it('requeues recognition only for refreshed unassigned faces after overwrite', async () => {
+      const asset = AssetFactory.from()
+        .file({ type: AssetFileType.Preview, path: '/preview.jpg' })
+        .exif()
+        .face({ personGroupId: null })
+        .build();
+      const face = asset.faces[0];
+      mocks.assetJob.getForDetectFacesJob.mockResolvedValue(getForDetectedFaces(asset));
+      mocks.machineLearning.detectFaces.mockResolvedValue(getAsDetectedFace(face));
+      mocks.person.refreshFaces.mockResolvedValue();
+      expect(await sut.handleDetectFaces({ id: asset.id, refreshEmbeddings: true })).toBe(JobStatus.Success);
+      expect(mocks.job.queueAll).toHaveBeenCalledWith([{ name: JobName.FacialRecognition, data: { id: face.id } }]);
+      expect(mocks.job.queueAll).toHaveBeenCalledTimes(1);
+    });
+
     it.each([
       {
         label: 'missing asset',

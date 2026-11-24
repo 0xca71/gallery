@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { AssetEditSaveRepository } from 'src/gallery/repositories/asset-edit-save.repository.js';
 import { CleanupRepository } from 'src/gallery/repositories/cleanup.repository.js';
 import { DataSaverVideoRepository } from 'src/gallery/repositories/data-saver-video.repository.js';
 import { FaceSearchRepository } from 'src/gallery/repositories/face-search.repository.js';
@@ -18,6 +19,7 @@ import { SpatialSceneRepository } from 'src/gallery/repositories/spatial-scene.r
 import { StorageUsageRepository } from 'src/gallery/repositories/storage-usage.repository.js';
 import { VideoFaceRepository } from 'src/gallery/repositories/video-face.repository.js';
 import { VideoTrimRepository } from 'src/gallery/repositories/video-trim.repository.js';
+import { AmapRepository } from 'src/repositories/amap.repository.js';
 import { AssetFavoriteRepository } from 'src/repositories/asset-favorite.repository.js';
 import { ClassificationRepository } from 'src/repositories/classification.repository.js';
 import { FaceIdentityRepository } from 'src/repositories/face-identity.repository.js';
@@ -62,6 +64,8 @@ export const GALLERY_REPOSITORY_DEPENDENCIES = [
   SpatialSceneRepository,
   DataSaverVideoRepository,
   VideoFaceRepository,
+  AmapRepository,
+  AssetEditSaveRepository,
 ] as const;
 
 // Every fork repository a service needs, injected into upstream's BaseService as one constructor parameter.
@@ -98,5 +102,7 @@ export class GalleryRepositories {
     public spatialSceneRepository: SpatialSceneRepository,
     public dataSaverVideoRepository: DataSaverVideoRepository,
     public videoFaceRepository: VideoFaceRepository,
+    public amapRepository: AmapRepository,
+    public assetEditSaveRepository: AssetEditSaveRepository,
   ) {}
 }

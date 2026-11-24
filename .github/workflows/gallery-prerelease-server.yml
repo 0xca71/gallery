@@ -21,6 +21,7 @@ name: Pre-release Gallery Server
 # The workflow file must exist on that ref for workflow_dispatch to run it there.
 
 on:
+  # Automatic runs disabled for this standalone private fork.
   workflow_dispatch:
     inputs:
       version:
@@ -45,6 +46,7 @@ permissions: {}
 
 jobs:
   version:
+    if: ${{ github.repository == 'open-noodle/gallery' }}
     name: Validate version & resolve commit
     runs-on: ubuntu-latest
     permissions:
@@ -105,6 +107,7 @@ jobs:
           echo "Pre-releasing $INPUT_VERSION from $sha"
 
   build-server:
+    if: ${{ github.repository == 'open-noodle/gallery' }}
     name: Build Server (${{ matrix.platform }})
     needs: version
     runs-on: ${{ matrix.runner }}
@@ -180,6 +183,7 @@ jobs:
           retention-days: 1
 
   merge-server:
+    if: ${{ github.repository == 'open-noodle/gallery' }}
     name: Merge Server Manifest
     needs: [version, build-server]
     runs-on: ubuntu-latest
@@ -215,6 +219,7 @@ jobs:
           docker buildx imagetools create -t "${IMAGE}:${VERSION}" ${sources}
 
   build-ml:
+    if: ${{ github.repository == 'open-noodle/gallery' }}
     name: Build ML ${{ matrix.device }} (${{ matrix.platform }})
     needs: version
     runs-on: ${{ matrix.runner }}
@@ -293,6 +298,7 @@ jobs:
           retention-days: 1
 
   merge-ml:
+    if: ${{ github.repository == 'open-noodle/gallery' }}
     name: Merge ML Manifest (${{ matrix.device }})
     needs: [version, build-ml]
     runs-on: ubuntu-latest
@@ -344,7 +350,7 @@ jobs:
   # never blocks the RC. Uncheck the `build_ml_rocm` dispatch input to skip.
   build-ml-rocm:
     name: Build ML rocm (linux/amd64)
-    if: ${{ inputs.build_ml_rocm }}
+    if: ${{ github.repository == 'open-noodle/gallery' && (inputs.build_ml_rocm) }}
     needs: version
     runs-on: gallery-rocm
     timeout-minutes: 180
@@ -420,7 +426,7 @@ jobs:
 
   merge-ml-rocm:
     name: Merge ML Manifest (rocm)
-    if: ${{ inputs.build_ml_rocm }}
+    if: ${{ github.repository == 'open-noodle/gallery' && (inputs.build_ml_rocm) }}
     needs: [version, build-ml-rocm]
     runs-on: ubuntu-latest
     permissions:
@@ -456,6 +462,7 @@ jobs:
           docker buildx imagetools create -t "${IMAGE}:${VERSION}${SUFFIX}" ${sources}
 
   tag-and-release:
+    if: ${{ github.repository == 'open-noodle/gallery' }}
     name: Create Git Tag and GitHub Pre-release
     needs: [version, merge-server, merge-ml]
     runs-on: ubuntu-latest

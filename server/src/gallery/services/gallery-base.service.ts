@@ -95,6 +95,8 @@ export abstract class GalleryBaseService {
   declare protected spatialSceneRepository: GalleryRepositories['spatialSceneRepository'];
   declare protected dataSaverVideoRepository: GalleryRepositories['dataSaverVideoRepository'];
   declare protected videoFaceRepository: GalleryRepositories['videoFaceRepository'];
+  declare protected amapRepository: GalleryRepositories['amapRepository'];
+  declare protected assetEditSaveRepository: GalleryRepositories['assetEditSaveRepository'];
 
   declare protected identityMergePropagationService: IdentityMergePropagationService;
   declare protected faceAssignmentService: FaceAssignmentService;

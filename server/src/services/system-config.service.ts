@@ -49,7 +49,7 @@ export class SystemConfigService extends BaseService {
 
   async getPublicConfig(): Promise<PublicConfigDto> {
     const config = await this.getConfig({ withCache: false });
-    return mapPublicConfig(config);
+    return mapPublicConfig(config, this.configRepository.getEnv().webDeleteToastThreshold);
   }
 
   getPublicConfigDefaults(): PublicConfigDto {

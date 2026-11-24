@@ -117,6 +117,7 @@ export const envData: EnvData = {
   noColor: false,
 
   peopleStatistics: false,
+  webDeleteToastThreshold: 20,
 };
 
 type MockEnvOverrides = Omit<Partial<EnvData>, 'storage'> & {

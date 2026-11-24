@@ -188,11 +188,22 @@ export class GalleryAssetService extends BaseService {
   }
 
   async setAdjust(auth: AuthDto, id: string, dto: AssetImageAdjustDto): Promise<AssetImageAdjustResponseDto> {
+    return this.databaseRepository.withAssetLock(id, async () => {
+      await this.assetEditSaveRepository.assertNotSaving(id);
+      return this.setAdjustUnlocked(auth, id, dto);
+    });
+  }
+
+  private async setAdjustUnlocked(
+    auth: AuthDto,
+    id: string,
+    dto: AssetImageAdjustDto,
+  ): Promise<AssetImageAdjustResponseDto> {
     await this.requireAccess({ auth, permission: Permission.AssetEditCreate, ids: [id] });
 
     // Web sends all-neutral values when the sliders are back at zero: that removes the adjustment.
     if (isNeutralImageAdjust(dto)) {
-      await this.removeAdjust(auth, id);
+      await this.removeAdjustUnlocked(auth, id);
       return { ...NEUTRAL_IMAGE_ADJUST };
     }
 
@@ -231,6 +242,13 @@ export class GalleryAssetService extends BaseService {
   }
 
   async removeAdjust(auth: AuthDto, id: string): Promise<void> {
+    return this.databaseRepository.withAssetLock(id, async () => {
+      await this.assetEditSaveRepository.assertNotSaving(id);
+      return this.removeAdjustUnlocked(auth, id);
+    });
+  }
+
+  private async removeAdjustUnlocked(auth: AuthDto, id: string): Promise<void> {
     await this.requireAccess({ auth, permission: Permission.AssetEditDelete, ids: [id] });
 
     if (await this.imageAdjustRepository.delete(id)) {

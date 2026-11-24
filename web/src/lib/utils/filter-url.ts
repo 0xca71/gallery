@@ -153,7 +153,7 @@ export function encodeFilterParams(params: URLSearchParams, filters: FilterState
   }
 }
 
-export function decodeFilterParams(url: URL): DecodedFilterState {
+export function decodeFilterParams(url: { readonly searchParams: Pick<URLSearchParams, 'get'> }): DecodedFilterState {
   const result: DecodedFilterState = {};
   const get = (key: string) => url.searchParams.get(key)?.trim() || undefined;
 

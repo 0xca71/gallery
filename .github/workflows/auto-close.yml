@@ -1,15 +1,15 @@
 name: Auto-close PRs
 
 on:
-  pull_request_target: # zizmor: ignore[dangerous-triggers]
-    types: [labeled]
+  workflow_dispatch:
+    # Automatic runs disabled for this standalone private fork.
 
 permissions: {}
 
 jobs:
   close_llm:
     runs-on: ubuntu-latest
-    if: ${{ github.event.action == 'labeled' && github.event.label.name == 'auto-closed:llm' }}
+    if: ${{ github.repository == 'immich-app/immich' && (github.event.action == 'labeled' && github.event.label.name == 'auto-closed:llm') }}
     permissions:
       pull-requests: write
     steps:

@@ -1,7 +1,8 @@
-import { BadRequestException, ForbiddenException, UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, UnauthorizedException } from '@nestjs/common';
 import { DateTime } from 'luxon';
 import path from 'node:path';
 import { Readable } from 'node:stream';
+import { StorageCore } from 'src/cores/storage.core.js';
 import { mapAsset, type AssetResponseDto } from 'src/dtos/asset-response.dto.js';
 import { AssetJobName, AssetStatsResponseDto } from 'src/dtos/asset.dto.js';
 import { AssetEditAction, AssetEditsCreateDto } from 'src/dtos/editing.dto.js';
@@ -71,6 +72,148 @@ describe(AssetService.name, () => {
     mocks.assetFavorite.removeAll.mockResolvedValue(void 0);
   });
 
+  const setupUnlinkAndDelete = (external = false) => {
+    const auth = AuthFactory.create();
+    const libraryId = external ? newUuid() : null;
+    const video = AssetFactory.from({ type: AssetType.Video, libraryId, isExternal: external })
+      .owner(auth.user)
+      .build();
+    const photo = AssetFactory.from({ livePhotoVideoId: video.id, libraryId, isExternal: external })
+      .owner(auth.user)
+      .build();
+    const updated = { ...photo, livePhotoVideoId: null };
+    mocks.access.asset.checkOwnerAccess.mockImplementation((_userId, ids) =>
+      Promise.resolve(new Set([...ids].filter((id) => id === photo.id || id === video.id))),
+    );
+    mocks.asset.getById
+      .mockResolvedValueOnce(getForAsset(photo))
+      .mockResolvedValueOnce(getForAsset(video))
+      .mockResolvedValue(getForAsset(updated));
+    mocks.asset.unlinkAndDeleteLivePhoto.mockResolvedValue('success');
+    return { auth, photo, video, updated };
+  };
+
+  describe('unlinkAndDeleteLivePhoto', () => {
+    it.each([false, true])('unlinks and permanently deletes the video (external=%s)', async (external) => {
+      const { auth, photo, video } = setupUnlinkAndDelete(external);
+      const result = await sut.unlinkAndDeleteLivePhoto(auth, photo.id);
+
+      expect(result.livePhotoVideoId).toBeNull();
+      expect(mocks.asset.unlinkAndDeleteLivePhoto).toHaveBeenCalledWith({
+        photoId: photo.id,
+        videoId: video.id,
+        ownerId: auth.user.id,
+      });
+      expect(mocks.event.emit).toHaveBeenCalledWith('AssetDeleteAll', {
+        assetIds: [video.id],
+        userId: auth.user.id,
+      });
+      expect(mocks.event.emit).not.toHaveBeenCalledWith('AssetShow', expect.anything());
+      expect(mocks.asset.update).not.toHaveBeenCalled();
+      expect(mocks.metadata.writeTags).not.toHaveBeenCalled();
+    });
+
+    it('rejects a video still linked to another photo without scheduling deletion', async () => {
+      const { auth, photo } = setupUnlinkAndDelete();
+      mocks.asset.unlinkAndDeleteLivePhoto.mockResolvedValue('shared');
+
+      await expect(sut.unlinkAndDeleteLivePhoto(auth, photo.id)).rejects.toBeInstanceOf(ConflictException);
+      expect(mocks.event.emit).not.toHaveBeenCalled();
+    });
+
+    it('rejects an association changed by a concurrent request', async () => {
+      const { auth, photo } = setupUnlinkAndDelete();
+      mocks.asset.unlinkAndDeleteLivePhoto.mockResolvedValue('changed');
+
+      await expect(sut.unlinkAndDeleteLivePhoto(auth, photo.id)).rejects.toBeInstanceOf(ConflictException);
+      expect(mocks.event.emit).not.toHaveBeenCalled();
+    });
+
+    it('requires deletion access to the associated video too', async () => {
+      const { auth, photo } = setupUnlinkAndDelete();
+      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([photo.id]));
+
+      await expect(sut.unlinkAndDeleteLivePhoto(auth, photo.id)).rejects.toBeInstanceOf(BadRequestException);
+      expect(mocks.asset.unlinkAndDeleteLivePhoto).not.toHaveBeenCalled();
+      expect(mocks.event.emit).not.toHaveBeenCalled();
+    });
+
+    it('does nothing destructive when the photo is already unlinked', async () => {
+      const auth = AuthFactory.create();
+      const photo = AssetFactory.from({ livePhotoVideoId: null }).owner(auth.user).build();
+      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([photo.id]));
+      mocks.asset.getById.mockResolvedValue(getForAsset(photo));
+
+      await expect(sut.unlinkAndDeleteLivePhoto(auth, photo.id)).resolves.toMatchObject({ livePhotoVideoId: null });
+      expect(mocks.asset.unlinkAndDeleteLivePhoto).not.toHaveBeenCalled();
+      expect(mocks.event.emit).not.toHaveBeenCalled();
+    });
+
+    it('rejects shared-link deletion even if the caller can read the photo', async () => {
+      const { auth, photo } = setupUnlinkAndDelete();
+      const sharedAuth = AuthFactory.from({ id: auth.user.id }).sharedLink().build();
+      await expect(sut.unlinkAndDeleteLivePhoto(sharedAuth, photo.id)).rejects.toThrow();
+      expect(mocks.asset.unlinkAndDeleteLivePhoto).not.toHaveBeenCalled();
+      expect(mocks.event.emit).not.toHaveBeenCalled();
+    });
+
+    it('preserves the Android motion-photo unlink restriction before any write', async () => {
+      const { auth, photo, video } = setupUnlinkAndDelete();
+      mocks.asset.getById
+        .mockReset()
+        .mockResolvedValueOnce(getForAsset(photo))
+        .mockResolvedValueOnce(
+          getForAsset({ ...video, originalPath: StorageCore.getAndroidMotionPath(video, video.id) }),
+        );
+      await expect(sut.unlinkAndDeleteLivePhoto(auth, photo.id)).rejects.toBeInstanceOf(BadRequestException);
+      expect(mocks.asset.unlinkAndDeleteLivePhoto).not.toHaveBeenCalled();
+      expect(mocks.event.emit).not.toHaveBeenCalled();
+    });
+
+    it.each([false, true])(
+      'reuses permanent deletion and emits official derived-media cleanup (external=%s)',
+      async (external) => {
+        const { auth, photo, video: linkedVideo } = setupUnlinkAndDelete(external);
+        await sut.unlinkAndDeleteLivePhoto(auth, photo.id);
+        const video = AssetFactory.from({
+          id: linkedVideo.id,
+          type: AssetType.Video,
+          libraryId: linkedVideo.libraryId,
+          isExternal: external,
+        })
+          .owner(auth.user)
+          .file({ type: AssetFileType.Thumbnail })
+          .file({ type: AssetFileType.Preview })
+          .file({ type: AssetFileType.FullSize })
+          .file({ type: AssetFileType.FullSize, isEdited: true })
+          .file({ type: AssetFileType.Preview, isEdited: true })
+          .file({ type: AssetFileType.Thumbnail, isEdited: true })
+          .file({ type: AssetFileType.EncodedVideo })
+          .file({ type: AssetFileType.Sidecar })
+          .build();
+        mocks.assetJob.getForAssetDeletion.mockResolvedValue(getForAssetDeletion(video));
+        await expect(sut.handleAssetDeletion({ id: video.id, deleteOnDisk: true })).resolves.toBe(JobStatus.Success);
+        expect(mocks.job.queue).toHaveBeenCalledWith({
+          name: JobName.FileDelete,
+          data: { files: expect.arrayContaining([...video.files.map(({ path }) => path), video.originalPath]) },
+        });
+        expect(mocks.event.emit).toHaveBeenCalledWith('AssetDelete', {
+          assetId: video.id,
+          userId: auth.user.id,
+          affectedSpacePersons: [],
+        });
+      },
+    );
+
+    it('rejects a video as the selected photo', async () => {
+      const { auth, video } = setupUnlinkAndDelete();
+      mocks.asset.getById.mockReset().mockResolvedValue(getForAsset(video));
+
+      await expect(sut.unlinkAndDeleteLivePhoto(auth, video.id)).rejects.toBeInstanceOf(BadRequestException);
+      expect(mocks.asset.unlinkAndDeleteLivePhoto).not.toHaveBeenCalled();
+    });
+  });
+
   describe('getStatistics', () => {
     it('should get the statistics for a user, excluding archived assets', async () => {
       const auth = AuthFactory.create();
@@ -110,6 +253,47 @@ describe(AssetService.name, () => {
       );
 
       expect(mocks.asset.getStatistics).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('ensureAssetAddress', () => {
+    it('resolves a detailed address only after asset read authorization', async () => {
+      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set(['asset-1']));
+      mocks.systemMetadata.get.mockResolvedValue({ reverseGeocoding: { enabled: true } });
+      mocks.map.ensureDetailedAddress.mockResolvedValue('中国湖北省武汉市');
+      await expect(sut.ensureAssetAddress(authStub.admin, 'asset-1')).resolves.toEqual({
+        formattedAddress: '中国湖北省武汉市',
+      });
+      expect(mocks.map.ensureDetailedAddress).toHaveBeenCalledWith('asset-1');
+    });
+
+    it('allows an authorized space viewer to resolve an address without edit rights', async () => {
+      mocks.access.spaceAsset.checkSpaceAccess.mockResolvedValue(new Set(['asset-1']));
+      mocks.systemMetadata.get.mockResolvedValue({ reverseGeocoding: { enabled: true } });
+      mocks.map.ensureDetailedAddress.mockResolvedValue('中国湖北省武汉市');
+      await expect(sut.ensureAssetAddress(authStub.admin, 'asset-1')).resolves.toEqual({
+        formattedAddress: '中国湖北省武汉市',
+      });
+    });
+
+    it('does not contact the provider when reverse geocoding is disabled', async () => {
+      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set(['asset-1']));
+      mocks.systemMetadata.get.mockResolvedValue({ reverseGeocoding: { enabled: false } });
+      await expect(sut.ensureAssetAddress(authStub.admin, 'asset-1')).resolves.toEqual({ formattedAddress: null });
+      expect(mocks.map.ensureDetailedAddress).not.toHaveBeenCalled();
+    });
+
+    it('does not contact the provider for assets the caller cannot read', async () => {
+      await expect(sut.ensureAssetAddress(authStub.admin, 'asset-1')).rejects.toBeInstanceOf(BadRequestException);
+      expect(mocks.map.ensureDetailedAddress).not.toHaveBeenCalled();
+    });
+
+    it('does not spend quota for shared-link sessions even when the asset is readable', async () => {
+      mocks.access.asset.checkSharedLinkAccess.mockResolvedValue(new Set(['asset-1']));
+      await expect(sut.ensureAssetAddress(authStub.adminSharedLink, 'asset-1')).rejects.toBeInstanceOf(
+        ForbiddenException,
+      );
+      expect(mocks.map.ensureDetailedAddress).not.toHaveBeenCalled();
     });
   });
 
@@ -964,6 +1148,7 @@ describe(AssetService.name, () => {
             assetId: asset.id,
             latitude: 40.7128,
             longitude: -74.006,
+            formattedAddress: null,
             lockedProperties: ['latitude', 'longitude'],
           }),
           lockedPropertiesBehavior: 'append',
@@ -992,6 +1177,7 @@ describe(AssetService.name, () => {
             country: 'Germany',
             state: 'Berlin',
             city: 'Berlin',
+            formattedAddress: null,
             lockedProperties: ['latitude', 'longitude'],
           }),
           lockedPropertiesBehavior: 'append',
@@ -1009,6 +1195,7 @@ describe(AssetService.name, () => {
       await sut.update(authStub.admin, asset.id, { description: 'New description' });
 
       expect(mocks.map.reverseGeocode).not.toHaveBeenCalled();
+      expect(mocks.asset.upsertExif.mock.calls[0][0].exif).not.toHaveProperty('formattedAddress');
     });
 
     it('purges direct/album/library space paths when a single PUT sets visibility Hidden (security-4)', async () => {
@@ -1297,6 +1484,7 @@ describe(AssetService.name, () => {
         country: null,
         state: null,
         city: null,
+        formattedAddress: null,
       });
       expect(mocks.job.queueAll).toHaveBeenCalledWith([{ name: JobName.SidecarWrite, data: { id: 'asset-1' } }]);
     });
@@ -1323,6 +1511,7 @@ describe(AssetService.name, () => {
         country: null,
         state: null,
         city: null,
+        formattedAddress: null,
       });
       expect(mocks.job.queueAll).toHaveBeenCalledWith([{ name: JobName.SidecarWrite, data: { id: 'asset-1' } }]);
     });
@@ -1348,6 +1537,7 @@ describe(AssetService.name, () => {
         country: 'France',
         state: 'Île-de-France',
         city: 'Paris',
+        formattedAddress: null,
       });
     });
 

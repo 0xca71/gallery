@@ -323,6 +323,7 @@ export const getMocks = () => {
   const databaseMock = automock(DatabaseRepository, { args: [, loggerMock], strict: false });
 
   databaseMock.withLock.mockImplementation((_type, fn) => fn());
+  databaseMock.withAssetLock.mockImplementation((_assetId, fn) => fn());
   // L7: default `transaction` to a passthrough that just invokes the callback with the mock
   // itself standing in for the trx handle — every repo method the callback calls is ALSO a mock,
   // so it behaves identically regardless of what's passed as `trx`. Mirrors withLock above.
@@ -405,6 +406,8 @@ export const getMocks = () => {
 
   // every new user gets a cluster group, which is incidental to most tests
   mocks.clusterGroup.create.mockResolvedValue(ClusterGroupFactory.create());
+  // AMAP is opt-in; unrelated metadata tests exercise the disabled-provider result.
+  mocks.map.ensureDetailedAddress.mockResolvedValue(null);
 
   return mocks;
 };

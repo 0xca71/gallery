@@ -1,6 +1,12 @@
 <script lang="ts">
   import OnEvents from '#lib/components/OnEvents.svelte';
-  import type { AssetCursor } from '#lib/components/asset-viewer/AssetViewer.svelte';
+  import type {
+    AssetCursor,
+    FilmstripAssetResolver,
+    SlideshowRandomAssetResolver,
+    SlideshowStepAssetResolver,
+  } from '#lib/components/asset-viewer/AssetViewer.svelte';
+  import type { FilmstripAsset } from '#lib/components/asset-viewer/AssetViewerFilmstrip.svelte';
   import type { Action } from '#lib/components/asset-viewer/actions/action.ts';
   import { AssetAction } from '#lib/constants.ts';
   import { albumStackSuccessor } from '#lib/gallery/stack/album-stack-strip.ts';
@@ -18,8 +24,9 @@
   import { navigate } from '#lib/utils/navigation.ts';
   import { toTimelineAsset } from '#lib/utils/timeline-util.ts';
   import { getAssetInfo, type AlbumResponseDto, type AssetResponseDto, type PersonResponseDto } from '@immich/sdk';
-  import { onDestroy, onMount } from 'svelte';
+  import { onDestroy, onMount, untrack } from 'svelte';
   import { t } from 'svelte-i18n';
+  import { SvelteSet } from 'svelte/reactivity';
 
   interface Props {
     timelineManager: TimelineManager;
@@ -75,9 +82,59 @@
     previousAsset: undefined,
     nextAsset: undefined,
   });
+  // Keep a wider, asymmetric metadata window ready so a fast forward filmstrip drag does not hit
+  // its edge after only a few photos. Thumbnail image requests remain separately bounded.
+  const filmstripRadius = {
+    previous: 24,
+    next: 72,
+  } as const;
+  let filmstripAssets = $state<FilmstripAsset[]>([]);
+  let filmstripLoadSequence = 0;
+  let filmstripSelectionSequence = 0;
 
+  const getFilmstripSide = async (
+    currentAsset: TimelineAsset,
+    direction: 'previous' | 'next',
+  ): Promise<TimelineAsset[]> => {
+    const result: TimelineAsset[] = [];
+    let cursor = currentAsset;
+    const getAdjacent =
+      direction === 'previous'
+        ? timelineManager.getLaterAsset.bind(timelineManager)
+        : timelineManager.getEarlierAsset.bind(timelineManager);
+
+    for (let index = 0; index < filmstripRadius[direction]; index++) {
+      const adjacent = await getAdjacent(cursor);
+      if (!adjacent) {
+        break;
+      }
+      result.push(adjacent);
+      cursor = adjacent;
+    }
+
+    return direction === 'previous' ? result.reverse() : result;
+  };
+
+  const loadFilmstripAssets = async (currentAsset: AssetResponseDto) => {
+    const sequence = ++filmstripLoadSequence;
+    filmstripSelectionSequence++;
+    const timelineAsset = toTimelineAsset(currentAsset);
+    const [previous, next] = await Promise.all([
+      getFilmstripSide(timelineAsset, 'previous'),
+      getFilmstripSide(timelineAsset, 'next'),
+    ]);
+    if (sequence === filmstripLoadSequence) {
+      filmstripAssets = [...previous, timelineAsset, ...next];
+    }
+  };
+
+  let closeAssetsSequence = 0;
   const loadCloseAssets = async (currentAsset: AssetResponseDto) => {
+    const sequence = ++closeAssetsSequence;
     const [nextAsset, previousAsset] = await Promise.all([getNextAsset(currentAsset), getPreviousAsset(currentAsset)]);
+    if (sequence !== closeAssetsSequence || assetViewerManager.asset?.id !== currentAsset.id) {
+      return;
+    }
 
     assetCursor = {
       current: currentAsset,
@@ -90,9 +147,25 @@
   $effect(() => {
     const asset = assetViewerManager.asset;
     if (asset) {
-      handlePromiseError(loadCloseAssets(asset));
+      // Neighbor loading must not subscribe this asset effect to the timeline buckets it reads.
+      untrack(() => {
+        handlePromiseError(loadCloseAssets(asset));
+        handlePromiseError(loadFilmstripAssets(asset));
+      });
     }
   });
+
+  const selectFilmstripAsset: FilmstripAssetResolver = async (targetAsset) => {
+    const sequence = ++filmstripSelectionSequence;
+    const asset = await getAsset(targetAsset.id);
+    if (!asset || sequence !== filmstripSelectionSequence) {
+      return;
+    }
+    // Update the viewer as soon as the cached/full asset is available. The route navigation below
+    // then reuses the same cached response instead of making the main image wait for navigation.
+    assetViewerManager.setAsset(asset);
+    await navigate({ targetRoute: 'current', assetId: asset.id }, { replace: true, reset: false });
+  };
 
   const handleRandom = async () => {
     const randomAsset = await timelineManager.getRandomAsset();
@@ -102,6 +175,28 @@
 
     await navigate({ targetRoute: 'current', assetId: randomAsset.id });
     return { id: randomAsset.id };
+  };
+
+  const resolveSlideshowStepAsset: SlideshowStepAssetResolver = async (asset, order) => {
+    return order === 'previous' ? await getPreviousAsset(asset) : await getNextAsset(asset);
+  };
+
+  const resolveSlideshowRandomAsset: SlideshowRandomAssetResolver = async (isPlayable) => {
+    const triedAssetIds = new SvelteSet<string>();
+    const maxAttempts = Math.min(Math.max(timelineManager.assetCount, 10), 100);
+
+    for (let attempt = 0; attempt < maxAttempts && triedAssetIds.size < timelineManager.assetCount; attempt++) {
+      const randomAsset = await timelineManager.getRandomAsset();
+      if (!randomAsset || triedAssetIds.has(randomAsset.id)) {
+        continue;
+      }
+
+      triedAssetIds.add(randomAsset.id);
+      const candidate = await getAsset(randomAsset.id);
+      if (candidate && isPlayable(candidate)) {
+        return candidate;
+      }
+    }
   };
 
   const handleClose = async (assetId: string) => {
@@ -188,6 +283,9 @@
   });
 
   onDestroy(() => {
+    filmstripLoadSequence++;
+    filmstripSelectionSequence++;
+    closeAssetsSequence++;
     assetCacheManager.invalidate();
   });
 
@@ -216,6 +314,10 @@
     }}
     onUndoDelete={handleUndoDelete}
     onRandom={handleRandom}
+    {resolveSlideshowStepAsset}
+    {resolveSlideshowRandomAsset}
+    {filmstripAssets}
+    onFilmstripAssetSelect={selectFilmstripAsset}
     onClose={handleClose}
   />
 {/if}

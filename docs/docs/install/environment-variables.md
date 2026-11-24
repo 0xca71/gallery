@@ -47,6 +47,7 @@ These environment variables are used by the `docker-compose.yml` file and do **N
 | `IMMICH_IGNORE_MOUNT_CHECK_ERRORS`  | See [System Integrity](/administration/system-integrity)                                                                                                             |                              | server                   | api, microservices |
 | `IMMICH_ALLOW_SETUP`                | When `false` disables the `/auth/admin-sign-up` and `/admin/database-backups/start-restore` endpoints                                                                |            `true`            | server                   | api                |
 | `IMMICH_PEOPLE_STATISTICS_ENABLED`  | When `true`, exposes face count totals and the lazy-loaded face statistics modal on the People and shared-space People pages                                         |           `false`            | server                   | api                |
+| `IMMICH_WEB_DELETE_TOAST_THRESHOLD` | Number of selected assets above which the Web delete notification stays open until manually closed; takes effect after the server restarts                           |             `20`             | server                   | api                |
 
 \*1: `TZ` should be set to a `TZ identifier` from [this list][tz-list]. For example, `TZ="Etc/UTC"`.
 `TZ` is used by `exiftool` as a fallback in case the timezone cannot be determined from the image metadata. It is also used for logfile timestamps and cron job execution.

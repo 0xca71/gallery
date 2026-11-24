@@ -248,6 +248,7 @@ export interface IEntityJob extends IBaseJob {
 }
 
 export interface IAssetDeleteJob extends IEntityJob {
+  delay?: number;
   deleteOnDisk: boolean;
 }
 

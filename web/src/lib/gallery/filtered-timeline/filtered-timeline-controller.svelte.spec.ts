@@ -3,12 +3,14 @@ import { reactivePageMock as mockPage } from '#lib/gallery/__mocks__/reactive-pa
 import { sdkMock } from '#lib/gallery/__mocks__/sdk.mock.ts';
 import { albumStackPreferences } from '#lib/gallery/stack/album-stack-preferences.svelte.ts';
 import { assetMultiSelectManager } from '#lib/managers/asset-multi-select-manager.svelte.ts';
+import { assetViewerManager } from '#lib/managers/asset-viewer-manager.svelte.ts';
 import { authManager } from '#lib/managers/auth-manager.svelte.ts';
 import type { TimelineManager } from '#lib/managers/timeline-manager/timeline-manager.svelte.ts';
-import type { TimelineManagerOptions } from '#lib/managers/timeline-manager/types.ts';
+import type { TimelineAsset, TimelineManagerOptions } from '#lib/managers/timeline-manager/types.ts';
+import { buildPhotosTimelineOptions } from '#lib/utils/photos-filter-options.ts';
 import { storeTypedSearchNames } from '#lib/utils/typed-search/typed-search-name-cache.ts';
 import { factory } from '#test/unit/factories.ts';
-import { LibraryView, type SmartSearchFacetsResponseDto } from '@immich/sdk';
+import { LibraryView, TimeBucketSize, type SmartSearchFacetsResponseDto } from '@immich/sdk';
 import type { ActionItem } from '@immich/ui';
 import { flushSync } from 'svelte';
 import { createAlbumTimeline } from './album-timeline';
@@ -72,6 +74,9 @@ const stubTimeline = () => ({
   update: vi.fn(),
   removeAssets: vi.fn(),
   upsertAssets: vi.fn(),
+  initTask: { waitUntilCompletion: vi.fn().mockResolvedValue(undefined) },
+  isInitializedForOptions: vi.fn(() => true),
+  getRandomAsset: vi.fn().mockResolvedValue(factory.timelineAsset({ id: 'random-target' })),
 });
 
 let timeline: ReturnType<typeof stubTimeline>;
@@ -130,6 +135,8 @@ const pendingFacets = () => {
 describe('FilteredTimelineController', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    sdkMock.getTimeBuckets.mockResolvedValue([]);
+    assetViewerManager.showAssetViewer(false);
     sessionStorage.clear();
     timeline = stubTimeline();
     browseConfig = {
@@ -616,5 +623,68 @@ describe('FilteredTimelineController', () => {
       flushSync();
       expect(sut.options).toMatchObject({ albumId: 'a1', withStacked: true, stackCountInAlbum: true });
     });
+  });
+});
+
+describe('filtered random jump and temporal baseline', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    sdkMock.getTimeBuckets.mockResolvedValue([]);
+    timeline = stubTimeline();
+    browseConfig = { sections: [], suggestionsProvider: () => Promise.resolve(emptySuggestions()) };
+    authManager.setUser(factory.user({ id: 'me' }));
+    authManager.setPreferences(factory.preferences());
+    mockPage.reset('https://gallery.test/photos', { routeId: '/(user)/photos/[[assetId=id]]' });
+    assetViewerManager.showAssetViewer(false);
+  });
+  afterEach(() => {
+    for (const cleanup of roots.splice(0)) {
+      cleanup();
+    }
+    assetMultiSelectManager.clear();
+    authManager.reset();
+  });
+
+  it('requests month-picker counts without the selected year/month but keeps location and library scope', async () => {
+    const baseline = [
+      { timeBucket: '2024-07-01', count: 517 },
+      { timeBucket: '2024-08-01', count: 38 },
+    ];
+    sdkMock.getTimeBuckets.mockResolvedValue(baseline);
+    const sut = createController({
+      timelineOptions: (filters) => ({ ...buildPhotosTimelineOptions(filters, 'me'), libraryView: LibraryView.Spaces }),
+    });
+    sut.filters = { ...sut.filters, country: 'China', selectedYear: 2024, selectedMonth: 7 };
+    flushSync();
+    await vi.waitFor(() => expect(sut.panelTimeBuckets).toEqual(baseline));
+    const request = sdkMock.getTimeBuckets.mock.calls.at(-1)![0];
+    expect(request).toMatchObject({
+      country: 'China',
+      libraryView: LibraryView.Spaces,
+      bucketSize: TimeBucketSize.Month,
+    });
+    expect(request.takenAfter).toBeUndefined();
+    expect(request.takenBefore).toBeUndefined();
+  });
+
+  it('samples the complete current manager and navigates to its grid anchor rather than opening a foreign viewer route', async () => {
+    const sut = createController({ randomJump: true });
+    await sut.handleRandomJump();
+    expect(timeline.isInitializedForOptions).toHaveBeenCalledWith(sut.options);
+    expect(timeline.getRandomAsset).toHaveBeenCalled();
+    expect(gotoMock).toHaveBeenCalledWith('/photos?at=random-target', { forceNavigate: true, reset: false });
+  });
+
+  it('discards a pending random draw when the current filters change', async () => {
+    const pending = Promise.withResolvers<TimelineAsset>();
+    timeline.getRandomAsset.mockReturnValueOnce(pending.promise);
+    const sut = createController({ randomJump: true });
+    const jump = sut.handleRandomJump();
+    await vi.waitFor(() => expect(timeline.getRandomAsset).toHaveBeenCalled());
+    sut.filters = { ...sut.filters, city: 'Wuhan' };
+    flushSync();
+    pending.resolve(factory.timelineAsset({ id: 'stale-target' }));
+    await jump;
+    expect(gotoMock).not.toHaveBeenCalled();
   });
 });

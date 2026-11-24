@@ -536,6 +536,18 @@ export class CleanupService extends BaseService {
   */
   @OnJob({ name: JobName.AssetAnalyzeQuality, queue: QueueName.QualityAnalysis })
   async handleQualityAnalysis({ id, staleOnly }: JobOf<JobName.AssetAnalyzeQuality>): Promise<JobStatus> {
+    return this.databaseRepository.withAssetLock(id, async () => {
+      if (await this.assetEditSaveRepository.isSaving(id, false)) {
+        return JobStatus.Skipped;
+      }
+      return this.handleQualityAnalysisUnlocked({ id, staleOnly });
+    });
+  }
+
+  private async handleQualityAnalysisUnlocked({
+    id,
+    staleOnly,
+  }: JobOf<JobName.AssetAnalyzeQuality>): Promise<JobStatus> {
     const asset = await this.cleanupRepository.getForQualityAnalysis(id);
     if (!asset || asset.deletedAt) {
       return JobStatus.Skipped;

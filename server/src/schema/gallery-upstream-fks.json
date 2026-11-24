@@ -93,6 +93,7 @@
       "forkForeignKeys": [
         "album_space_asset_addedById_fkey",
         "asset_duplicate_checksum_ownerId_fkey",
+        "asset_edit_save_ownerId_fkey",
         "asset_face_creator_userId_fkey",
         "asset_favorite_userId_fkey",
         "asset_quality_ownerId_fkey",

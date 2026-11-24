@@ -6,6 +6,7 @@ import 'package:immich_mobile/domain/models/store.model.dart';
 import 'package:immich_mobile/domain/services/store.service.dart';
 import 'package:immich_mobile/infrastructure/repositories/store.repository.dart';
 import 'package:immich_mobile/utils/image_url_builder.dart';
+import 'package:openapi/api.dart';
 
 void main() {
   const endpoint = 'http://localhost:3000';
@@ -31,5 +32,29 @@ void main() {
       final after = getFaceThumbnailUrl('person-1', updatedAt: DateTime.fromMillisecondsSinceEpoch(2));
       expect(before, isNot(after));
     });
+  });
+
+  test('replacement invalidates image URLs even with an unchanged thumbhash', () {
+    final before = DateTime.fromMillisecondsSinceEpoch(1);
+    final after = DateTime.fromMillisecondsSinceEpoch(2);
+    expect(
+      getOriginalUrlForRemoteId('asset', updatedAt: before),
+      isNot(getOriginalUrlForRemoteId('asset', updatedAt: after)),
+    );
+    for (final size in [AssetMediaSize.thumbnail, AssetMediaSize.preview]) {
+      expect(
+        getThumbnailUrlForRemoteId('asset', type: size, thumbhash: 'same', updatedAt: before),
+        isNot(getThumbnailUrlForRemoteId('asset', type: size, thumbhash: 'same', updatedAt: after)),
+      );
+    }
+    expect(getOriginalUrlForRemoteId('asset'), '$endpoint/assets/asset/original?edited=true');
+    expect(
+      getOriginalUrlForRemoteId('asset', edited: false, updatedAt: after),
+      '$endpoint/assets/asset/original?edited=false&v=2000',
+    );
+    expect(
+      getThumbnailUrlForRemoteId('asset', thumbhash: 'a+b/c=', edited: false, updatedAt: after),
+      '$endpoint/assets/asset/thumbnail?size=thumbnail&edited=false&c=a%2Bb%2Fc%3D&v=2000',
+    );
   });
 }

@@ -69,6 +69,13 @@ export function buildMapFilterConfig(spaceId?: string): FilterPanelConfig {
     baselineProvider: async () =>
       mapSuggestions(await getFilterSuggestions({ ...(spaceId ? { spaceId } : { withSharedSpaces: true }) }), spaceId),
     providers: {
+      states: (country, context) =>
+        getSearchSuggestions({
+          $type: SearchSuggestionType.State,
+          country,
+          ...(spaceId ? { spaceId } : { withSharedSpaces: true }),
+          ...context,
+        }),
       cities: (country: string, context) =>
         getSearchSuggestions({
           $type: SearchSuggestionType.City,

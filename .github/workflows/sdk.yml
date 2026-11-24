@@ -1,13 +1,14 @@
 name: Update Immich SDK
 
 on:
-  release:
-    types: [published]
+  workflow_dispatch:
+    # Automatic runs disabled for this standalone private fork.
 
 permissions: {}
 
 jobs:
   publish:
+    if: ${{ github.repository == 'immich-app/immich' }}
     name: Publish `@immich/sdk`
     runs-on: ubuntu-latest
     permissions:

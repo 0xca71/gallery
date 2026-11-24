@@ -291,6 +291,18 @@ export class StorageMigrationService extends BaseService {
 
   @OnJob({ name: JobName.StorageBackendMigrationSingle, queue: QueueName.StorageBackendMigration })
   async handleMigration(job: JobOf<JobName.StorageBackendMigrationSingle>): Promise<JobStatus> {
+    if (job.entityType !== 'asset' && job.entityType !== 'assetFile') {
+      return this.handleMigrationUnlocked(job);
+    }
+    return this.databaseRepository.withAssetLock(job.entityId, async () => {
+      if (await this.assetEditSaveRepository.isSaving(job.entityId)) {
+        throw new Error('Image save in progress; retry storage migration');
+      }
+      return this.handleMigrationUnlocked(job);
+    });
+  }
+
+  private async handleMigrationUnlocked(job: JobOf<JobName.StorageBackendMigrationSingle>): Promise<JobStatus> {
     const { entityType, entityId, fileType, sourcePath, batchId, direction, deleteSource } = job;
 
     try {

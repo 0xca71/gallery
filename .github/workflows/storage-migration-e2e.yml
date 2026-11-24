@@ -1,7 +1,6 @@
 name: Storage Migration E2E
 on:
-  schedule:
-    - cron: '0 6 * * *' # Daily at 06:00 UTC
+  # Automatic runs disabled for this standalone private fork.
   workflow_dispatch:
     inputs:
       branch:
@@ -14,6 +13,7 @@ permissions: {}
 
 jobs:
   storage-migration-e2e:
+    if: ${{ github.repository == 'open-noodle/gallery' }}
     name: Storage Migration E2E
     runs-on: ubuntu-latest
     permissions:

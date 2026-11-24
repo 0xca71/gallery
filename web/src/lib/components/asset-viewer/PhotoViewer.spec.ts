@@ -16,6 +16,8 @@ import PhotoViewer from './PhotoViewer.svelte';
 const assetViewerManagerMock = vi.hoisted(() => ({
   imgRef: undefined as unknown,
   zoom: 1,
+  zoomState: { currentZoom: 1, currentRotation: 0, currentPositionX: 0, currentPositionY: 0, enable: true },
+  cancelZoomAnimation: vi.fn(),
   highlightedFaces: [] as unknown[],
   isFaceEditMode: true,
   isShowingHiddenPeople: false,

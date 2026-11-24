@@ -1,11 +1,12 @@
 <script lang="ts">
   import { localizeCountry } from '#lib/gallery/utils/country-names.ts';
   import GeolocationPointPickerModal from '#lib/modals/GeolocationPointPickerModal.svelte';
+  import { getDetailedAddressRemainder } from '#lib/utils/address-display.ts';
   import { applyContextualFilter, buildContextualMapUrl } from '#lib/utils/filter-target.ts';
   import { handleError } from '#lib/utils/handle-error.ts';
-  import { updateAsset, type AssetResponseDto } from '@immich/sdk';
+  import { ensureAssetAddress, updateAsset, type AssetResponseDto } from '@immich/sdk';
   import { Icon, IconButton, modalManager } from '@immich/ui';
-  import { mdiMapMarkerOutline, mdiMapOutline, mdiPencil } from '@mdi/js';
+  import { mdiContentCopy, mdiMapMarkerOutline, mdiMapOutline, mdiPencil } from '@mdi/js';
   import { locale, t } from 'svelte-i18n';
   import { page } from '$app/state';
 
@@ -17,16 +18,50 @@
     */
     canFilter?: boolean;
     asset: AssetResponseDto;
+    onAddressResolved?: (asset: AssetResponseDto) => void;
   };
 
-  let { isOwner, canFilter = false, asset = $bindable() }: Props = $props();
+  let { isOwner, canFilter = false, asset = $bindable(), onAddressResolved }: Props = $props();
 
+  let requestedPoint = $state('');
+  $effect(() => {
+    const exif = asset.exifInfo;
+    const key = `${asset.id}:${exif?.latitude}:${exif?.longitude}`;
+    if (
+      (!isOwner && !canFilter) ||
+      exif?.formattedAddress ||
+      !Number.isFinite(exif?.latitude) ||
+      !Number.isFinite(exif?.longitude) ||
+      !/^(china|中国|中华人民共和国)$/i.test(exif?.country?.trim() ?? '') ||
+      requestedPoint === key
+    ) {
+      return;
+    }
+    requestedPoint = key;
+    const id = asset.id;
+    void ensureAssetAddress({ id })
+      .then((result) => {
+        if (
+          asset.id !== id ||
+          `${asset.id}:${asset.exifInfo?.latitude}:${asset.exifInfo?.longitude}` !== key ||
+          !result.formattedAddress
+        ) {
+          return;
+        }
+        asset = { ...asset, exifInfo: { ...asset.exifInfo, formattedAddress: result.formattedAddress } };
+        onAddressResolved?.(asset);
+      })
+      .catch(() => {
+        /* Retain the original location when the provider is unavailable. */
+      });
+  });
   // R9/E7 — a value that trims to nothing produces a patch that trims to nothing: the click would
   // close the asset viewer and apply NO filter. Such a value is rendered as plain text.
   const city = $derived(asset.exifInfo?.city?.trim() ?? '');
-  const state = $derived(asset.exifInfo?.state?.trim() ?? '');
+  const stateName = $derived(asset.exifInfo?.state?.trim() ?? '');
   const country = $derived(asset.exifInfo?.country?.trim() ?? '');
   const countryLabel = $derived(localizeCountry(country, $locale));
+  const detailedAddress = $derived(getDetailedAddressRemainder(asset.exifInfo));
 
   // E10 — the pin carries the current context (Space scope + active filters) to the full map, and
   // centers it on this asset. Null on an album, which has no map URL (see buildContextualMapUrl).
@@ -39,6 +74,14 @@
     ),
   );
 
+  const copyAddress = async () => {
+    try {
+      await navigator.clipboard.writeText(asset.exifInfo?.formattedAddress ?? '');
+    } catch (error) {
+      handleError(error, $t('errors.unable_to_copy_to_clipboard'));
+    }
+  };
+
   const onAction = async () => {
     const point = await modalManager.show(GeolocationPointPickerModal, { asset });
     if (!point) {
@@ -50,23 +93,28 @@
         id: asset.id,
         updateAssetDto: { latitude: point.lat, longitude: point.lng },
       });
+      requestedPoint = '';
+      onAddressResolved?.(asset);
     } catch (error) {
       handleError(error, $t('errors.unable_to_change_location'));
     }
   };
 </script>
 
-{#if asset.exifInfo?.country}
+{#if asset.exifInfo?.country || asset.exifInfo?.formattedAddress}
   <!--
     R3 — this row used to be ONE <button> wrapping the pin, all three value lines AND the pencil.
     The three value lines are filter affordances now, so the outer button had to go (a button inside
     a button is invalid HTML) and the pencil became a real IconButton.
   -->
   <div class="flex w-full place-items-start justify-between gap-4 py-4 text-start" data-testid="detail-panel-location">
-    <div class="flex gap-4">
+    <div class="flex min-w-0 gap-4">
       <div><Icon icon={mdiMapMarkerOutline} size="24" /></div>
 
-      <div>
+      <div class="min-w-0">
+        {#if detailedAddress}
+          <p class="wrap-break-word" title={$t('detailed_address')} data-testid="detailed-address">{detailedAddress}</p>
+        {/if}
         {#if asset.exifInfo?.city}
           <p>
             {#if canFilter && city}
@@ -86,12 +134,12 @@
         {#if asset.exifInfo?.state}
           <div class="flex gap-2 text-sm">
             <p>
-              {#if canFilter && state}
+              {#if canFilter && stateName}
                 <button
                   type="button"
                   class="text-left hover:text-primary"
-                  aria-label="{$t('filter_by_location')}: {state}"
-                  onclick={() => applyContextualFilter({ city: undefined, state, country })}
+                  aria-label="{$t('filter_by_location')}: {stateName}"
+                  onclick={() => applyContextualFilter({ city: undefined, state: stateName, country })}
                 >
                   {asset.exifInfo.state}
                 </button>
@@ -122,7 +170,18 @@
       </div>
     </div>
 
-    <div class="flex items-center gap-1">
+    <div class="flex shrink-0 items-center gap-1">
+      {#if asset.exifInfo?.formattedAddress}
+        <IconButton
+          icon={mdiContentCopy}
+          aria-label={$t('copy_detailed_address')}
+          size="small"
+          shape="round"
+          color="secondary"
+          variant="ghost"
+          onclick={copyAddress}
+        />
+      {/if}
       {#if canFilter && mapUrl}
         <IconButton
           href={mapUrl}

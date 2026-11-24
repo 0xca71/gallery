@@ -1,5 +1,7 @@
 import { createZodDto } from 'nestjs-zod';
 import z from 'zod';
+import { AssetImageAdjustDto } from 'src/gallery/dtos/image-adjust.dto.js';
+import { isoDatetimeToDate } from 'src/validation.js';
 
 export enum AssetEditAction {
   Crop = 'crop',
@@ -30,14 +32,7 @@ const CropParametersSchema = z
 
 const RotateParametersSchema = z
   .object({
-    angle: z
-      .int()
-      .min(0)
-      .max(270)
-      .refine((v) => [0, 90, 180, 270].includes(v), {
-        error: 'Angle must be one of the following values: 0, 90, 180, 270',
-      })
-      .describe('Rotation angle in degrees'),
+    angle: z.number().meta({ format: 'double' }).min(-360).max(360).describe('Rotation angle in degrees'),
   })
   .meta({ id: 'RotateParameters' });
 
@@ -134,3 +129,58 @@ export class AssetEditActionItemResponseDto extends createZodDto(AssetEditAction
 export class AssetEditsCreateDto extends createZodDto(AssetEditsCreateSchema) {}
 export class AssetEditsResponseDto extends createZodDto(AssetEditsResponseSchema) {}
 export type CropParameters = z.infer<typeof CropParametersSchema>;
+
+export enum AssetEditSaveMode {
+  Copy = 'copy',
+  Overwrite = 'overwrite',
+}
+
+export enum AssetEditSaveStatus {
+  Queued = 'queued',
+  Rendering = 'rendering',
+  Publishing = 'publishing',
+  Processing = 'processing',
+  Completed = 'completed',
+  Failed = 'failed',
+  Conflict = 'conflict',
+}
+
+const AssetEditSaveModeSchema = z.enum(AssetEditSaveMode).meta({ id: 'AssetEditSaveMode' });
+
+const AssetEditSaveCreateSchema = AssetEditsCreateSchema.extend({
+  edits: z
+    .array(AssetEditActionItemSchema)
+    .refine(uniqueEditActions, { error: 'Duplicate edit actions are not allowed' }),
+  adjust: AssetImageAdjustDto.schema
+    .optional()
+    .describe('Colour adjustment to bake into the saved original; omitted uses the current saved adjustment'),
+  mode: AssetEditSaveModeSchema,
+  expectedVersion: isoDatetimeToDate.describe('Asset updatedAt when the editor was opened'),
+  idempotencyKey: z.uuidv4().describe('Reuse this key when retrying the same save'),
+}).meta({ id: 'AssetEditSaveCreateDto' });
+
+const AssetEditSaveResponseSchema = z
+  .object({
+    id: z.uuidv4(),
+    assetId: z.uuidv4(),
+    resultAssetId: z.uuidv4().nullable(),
+    mode: AssetEditSaveModeSchema,
+    status: z.enum(AssetEditSaveStatus).meta({ id: 'AssetEditSaveStatus' }),
+    error: z.string().nullable(),
+  })
+  .meta({ id: 'AssetEditSaveResponseDto' });
+
+const AssetEditSaveFormatSchema = z.enum(['jpeg', 'png', 'webp']).meta({ id: 'AssetEditSaveFormat' });
+
+const AssetEditSaveCapabilitiesSchema = z
+  .object({
+    canCopy: z.boolean(),
+    canOverwrite: z.boolean(),
+    overwriteUnavailableReason: z.string().nullable(),
+    outputFormat: AssetEditSaveFormatSchema.nullable(),
+  })
+  .meta({ id: 'AssetEditSaveCapabilitiesDto' });
+
+export class AssetEditSaveCreateDto extends createZodDto(AssetEditSaveCreateSchema) {}
+export class AssetEditSaveResponseDto extends createZodDto(AssetEditSaveResponseSchema) {}
+export class AssetEditSaveCapabilitiesDto extends createZodDto(AssetEditSaveCapabilitiesSchema) {}

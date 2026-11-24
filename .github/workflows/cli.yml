@@ -1,16 +1,7 @@
 name: CLI Build
 on:
-  push:
-    branches: [main, 'release/*']
-    paths:
-      - 'packages/cli/**'
-      - '.github/workflows/cli.yml'
-  pull_request:
-    paths:
-      - 'packages/cli/**'
-      - '.github/workflows/cli.yml'
-  release:
-    types: [published]
+  workflow_dispatch:
+    # Automatic runs disabled for this standalone private fork.
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -20,6 +11,7 @@ permissions: {}
 
 jobs:
   publish:
+    if: ${{ github.repository == 'immich-app/immich' }}
     name: CLI Publish
     runs-on: ubuntu-latest
     permissions:
@@ -48,6 +40,7 @@ jobs:
         run: mise run ci-publish -- --tag "$NPM_TAG"
 
   docker:
+    if: ${{ github.repository == 'immich-app/immich' }}
     name: Docker
     runs-on: ubuntu-latest
     permissions:

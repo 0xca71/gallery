@@ -1,4 +1,5 @@
 import {
+  galleryPublicConfig,
   galleryServerConfig,
   galleryServerFeatures,
   withGalleryAdminConfig,
@@ -39,6 +40,7 @@ const serverConfig = (overrides: Partial<ResponseOf<'getServerConfig'>> = {}): R
 });
 
 const publicConfig = (overrides: Partial<ResponseOf<'getPublicConfig'>> = {}): ResponseOf<'getPublicConfig'> => ({
+  ...galleryPublicConfig,
   ffmpeg: { realtime: { enabled: false } },
   map: {
     enabled: true,

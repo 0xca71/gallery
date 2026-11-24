@@ -145,6 +145,27 @@ export class PetRecognitionService extends BaseService {
     if (!isPetRecognitionEnabled(machineLearning)) {
       return JobStatus.Skipped;
     }
+    const face = await this.petFaceRepository.getPetFaceForRecognition(id);
+    if (!face) {
+      return this.handlePetRecognitionUnlocked({ id, deferred, label });
+    }
+    return this.databaseRepository.withAssetLock(face.assetId, async () => {
+      if (await this.assetEditSaveRepository.isSaving(face.assetId, false)) {
+        return JobStatus.Skipped;
+      }
+      return this.handlePetRecognitionUnlocked({ id, deferred, label });
+    });
+  }
+
+  private async handlePetRecognitionUnlocked({
+    id,
+    deferred,
+    label,
+  }: JobOf<JobName.PetRecognition>): Promise<JobStatus> {
+    const { machineLearning } = await this.getConfig({ withCache: true });
+    if (!isPetRecognitionEnabled(machineLearning)) {
+      return JobStatus.Skipped;
+    }
 
     const face = await this.petFaceRepository.getPetFaceForRecognition(id);
     if (!face || !face.asset) {

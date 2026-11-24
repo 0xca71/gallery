@@ -74,7 +74,9 @@
   type SearchTerms = MetadataSearchDto & Pick<SmartSearchDto, 'query' | 'queryAssetId'>;
   let searchQuery = $derived(page.url.searchParams.get(QueryParameter.QUERY));
   let terms = $derived<SearchTerms>(searchQuery ? parseSearchTerms<SearchTerms>(searchQuery) : {});
-  let searchTermKeys = $derived(getObjectKeys(terms).filter(isVisibleSearchKey));
+  let searchTermKeys = $derived(
+    getObjectKeys(terms).filter((key) => isVisibleSearchKey(key) && !(key === 'type' && terms.isMotion === true)),
+  );
 
   $effect(() => {
     // we want this to *only* be reactive on `terms`
@@ -195,6 +197,7 @@
       takenBefore: $t('end_date'),
       visibility: $t('in_archive'),
       isFavorite: $t('favorite'),
+      isMotion: $t('media_type'),
       isNotInAlbum: $t('not_in_any_album'),
       isInAlbum: $t('in_any_album'),
       type: $t('media_type'),
@@ -304,7 +307,11 @@
             {getHumanReadableSearchKey(searchKey as keyof SearchTerms)}
           </span>
 
-          {#if value !== true}
+          {#if searchKey === 'isMotion' && value === true}
+            <span class="max-w-[min(36rem,55vw)] min-w-0 truncate px-3 py-1.5 text-immich-fg dark:text-immich-dark-fg"
+              >{$t('live_photo')}</span
+            >
+          {:else if value !== true}
             <span class="max-w-[min(36rem,55vw)] min-w-0 truncate px-3 py-1.5 text-immich-fg dark:text-immich-dark-fg">
               {#if (searchKey === 'takenAfter' || searchKey === 'takenBefore') && typeof value === 'string'}
                 {getHumanReadableDate(value)}

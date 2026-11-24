@@ -1,15 +1,15 @@
 name: Fix formatting
 
 on:
-  pull_request:
-    types: [labeled]
+  workflow_dispatch:
+    # Automatic runs disabled for this standalone private fork.
 
 permissions: {}
 
 jobs:
   fix-formatting:
     runs-on: ubuntu-latest
-    if: ${{ github.event.label.name == 'fix:formatting' }}
+    if: ${{ github.repository == 'immich-app/immich' && (github.event.label.name == 'fix:formatting') }}
     permissions:
       contents: write
       pull-requests: write

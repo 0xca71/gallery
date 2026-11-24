@@ -31,10 +31,8 @@ name: PR Release Candidate
 #   `.github/actions/` the build runs from the checkout) before labelling.
 
 on:
-  pull_request:
-    types: [labeled, synchronize]
-  pull_request_target: # zizmor: ignore[dangerous-triggers] fork builds are gated on a write-role labeller and pinned to the labelled SHA; see above
-    types: [labeled]
+  workflow_dispatch:
+    # Automatic runs disabled for this standalone private fork.
 
 concurrency:
   # Concurrency is evaluated at workflow level, BEFORE any job `if:` gate — so a run
@@ -67,18 +65,7 @@ jobs:
     name: Authorize RC build
     # The whole trigger gate lives here; `resolve`, `build` and `comment` hang off this
     # job, so an unlabelled PR skips the chain without consuming a runner.
-    if: >
-      (github.event_name == 'pull_request' &&
-        github.event.pull_request.head.repo.full_name == github.repository &&
-        ((github.event.action == 'labeled' &&
-           (github.event.label.name == 'rc' || github.event.label.name == 'rc-ml')) ||
-         (github.event.action == 'synchronize' &&
-           (contains(github.event.pull_request.labels.*.name, 'rc') ||
-            contains(github.event.pull_request.labels.*.name, 'rc-ml'))))) ||
-      (github.event_name == 'pull_request_target' &&
-        github.event.pull_request.head.repo.full_name != github.repository &&
-        github.event.action == 'labeled' &&
-        (github.event.label.name == 'rc' || github.event.label.name == 'rc-ml'))
+    if: ${{ github.repository == 'open-noodle/gallery' && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && ((github.event.action == 'labeled' && (github.event.label.name == 'rc' || github.event.label.name == 'rc-ml')) || (github.event.action == 'synchronize' && (contains(github.event.pull_request.labels.*.name, 'rc') || contains(github.event.pull_request.labels.*.name, 'rc-ml'))))) || (github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name != github.repository && github.event.action == 'labeled' && (github.event.label.name == 'rc' || github.event.label.name == 'rc-ml'))) }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -103,6 +90,7 @@ jobs:
           esac
 
   resolve:
+    if: ${{ github.repository == 'open-noodle/gallery' }}
     name: Resolve RC number
     # No `if:` needed — a skipped or failed `authorize` skips this job automatically.
     needs: authorize
@@ -195,6 +183,7 @@ jobs:
           echo "Next RC tag: ${rc_tag}"
 
   build:
+    if: ${{ github.repository == 'open-noodle/gallery' }}
     name: Build RC image
     # No `if:` needed — a skipped or failed `resolve` skips this job automatically.
     needs: resolve
@@ -216,10 +205,7 @@ jobs:
     # `skipped`, and gating on that would silently swallow the failure on a PR that
     # is labelled for RC. `cancelled` is excluded on both so a superseded run never
     # overwrites a good comment with a spurious failure.
-    if: >
-      always() &&
-      needs.resolve.result != 'skipped' && needs.resolve.result != 'cancelled' &&
-      needs.build.result != 'cancelled'
+    if: ${{ github.repository == 'open-noodle/gallery' && (always() && needs.resolve.result != 'skipped' && needs.resolve.result != 'cancelled' && needs.build.result != 'cancelled') }}
     runs-on: ubuntu-latest
     permissions:
       pull-requests: write

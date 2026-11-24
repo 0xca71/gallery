@@ -21,9 +21,10 @@ class RemoteImageProvider extends ImageProvider<RemoteImageProvider> {
   RemoteImageProvider.thumbnail({
     required String assetId,
     required String thumbhash,
+    DateTime? updatedAt,
     this.edited = true,
     this.decodeSize,
-  }) : url = getThumbnailUrlForRemoteId(assetId, thumbhash: thumbhash, edited: edited);
+  }) : url = getThumbnailUrlForRemoteId(assetId, thumbhash: thumbhash, edited: edited, updatedAt: updatedAt);
 
   @override
   Future<RemoteImageProvider> obtainKey(ImageConfiguration configuration) {
@@ -68,6 +69,7 @@ class RemoteFullImageProvider extends ImageProvider<RemoteFullImageProvider> {
   final String thumbhash;
   final AssetType assetType;
   final bool isAnimated;
+  final DateTime? updatedAt;
   final bool edited;
 
   /// Physical size of the thumbnail shown before the preview.
@@ -78,6 +80,7 @@ class RemoteFullImageProvider extends ImageProvider<RemoteFullImageProvider> {
     required this.thumbhash,
     required this.assetType,
     required this.isAnimated,
+    this.updatedAt,
     this.edited = true,
     this.thumbnailSize,
   });
@@ -95,7 +98,12 @@ class RemoteFullImageProvider extends ImageProvider<RemoteFullImageProvider> {
         stream: _animatedCodec(loader, key, decode),
         scale: 1.0,
         initialImage: loader.getInitialImage(
-          RemoteImageProvider.thumbnail(assetId: key.assetId, thumbhash: key.thumbhash, decodeSize: key.thumbnailSize),
+          RemoteImageProvider.thumbnail(
+            assetId: key.assetId,
+            thumbhash: key.thumbhash,
+            decodeSize: key.thumbnailSize,
+            updatedAt: key.updatedAt,
+          ),
         ),
         informationCollector: () => <DiagnosticsNode>[
           DiagnosticsProperty<ImageProvider>('Image provider', this),
@@ -113,6 +121,7 @@ class RemoteFullImageProvider extends ImageProvider<RemoteFullImageProvider> {
           assetId: key.assetId,
           thumbhash: key.thumbhash,
           edited: key.edited,
+          updatedAt: key.updatedAt,
           decodeSize: key.thumbnailSize,
         ),
       ),
@@ -180,11 +189,13 @@ class RemoteFullImageProvider extends ImageProvider<RemoteFullImageProvider> {
       type: AssetMediaSize.preview,
       thumbhash: key.thumbhash,
       edited: key.edited,
+      updatedAt: key.updatedAt,
     ),
   );
 
-  RemoteImageRequest _originalRequest(RemoteFullImageProvider key) =>
-      RemoteImageRequest(uri: getOriginalUrlForRemoteId(key.assetId, edited: key.edited));
+  RemoteImageRequest _originalRequest(RemoteFullImageProvider key) => RemoteImageRequest(
+    uri: getOriginalUrlForRemoteId(key.assetId, edited: key.edited, updatedAt: key.updatedAt),
+  );
 
   @override
   bool operator ==(Object other) {
@@ -194,6 +205,7 @@ class RemoteFullImageProvider extends ImageProvider<RemoteFullImageProvider> {
     if (other is RemoteFullImageProvider) {
       return assetId == other.assetId &&
           thumbhash == other.thumbhash &&
+          updatedAt == other.updatedAt &&
           isAnimated == other.isAnimated &&
           edited == other.edited;
     }
@@ -202,5 +214,6 @@ class RemoteFullImageProvider extends ImageProvider<RemoteFullImageProvider> {
   }
 
   @override
-  int get hashCode => assetId.hashCode ^ thumbhash.hashCode ^ isAnimated.hashCode ^ edited.hashCode;
+  int get hashCode =>
+      assetId.hashCode ^ thumbhash.hashCode ^ updatedAt.hashCode ^ isAnimated.hashCode ^ edited.hashCode;
 }

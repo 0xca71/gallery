@@ -152,6 +152,15 @@ export class ClassificationService extends BaseService {
 
   @OnJob({ name: JobName.AssetClassify, queue: QueueName.Classification })
   async handleClassify({ id }: { id: string }): Promise<JobStatus> {
+    return this.databaseRepository.withAssetLock(id, async () => {
+      if (await this.assetEditSaveRepository.isSaving(id, false)) {
+        return JobStatus.Skipped;
+      }
+      return this.handleClassifyUnlocked({ id });
+    });
+  }
+
+  private async handleClassifyUnlocked({ id }: { id: string }): Promise<JobStatus> {
     const asset = await this.assetRepository.getById(id);
     if (!asset) {
       return JobStatus.Failed;

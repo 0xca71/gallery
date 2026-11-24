@@ -13,10 +13,7 @@ name: Gallery Revert-to-Immich Validation
 # full design, the pass-criterion rationale, and the review history.
 
 on:
-  schedule:
-    # 05:00 UTC nightly — leaves ~1h buffer after late-night main merges so
-    # docker.yml has time to publish :main before we pull it.
-    - cron: '0 5 * * *'
+  # Automatic runs disabled for this standalone private fork.
   workflow_dispatch:
     inputs:
       gallery_image:
@@ -25,50 +22,6 @@ on:
       upstream_image:
         description: 'Stock Immich image to boot (default: the upstream.version tag). The rolling branch runs ahead of any Immich tag, so pass the commit image it sits on, e.g. ghcr.io/immich-app/immich-server:commit-<sha>.'
         required: false
-  pull_request:
-    # Only run on PRs that actually change something this workflow validates,
-    # so unrelated PRs don't pay the ~10min boot/pull cost on every push.
-    paths:
-      - 'scripts/revert-to-immich.sql'
-      - 'server/src/schema/migrations-gallery/**'
-      - 'server/src/schema/migrations/**'
-      - 'branding/config.json'
-      - 'server/package.json'
-      # The seed phase runs the PR's server, so its stock-client sync gating must trigger this too.
-      - 'server/src/services/sync.service.ts'
-      - 'server/src/repositories/sync.repository.ts'
-      - 'server/src/dtos/sync.dto.ts'
-      # The seed phase trims a video through the PR's server.
-      - 'server/src/gallery/dtos/video-trim*'
-      - 'server/src/gallery/repositories/video-trim*'
-      - 'server/src/gallery/controllers/gallery-asset.*'
-      - 'server/src/gallery/services/gallery-asset.*'
-      - 'server/src/gallery/utils/projected-duration.ts'
-      - 'server/src/services/media.service.ts'
-      # The stock round trip reads owner favorites, durations and files on stock Immich and reloads
-      # Gallery's plugin when Gallery comes back.
-      - 'server/src/schema/tables/**'
-      - 'server/src/schema/functions.ts'
-      - 'server/src/schema/gallery-functions.ts'
-      - 'server/src/database.ts'
-      - 'server/src/services/asset.service.ts'
-      - 'server/src/repositories/asset.repository.ts'
-      - 'server/src/repositories/asset-favorite.repository.ts'
-      - 'server/src/services/asset-media.service.ts'
-      - 'server/src/dtos/asset-response.dto.ts'
-      - 'server/src/utils/database.ts'
-      - 'server/src/utils/favorite.ts'
-      - 'server/src/services/storage.service.ts'
-      - 'server/src/backends/**'
-      - 'server/src/gallery/utils/backend-media-server.ts'
-      - 'server/src/cores/storage.core.ts'
-      - 'server/src/services/workflow-execution.service.ts'
-      - 'packages/plugin-gallery/**'
-      - '.github/workflows/gallery-revert-to-immich-validation.yml'
-      - '.github/scripts/revert-to-immich-data.sh'
-      - '.github/scripts/revert-to-immich-shared-people.sql'
-      - 'server/src/gallery/utils/person-group-split.ts'
-      - 'docs/docs/guides/switch-back-to-immich.md'
 
 concurrency:
   group: gallery-revert-to-immich-validation
@@ -80,6 +33,7 @@ permissions:
 
 jobs:
   validate:
+    if: ${{ github.repository == 'open-noodle/gallery' }}
     name: Validate revert-to-immich.sql
     runs-on: ubuntu-latest
     timeout-minutes: 40

@@ -8,6 +8,7 @@ import type { IBaseJob, IDeferrableJob, IDelayedJob, IEntityJob, INightlyJob } f
 
 export interface IAssetDetectFacesJob extends IEntityJob {
   force?: boolean;
+  refreshEmbeddings?: boolean;
 }
 
 export interface IAssetEditJob extends IEntityJob {
@@ -139,6 +140,7 @@ export interface JobTypeCounts {
 }
 
 export type GalleryJobItem =
+  | { name: JobName.AssetEditSave; data: IEntityJob }
   // Facial Recognition
   | { name: JobName.FaceIdentityBackfill; data: IFaceIdentityBackfillJob }
   | { name: JobName.FaceIdentityMaintenanceAfterRecognition; data: IDelayedJob }

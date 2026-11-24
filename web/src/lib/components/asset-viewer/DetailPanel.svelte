@@ -20,6 +20,7 @@
   } from '#lib/gallery/asset-viewer/detail-panel-filters.ts';
   import { assetViewerManager } from '#lib/managers/asset-viewer-manager.svelte.ts';
   import { authManager } from '#lib/managers/auth-manager.svelte.ts';
+  import { eventManager } from '#lib/managers/event-manager.svelte.ts';
   import { getAlbumsByAssetQuery } from '#lib/queries/album.query.ts';
   import { createPreloadedQuery, queryClient } from '#lib/queries/client.ts';
   import { getPublicConfigQuery } from '#lib/queries/config-public.query.ts';
@@ -101,6 +102,11 @@
     }
 
     return undefined;
+  };
+
+  const handleAddressResolved = (updated: AssetResponseDto) => {
+    asset = updated;
+    eventManager.emit('AssetUpdate', updated);
   };
 
   const handleRefreshPeople = async () => {
@@ -291,7 +297,7 @@
         </div>
       {/if}
 
-      <DetailPanelLocation isOwner={canEdit} {canFilter} {asset} />
+      <DetailPanelLocation isOwner={canEdit} {canFilter} {asset} onAddressResolved={handleAddressResolved} />
     </div>
   </section>
 
@@ -308,6 +314,7 @@
               city: asset.exifInfo?.city ?? null,
               state: asset.exifInfo?.state ?? null,
               country: asset.exifInfo?.country ?? null,
+              formattedAddress: asset.exifInfo?.formattedAddress ?? null,
             },
           ]}
           center={latlng}
@@ -321,6 +328,9 @@
           {#snippet popup({ marker })}
             <div class="flex flex-col items-center gap-1">
               {const { lat, lon } = $derived(marker)}
+              {#if marker.formattedAddress}
+                <p class="max-w-64 text-center wrap-break-word">{marker.formattedAddress}</p>
+              {/if}
               <Text fontWeight="bold">{lat.toPrecision(6)}, {lon.toPrecision(6)}</Text>
               <MapProviderLinks {lat} {lon} />
             </div>

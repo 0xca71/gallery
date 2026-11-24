@@ -98,6 +98,7 @@ export class AdaptiveImageLoader {
 
     this.highestLoadedQualityIndex = index;
     this.status.quality[quality] = 'success';
+    this.status.hasError = false;
     this.callbacks?.onUrlChange?.(this.qualityConfigs[quality].url);
     this.callbacks?.onImageReady?.();
 
@@ -111,12 +112,22 @@ export class AdaptiveImageLoader {
 
     const config = this.qualityConfigs[quality];
 
-    this.status.hasError = true;
+    this.status.hasError = !Object.values(this.status.quality).includes('success');
     this.status.quality[quality] = 'error';
     this.status.urls[quality] = undefined;
-    this.callbacks?.onError?.();
+    if (this.status.hasError) {
+      this.callbacks?.onError?.();
+    }
 
     config.onAfterError?.(this);
+  }
+
+  retry(quality: ImageQuality) {
+    if (this.destroyed || this.status.quality[quality] !== 'error') {
+      return;
+    }
+    this.status.quality[quality] = 'unloaded';
+    this.trigger(quality);
   }
 
   trigger(quality: ImageQuality) {
@@ -124,6 +135,9 @@ export class AdaptiveImageLoader {
       return false;
     }
 
+    if (this.status.quality[quality] === 'error') {
+      return false;
+    }
     const url = this.qualityConfigs[quality].url;
     if (!url) {
       this.qualityConfigs[quality].onAfterError?.(this);

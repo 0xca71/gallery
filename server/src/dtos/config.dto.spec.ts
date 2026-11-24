@@ -32,7 +32,7 @@ describe('config visibility', () => {
   });
 
   it('should expose the public properties to everyone', () => {
-    expect(getKeysDeep(mapPublicConfig(defaults)).sort()).toEqual(PUBLIC_PROPERTIES);
+    expect(getKeysDeep(mapPublicConfig(defaults)).sort()).toEqual([...PUBLIC_PROPERTIES, 'webDeleteToastThreshold']);
   });
 
   it('should expose everything public to logged in users as well', () => {

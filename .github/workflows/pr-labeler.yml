@@ -1,11 +1,13 @@
 name: 'Pull Request Labeler'
 on:
-  - pull_request_target # zizmor: ignore[dangerous-triggers] no attacker inputs are used here
+  workflow_dispatch:
+    # Automatic runs disabled for this standalone private fork.
 
 permissions: {}
 
 jobs:
   labeler:
+    if: ${{ github.repository == 'immich-app/immich' }}
     permissions:
       contents: read
       pull-requests: write

@@ -36,13 +36,14 @@ describe(StackRepository.name, () => {
       // withAssets inner-joins asset_exif (via innerJoinLateral) — every asset needs a row there
       // to be included at all.
       await ctx.newExif({ assetId: primary.id, make: 'Test' });
-      await ctx.newExif({ assetId: child.id, make: 'Test' });
+      await ctx.newExif({ assetId: child.id, make: 'Test', formattedAddress: 'saved child address' });
       const { stack } = await ctx.newStack({ ownerId: owner.id }, [primary.id, child.id]);
 
       await ctx.database.insertInto('asset_favorite').values({ userId: viewer.id, assetId: child.id }).execute();
 
       const asOwner = await sut.getById(stack.id, owner.id);
       expect(asOwner?.assets.find((a) => a.id === child.id)?.isFavoriteForUser).toBe(false);
+      expect(asOwner?.assets.find((a) => a.id === child.id)?.exifInfo.formattedAddress).toBe('saved child address');
 
       const asViewer = await sut.getById(stack.id, viewer.id);
       expect(asViewer?.assets.find((a) => a.id === child.id)?.isFavoriteForUser).toBe(true);

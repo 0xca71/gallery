@@ -3774,7 +3774,15 @@ describe(SharedSpaceService.name, () => {
 
       mocks.access.sharedSpace.checkMemberAccess.mockResolvedValue(new Set([spaceId]));
       mocks.sharedSpace.getMapMarkers.mockResolvedValue([
-        { id: assetId1, latitude: 40.7128, longitude: -74.006, city: 'New York', state: 'New York', country: 'USA' },
+        {
+          id: assetId1,
+          latitude: 40.7128,
+          longitude: -74.006,
+          city: 'New York',
+          state: 'New York',
+          country: 'USA',
+          formattedAddress: '10 Main Street',
+        },
         {
           id: assetId2,
           latitude: 34.0522,
@@ -3782,6 +3790,7 @@ describe(SharedSpaceService.name, () => {
           city: 'Los Angeles',
           state: 'California',
           country: 'USA',
+          formattedAddress: null,
         },
       ]);
 
@@ -3795,6 +3804,7 @@ describe(SharedSpaceService.name, () => {
         city: 'New York',
         state: 'New York',
         country: 'USA',
+        formattedAddress: '10 Main Street',
       });
       expect(result[1]).toEqual<MapMarkerResponseDto>({
         id: assetId2,
@@ -3803,6 +3813,7 @@ describe(SharedSpaceService.name, () => {
         city: 'Los Angeles',
         state: 'California',
         country: 'USA',
+        formattedAddress: null,
       });
       expect(mocks.access.sharedSpace.checkMemberAccess).toHaveBeenCalledWith(auth.user.id, new Set([spaceId]));
     });
@@ -3827,7 +3838,15 @@ describe(SharedSpaceService.name, () => {
 
       mocks.access.sharedSpace.checkMemberAccess.mockResolvedValue(new Set([spaceId]));
       mocks.sharedSpace.getMapMarkers.mockResolvedValue([
-        { id: assetId, latitude: 51.5074, longitude: -0.1278, city: null, state: null, country: null },
+        {
+          id: assetId,
+          latitude: 51.5074,
+          longitude: -0.1278,
+          city: null,
+          state: null,
+          country: null,
+          formattedAddress: null,
+        },
       ]);
 
       const result = await sut.getMapMarkers(auth, spaceId);
@@ -3840,6 +3859,7 @@ describe(SharedSpaceService.name, () => {
         city: null,
         state: null,
         country: null,
+        formattedAddress: null,
       });
     });
   });
@@ -13559,13 +13579,29 @@ describe(SharedSpaceService.name, () => {
     it('should return filtered map markers for the authenticated user', async () => {
       const auth = factory.auth();
       mocks.sharedSpace.getFilteredMapMarkers.mockResolvedValue([
-        { id: 'asset-1', lat: 48.8566, lon: 2.3522, city: 'Paris', state: 'Île-de-France', country: 'France' },
+        {
+          id: 'asset-1',
+          lat: 48.8566,
+          lon: 2.3522,
+          city: 'Paris',
+          state: 'Île-de-France',
+          country: 'France',
+          formattedAddress: '10 Avenue de Paris',
+        },
       ] as any);
 
       const result = await sut.getFilteredMapMarkers(auth, { personIds: ['person-1'] });
 
       expect(result).toEqual([
-        { id: 'asset-1', lat: 48.8566, lon: 2.3522, city: 'Paris', state: 'Île-de-France', country: 'France' },
+        {
+          id: 'asset-1',
+          lat: 48.8566,
+          lon: 2.3522,
+          city: 'Paris',
+          state: 'Île-de-France',
+          country: 'France',
+          formattedAddress: '10 Avenue de Paris',
+        },
       ]);
       expect(mocks.sharedSpace.getFilteredMapMarkers).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -13808,6 +13844,7 @@ describe(SharedSpaceService.name, () => {
       expect(result[0].city).toBeNull();
       expect(result[0].state).toBeNull();
       expect(result[0].country).toBeNull();
+      expect(result[0].formattedAddress).toBeNull();
     });
 
     // Which spaces widen the query and how person tokens resolve is the `filtered-map` row of

@@ -91,6 +91,7 @@
         externalToggle
         config={controller.panelConfig}
         timeBuckets={controller.panelTimeBuckets}
+        temporalSortOrder={controller.filters.sortOrder}
         storageKey={controller.storageKey}
         hidden={controller.isTimelineEmpty}
         personNames={controller.personNames}
@@ -150,6 +151,7 @@
         <FilterToolbar
           class="mb-2"
           grouping={controller.grouping}
+          groupingDisabled={controller.isRandomJumping}
           onGroupingChange={controller.onGroupingChange}
           showGrouping={controller.isBrowse && !controller.showSearchResults && !selecting}
           showFilters={controller.hasActiveFilters || pinnedChips.length > 0}
@@ -162,6 +164,12 @@
           onExpandFilters={() => (controller.filterCollapsed = false)}
           showSearchButton={searchButton && controller.isBrowse && !selecting}
           onSearch={searchButton ? () => globalSearchManager.open() : undefined}
+          showRandomButton={!!controller.config.randomJump &&
+            controller.isBrowse &&
+            !controller.showSearchResults &&
+            !selecting}
+          randomLoading={controller.isRandomJumping}
+          onRandom={controller.handleRandomJump}
         />
       {/if}
       {#if controller.showSearchResults && !pickerOpen}

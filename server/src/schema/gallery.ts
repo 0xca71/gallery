@@ -2,6 +2,7 @@ import { AlbumSpaceAssetAuditTable } from 'src/schema/tables/album-space-asset-a
 import { AlbumSpaceAssetTable } from 'src/schema/tables/album-space-asset.table.js';
 import { AssetDataSaverVideoTable } from 'src/schema/tables/asset-data-saver-video.table.js';
 import { AssetDuplicateChecksumTable } from 'src/schema/tables/asset-duplicate-checksum.table.js';
+import { AssetEditSaveTable } from 'src/schema/tables/asset-edit-save.table.js';
 import { AssetFaceCreatorTable } from 'src/schema/tables/asset-face-creator.table.js';
 import { AssetFaceVideoFrameTable } from 'src/schema/tables/asset-face-video-frame.table.js';
 import { AssetFavoriteAuditTable } from 'src/schema/tables/asset-favorite-audit.table.js';
@@ -65,6 +66,7 @@ export const galleryTables = [
   AlbumSpaceAssetAuditTable,
   AssetDataSaverVideoTable,
   AssetDuplicateChecksumTable,
+  AssetEditSaveTable,
   AssetFaceCreatorTable,
   AssetFavoriteTable,
   AssetFavoriteAuditTable,
@@ -125,6 +127,7 @@ export interface GalleryDB {
   album_space_asset_audit: AlbumSpaceAssetAuditTable;
   asset_data_saver_video: AssetDataSaverVideoTable;
   asset_duplicate_checksum: AssetDuplicateChecksumTable;
+  asset_edit_save: AssetEditSaveTable;
   asset_face_creator: AssetFaceCreatorTable;
   asset_favorite: AssetFavoriteTable;
   asset_favorite_audit: AssetFavoriteAuditTable;

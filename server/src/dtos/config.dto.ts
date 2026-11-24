@@ -50,6 +50,7 @@ import {
   galleryTopLevelDefaults,
 } from 'src/gallery/dtos/config.dto.js';
 import { GalleryDataSaverVideoSchema, galleryDataSaverVideoDefaults } from 'src/gallery/dtos/data-saver-video.dto.js';
+import { GalleryPublicConfigExtension } from 'src/gallery/dtos/server.dto.js';
 import type { DeepPartial } from 'src/types.js';
 
 const { Admin, User, Public } = ConfigVisibility;
@@ -538,6 +539,11 @@ const applyVisibilityRecursive = (
       shape[key] = visible;
     }
   }
+  // Public, environment-only fields are not stored in the admin config. Extend the fresh root shape
+  // here: extending a named Zod schema later retains its old root $defs identity in OpenAPI.
+  if (visibility === Public && schema === AdminConfigSchemaWithVisibility) {
+    Object.assign(shape, GalleryPublicConfigExtension);
+  }
 
   let visible: z.ZodType | undefined;
   if (Object.keys(shape).length > 0) {
@@ -577,7 +583,9 @@ const stripVisibilityMetadata = <T extends z.ZodType>(schema: T): T => {
 
 const AdminConfigSchema = AdminConfigSchemaWithVisibility;
 const UserConfigSchema = applyVisibility(User)! as z.ZodType<DeepPartial<SystemConfig>>;
-const PublicConfigSchema = applyVisibility(Public)! as z.ZodType<DeepPartial<SystemConfig>>;
+const PublicConfigSchema = applyVisibility(Public)! as z.ZodType<
+  DeepPartial<SystemConfig> & { webDeleteToastThreshold: number }
+>;
 
 // prevent visibility metadata from leaking to openapi spec
 // eslint-disable-next-line unicorn/no-top-level-side-effects
@@ -614,8 +622,8 @@ export function mapUserConfig(config: SystemConfig): UserConfigDto {
   return UserConfigSchema.parse(config);
 }
 
-export function mapPublicConfig(config: SystemConfig): PublicConfigDto {
-  return PublicConfigSchema.parse(config);
+export function mapPublicConfig(config: SystemConfig, webDeleteToastThreshold = 20): PublicConfigDto {
+  return PublicConfigSchema.parse({ ...config, webDeleteToastThreshold });
 }
 
 export const defaults = Object.freeze<SystemConfig>({

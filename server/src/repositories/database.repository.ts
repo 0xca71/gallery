@@ -1,11 +1,12 @@
 import { schemaDiff, schemaFromCode, schemaFromDatabase } from '@immich/sql-tools';
-import { Injectable } from '@nestjs/common';
+import { ConflictException, Injectable } from '@nestjs/common';
 import AsyncLock from 'async-lock';
 import { Kysely, Transaction, sql } from 'kysely';
 import { FileMigrationProvider, Migrator } from 'kysely/migration';
 import { InjectKysely } from 'nestjs-kysely';
 import { readdir } from 'node:fs/promises';
 import { join } from 'node:path';
+import { setTimeout } from 'node:timers/promises';
 import { diff } from 'semver';
 import z from 'zod';
 import {
@@ -30,7 +31,7 @@ import 'src/schema/index.js'; // make sure all schema definitions are imported f
 // eslint-disable-next-line import-x/no-duplicates
 import { DB } from 'src/schema/index.js';
 import type { ExtensionVersion, VectorExtension } from 'src/types.js';
-import { vectorIndexQuery } from 'src/utils/database.js';
+import { getKyselyConfig, vectorIndexQuery } from 'src/utils/database.js';
 
 export let cachedVectorExtension: VectorExtension | undefined;
 export async function getVectorExtension(runner: Kysely<DB>): Promise<VectorExtension> {
@@ -62,6 +63,7 @@ export const probes: Record<VectorIndex, number> = {
 @Injectable()
 export class DatabaseRepository {
   private readonly asyncLock = new AsyncLock();
+  private assetLockDatabase?: Kysely<DB>;
 
   constructor(
     @InjectKysely() private db: Kysely<DB>,
@@ -72,6 +74,7 @@ export class DatabaseRepository {
   }
 
   async shutdown() {
+    await this.assetLockDatabase?.destroy();
     await this.db.destroy();
   }
 
@@ -492,6 +495,43 @@ export class DatabaseRepository {
     });
 
     return res as R;
+  }
+
+  /** Cross-worker serialization. Contenders release their pool connection while waiting. */
+  async withAssetLock<R>(
+    assetId: string,
+    callback: () => Promise<R>,
+    lockDatabase?: Kysely<DB>,
+    wait = true,
+  ): Promise<R> {
+    // Use a separate pool so a held lock cannot exhaust connections needed by the callback's transaction.
+    const runner =
+      lockDatabase ??
+      (this.assetLockDatabase ??= new Kysely<DB>(getKyselyConfig(this.configRepository.getEnv().database.config)));
+    for (;;) {
+      const result = await runner
+        .connection()
+        .execute(async (connection): Promise<{ acquired: false } | { acquired: true; value: R }> => {
+          const { rows } = await sql<{
+            acquired: boolean;
+          }>`SELECT pg_try_advisory_lock(hashtextextended(${assetId}, 18418)) AS acquired`.execute(connection);
+          if (!rows[0].acquired) {
+            return { acquired: false };
+          }
+          try {
+            return { acquired: true, value: await callback() };
+          } finally {
+            await sql`SELECT pg_advisory_unlock(hashtextextended(${assetId}, 18418))`.execute(connection);
+          }
+        });
+      if (result.acquired) {
+        return result.value;
+      }
+      if (!wait) {
+        throw new ConflictException('Asset file is being processed by another worker');
+      }
+      await setTimeout(250);
+    }
   }
 
   tryLock(lock: DatabaseLock): Promise<boolean> {

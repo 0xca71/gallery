@@ -828,6 +828,7 @@ describe(MetadataService.name, () => {
         width: null,
         height: null,
       });
+      expect(mocks.map.ensureDetailedAddress).not.toHaveBeenCalled();
     });
 
     it('should apply reverse geocoding', async () => {
@@ -835,6 +836,7 @@ describe(MetadataService.name, () => {
       mocks.assetJob.getForMetadataExtraction.mockResolvedValue(getForMetadataExtraction(asset));
       mocks.systemMetadata.get.mockResolvedValue({ reverseGeocoding: { enabled: true } });
       mocks.map.reverseGeocode.mockResolvedValue({ city: 'City', state: 'State', country: 'Country' });
+      mocks.map.ensureDetailedAddress.mockResolvedValue(null);
       mocks.storage.stat.mockResolvedValue({
         size: 123_456,
         mtime: asset.fileModifiedAt,
@@ -860,6 +862,47 @@ describe(MetadataService.name, () => {
         width: null,
         height: null,
       });
+      expect(mocks.map.ensureDetailedAddress).toHaveBeenCalledWith(asset.id, 'metadata');
+      expect(mocks.asset.upsertExif.mock.invocationCallOrder[0]).toBeLessThan(
+        mocks.map.ensureDetailedAddress.mock.invocationCallOrder[0],
+      );
+    });
+
+    it('resolves mainland detailed addresses from persisted GPS before publishing extracted metadata', async () => {
+      const point = { latitude: 30.602597, longitude: 114.186145 };
+      const asset = AssetFactory.from().exif(point).build();
+      mocks.assetJob.getForMetadataExtraction.mockResolvedValue(getForMetadataExtraction(asset));
+      mocks.systemMetadata.get.mockResolvedValue({ reverseGeocoding: { enabled: true } });
+      mocks.map.reverseGeocode.mockResolvedValue({ city: '武汉市', state: '湖北省', country: 'China' });
+      mocks.map.ensureDetailedAddress.mockResolvedValue('中国湖北省武汉市硚口区长丰街道');
+      mockReadTags({ GPSLatitude: point.latitude, GPSLongitude: point.longitude });
+
+      await sut.handleMetadataExtraction({ id: asset.id });
+
+      expect(mocks.asset.upsertExif).toHaveBeenCalledWith(
+        expect.objectContaining({
+          exif: expect.objectContaining({
+            assetId: asset.id,
+            ...point,
+            city: '武汉市',
+            state: '湖北省',
+            country: 'China',
+          }),
+          lockedPropertiesBehavior: 'skip',
+        }),
+      );
+      expect(mocks.map.ensureDetailedAddress).toHaveBeenCalledExactlyOnceWith(asset.id, 'metadata');
+      expect(mocks.asset.upsertExif.mock.invocationCallOrder[0]).toBeLessThan(
+        mocks.map.ensureDetailedAddress.mock.invocationCallOrder[0],
+      );
+      expect(mocks.event.emit).toHaveBeenCalledWith('AssetMetadataExtracted', {
+        assetId: asset.id,
+        userId: asset.ownerId,
+        source: undefined,
+      });
+      expect(mocks.map.ensureDetailedAddress.mock.invocationCallOrder[0]).toBeLessThan(
+        mocks.event.emit.mock.invocationCallOrder.at(-1)!,
+      );
     });
 
     it('should discard latitude and longitude on null island', async () => {

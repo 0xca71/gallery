@@ -174,6 +174,7 @@ pnpmfileChecksum: sha256-un98do36L0wZyqsjcLozQ3YUadCAn2yz5bXcBbOuyDA=
 
 patchedDependencies:
   '@immich/ui@0.91.1': ed34eaceb3a250f8bf4d88656c388e128849ace3666426543324df59ecbbe613
+  '@zoom-image/core@0.43.1': 5fc8e1980564801ed07002f1390213be0ce441cb0e7cbfcae3c156bff6aac8ea
 
 importers:
 
@@ -1057,7 +1058,7 @@ importers:
         version: 2.24.0
       '@zoom-image/core':
         specifier: ^0.43.0
-        version: 0.43.1
+        version: 0.43.1(patch_hash=5fc8e1980564801ed07002f1390213be0ce441cb0e7cbfcae3c156bff6aac8ea)
       '@zoom-image/svelte':
         specifier: ^0.3.0
         version: 0.3.11(svelte@5.57.2(@typescript-eslint/types@8.72.0))
@@ -19880,13 +19881,13 @@ snapshots:
 
   '@zip.js/zip.js@2.24.0': {}
 
-  '@zoom-image/core@0.43.1':
+  '@zoom-image/core@0.43.1(patch_hash=5fc8e1980564801ed07002f1390213be0ce441cb0e7cbfcae3c156bff6aac8ea)':
     dependencies:
       '@namnode/store': 0.1.0
 
   '@zoom-image/svelte@0.3.11(svelte@5.57.2(@typescript-eslint/types@8.72.0))':
     dependencies:
-      '@zoom-image/core': 0.43.1
+      '@zoom-image/core': 0.43.1(patch_hash=5fc8e1980564801ed07002f1390213be0ce441cb0e7cbfcae3c156bff6aac8ea)
       svelte: 5.57.2(@typescript-eslint/types@8.72.0)
 
   aaguids@0.0.72: {}

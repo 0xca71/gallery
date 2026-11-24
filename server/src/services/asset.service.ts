@@ -1,4 +1,4 @@
-import { BadRequestException, ForbiddenException, Injectable } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Injectable } from '@nestjs/common';
 import { isUndefined, omitBy } from 'lodash-es';
 import { DateTime, Duration } from 'luxon';
 import { isDiskPath } from 'src/backends/disk-storage.backend.js';
@@ -57,7 +57,7 @@ import { isDeadlockError, retryOnDeadlock, updateLockedColumns } from 'src/utils
 import { extractTimeZone } from 'src/utils/date.js';
 import { favoriteViewerId } from 'src/utils/favorite.js';
 import { batched, findOrFail } from 'src/utils/misc.js';
-import { transformOcrBoundingBox } from 'src/utils/transform.js';
+import { getCropBoundsDimensions, transformOcrBoundingBox } from 'src/utils/transform.js';
 
 @Injectable()
 export class AssetService extends BaseService {
@@ -111,6 +111,41 @@ export class AssetService extends BaseService {
     );
 
     return data;
+  }
+
+  async unlinkAndDeleteLivePhoto(auth: AuthDto, id: string): Promise<AssetResponseDto> {
+    await this.requireAccess({ auth, permission: Permission.AssetDelete, ids: [id] });
+    const photo = await this.findOrFail(id);
+    if (photo.type !== AssetType.Image) {
+      throw new BadRequestException('Live photo must be an image');
+    }
+    if (!photo.livePhotoVideoId) {
+      return this.get(auth, id) as Promise<AssetResponseDto>;
+    }
+
+    const videoId = photo.livePhotoVideoId;
+    await this.requireAccess({ auth, permission: Permission.AssetDelete, ids: [videoId] });
+    await onBeforeUnlink({ asset: this.assetRepository, event: this.eventRepository }, { livePhotoVideoId: videoId });
+
+    const result = await retryOnDeadlock(() =>
+      this.assetRepository.unlinkAndDeleteLivePhoto({
+        photoId: id,
+        videoId,
+        ownerId: auth.user.id,
+        ...(auth.session?.hasElevatedPermission && { hasElevatedPermission: true }),
+      }),
+    );
+    if (result === 'shared') {
+      throw new ConflictException('Live photo video is still linked to another photo');
+    }
+    if (result === 'changed') {
+      throw new ConflictException('Live photo association changed; refresh the photo and try again');
+    }
+
+    // Reuse permanent deletion, including file cleanup and client deletion audits. Do not
+    // restore the video's visibility or emit AssetShow as the unlink-only path does.
+    await this.eventRepository.emit('AssetDeleteAll', { assetIds: [videoId], userId: auth.user.id });
+    return this.get(auth, id) as Promise<AssetResponseDto>;
   }
 
   async update(auth: AuthDto, id: string, dto: UpdateAssetDto): Promise<AssetResponseDto> {
@@ -227,6 +262,7 @@ export class AssetService extends BaseService {
         description,
         dateTimeOriginal,
         ...geo,
+        formattedAddress: latitude === undefined && longitude === undefined ? undefined : null,
       },
       isUndefined,
     );
@@ -390,6 +426,16 @@ export class AssetService extends BaseService {
 
   @OnJob({ name: JobName.AssetDelete, queue: QueueName.BackgroundTask })
   async handleAssetDeletion(job: JobOf<JobName.AssetDelete>): Promise<JobStatus> {
+    return this.databaseRepository.withAssetLock(job.id, async () => {
+      if (await this.assetEditSaveRepository.isSaving(job.id)) {
+        await this.jobRepository.queue({ name: JobName.AssetDelete, data: { ...job, delay: 2000 } });
+        return JobStatus.Skipped;
+      }
+      return this.handleAssetDeletionUnlocked(job);
+    });
+  }
+
+  private async handleAssetDeletionUnlocked(job: JobOf<JobName.AssetDelete>): Promise<JobStatus> {
     const { id, deleteOnDisk: isDeleteOnDiskRequest } = job;
 
     const asset = await this.assetJobRepository.getForAssetDeletion(id);
@@ -602,6 +648,15 @@ export class AssetService extends BaseService {
     await this.jobRepository.queueAll(jobs);
   }
 
+  async ensureAssetAddress(auth: AuthDto, id: string): Promise<{ formattedAddress: string | null }> {
+    await this.requireAccess({ auth, permission: Permission.AssetRead, ids: [id] });
+    if (auth.sharedLink) {
+      throw new ForbiddenException('Shared links cannot resolve detailed addresses');
+    }
+    const { reverseGeocoding } = await this.getConfig({ withCache: true });
+    return { formattedAddress: reverseGeocoding.enabled ? await this.mapRepository.ensureDetailedAddress(id) : null };
+  }
+
   private findOrFail(id: string) {
     return findOrFail(() => this.assetRepository.getById(id), 'Asset');
   }
@@ -633,6 +688,7 @@ export class AssetService extends BaseService {
         longitude,
         rating,
         ...geo,
+        formattedAddress: latitude === undefined && longitude === undefined ? undefined : null,
       },
       isUndefined,
     );
@@ -663,6 +719,13 @@ export class AssetService extends BaseService {
   }
 
   async editAsset(auth: AuthDto, id: string, dto: AssetEditsCreateDto): Promise<AssetEditsResponseDto> {
+    return this.databaseRepository.withAssetLock(id, async () => {
+      await this.assetEditSaveRepository.assertNotSaving(id);
+      return this.editAssetUnlocked(auth, id, dto);
+    });
+  }
+
+  private async editAssetUnlocked(auth: AuthDto, id: string, dto: AssetEditsCreateDto): Promise<AssetEditsResponseDto> {
     await this.requireAccess({ auth, permission: Permission.AssetEditCreate, ids: [id] });
 
     const asset = await this.assetRepository.getForEdit(id);
@@ -711,8 +774,9 @@ export class AssetService extends BaseService {
         throw new BadRequestException('Asset dimensions are not available for editing');
       }
 
+      const bounds = getCropBoundsDimensions(edits, { width: assetWidth, height: assetHeight });
       const { x, y, width, height } = crop.parameters;
-      if (x + width > assetWidth || y + height > assetHeight) {
+      if (x + width > bounds.width || y + height > bounds.height) {
         throw new BadRequestException('Crop parameters are out of bounds');
       }
     }
@@ -734,6 +798,13 @@ export class AssetService extends BaseService {
   }
 
   async removeAssetEdits(auth: AuthDto, id: string): Promise<void> {
+    return this.databaseRepository.withAssetLock(id, async () => {
+      await this.assetEditSaveRepository.assertNotSaving(id);
+      return this.removeAssetEditsUnlocked(auth, id);
+    });
+  }
+
+  private async removeAssetEditsUnlocked(auth: AuthDto, id: string): Promise<void> {
     await this.requireAccess({ auth, permission: Permission.AssetEditDelete, ids: [id] });
 
     const asset = await this.assetRepository.getById(id);

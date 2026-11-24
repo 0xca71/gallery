@@ -188,7 +188,18 @@
     }
   }
 
-  type FeaturePoint = Feature<Point, { id: string; city: string | null; state: string | null; country: string | null }>;
+  type FeaturePoint = Feature<
+    Point,
+    {
+      id: string;
+      lat: number;
+      lon: number;
+      city: string | null;
+      state: string | null;
+      country: string | null;
+      formattedAddress?: string | null;
+    }
+  >;
 
   const asFeature = (marker: MapMarkerResponseDto): FeaturePoint => {
     return {
@@ -196,23 +207,31 @@
       geometry: { type: 'Point', coordinates: [marker.lon, marker.lat] },
       properties: {
         id: marker.id,
+        lat: marker.lat,
+        lon: marker.lon,
         city: marker.city,
         state: marker.state,
         country: marker.country,
+        formattedAddress: marker.formattedAddress,
       },
     };
   };
 
   const asMarker = (feature: Feature<Geometry, GeoJsonProperties>): MapMarkerResponseDto => {
     const featurePoint = feature as FeaturePoint;
-    const coords = LngLat.convert(featurePoint.geometry.coordinates as [number, number]);
+    // MapLibre quantizes tile geometry; popup metadata must retain the original asset GPS.
+    const coords =
+      Number.isFinite(featurePoint.properties.lat) && Number.isFinite(featurePoint.properties.lon)
+        ? undefined
+        : LngLat.convert(featurePoint.geometry.coordinates as [number, number]);
     return {
-      lat: coords.lat,
-      lon: coords.lng,
+      lat: coords?.lat ?? featurePoint.properties.lat,
+      lon: coords?.lng ?? featurePoint.properties.lon,
       id: featurePoint.properties.id,
       city: featurePoint.properties.city,
       state: featurePoint.properties.state,
       country: featurePoint.properties.country,
+      formattedAddress: featurePoint.properties.formattedAddress,
     };
   };
 
@@ -461,7 +480,9 @@
           features: mapMarkers?.map((marker) => asFeature(marker)) ?? [],
         }}
         id="geojson"
+        promoteId="id"
         cluster={{ radius: 35, maxZoom: 18 }}
+        maxzoom={19}
       >
         <MarkerLayer
           applyToClusters
@@ -487,7 +508,12 @@
         >
           {#snippet children({ feature }: { feature: Feature })}
             {#if useLocationPin}
-              <Icon icon={mdiMapMarker} size="50px" class="translate-y-[calc(5px-50%)] text-primary" />
+              <Icon
+                icon={mdiMapMarker}
+                size="50px"
+                class="translate-y-[calc(5px-50%)] text-primary"
+                data-testid="map-location-marker"
+              />
             {:else}
               <img
                 src={getAssetMediaUrl({ id: feature.properties?.id })}
@@ -500,9 +526,13 @@
                 data-testid="map-marker"
               />
             {/if}
-            {#if popup}
-              <Popup offset={[0, -30]} openOn="click" closeOnClickOutside>
-                {@render popup({ marker: asMarker(feature) })}
+            {#if popup || feature.properties?.formattedAddress}
+              <Popup offset={[0, -30]} openOn={popup ? 'click' : 'hover'} closeOnClickOutside>
+                {#if popup}
+                  {@render popup({ marker: asMarker(feature) })}
+                {:else}
+                  <p class="max-w-64 text-center wrap-break-word">{feature.properties?.formattedAddress}</p>
+                {/if}
               </Popup>
             {/if}
           {/snippet}

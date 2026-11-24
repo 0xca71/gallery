@@ -1,14 +1,14 @@
 name: Storage Migration Tests
 
 on:
-  schedule:
-    - cron: '0 4 * * *'
-  workflow_dispatch: {}
+  workflow_dispatch:
+    # Automatic runs disabled for this standalone private fork.
 
 permissions: {}
 
 jobs:
   storage-migration:
+    if: ${{ github.repository == 'open-noodle/gallery' }}
     name: Storage Migration E2E
     runs-on: ubuntu-latest
     permissions:

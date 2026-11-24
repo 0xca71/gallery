@@ -6,7 +6,9 @@ import type { Page } from '@playwright/test';
 const zoomIn = async (page: Page) => {
   const { width, height } = page.viewportSize()!;
   await page.mouse.move(width / 2, height / 2);
-  await page.mouse.wheel(0, -1);
+  await page.keyboard.down('Alt');
+  await page.mouse.wheel(0, -150);
+  await page.keyboard.up('Alt');
 };
 
 test.describe('photo viewer', () => {

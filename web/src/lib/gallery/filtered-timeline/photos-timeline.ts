@@ -20,6 +20,7 @@ export const photosTimelineConfig = (
   getTimelineManager: () => TimelineManager | undefined,
 ): FilteredTimelineConfig => ({
   name: 'photos',
+  randomJump: true,
   getTimelineManager,
   scope: () => scope,
   timelineOptions: (filters) => ({

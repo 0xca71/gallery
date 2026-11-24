@@ -1,6 +1,6 @@
 # Editing
 
-Gallery supports non-destructive editing of photos and videos. An edit never modifies the original file. It creates a new version with the edits applied, and you can always revert to the original.
+Gallery supports cropping, rotation, mirroring and adjustments for photos, and non-destructive video trimming. Ordinary edits leave the original file untouched. The web photo editor also offers explicit file-saving options: save a new image or overwrite the original.
 
 ## Photo Editing
 
@@ -27,6 +27,19 @@ The **Edit** panel provides four controls:
 Double-click (or double-tap) a slider to reset just that value to its default. Adjustments are matched to the same formulas as the CSS `filter` property, so the live preview while dragging a slider is an exact preview of the saved result, not an approximation.
 
 Adjustments are made in the web app. The mobile app shows adjusted photos but cannot change the adjustment yet; cropping, rotating or mirroring a photo there keeps it. [Switching back](/guides/switch-back-to-immich) removes adjustments, which have no equivalent there, and keeps the other edits.
+
+## Saving an Image File
+
+The web photo editor can render the current crop, rotation, mirroring and adjustments into an image file:
+
+- **Save as a new image** creates a separate asset. The source file and its non-destructive edits remain unchanged. This requires both permission to edit the source and permission to upload images.
+- **Overwrite original** replaces the source file and updates the existing asset. This is destructive: reverting the asset's edits afterwards cannot restore the previous file. Take a backup before using it.
+
+Overwriting an external-library image requires a writable file and directory inside the server container. Read-only external libraries can still be used as the source of a new image. JPEG, PNG and WebP output keep their supported format. Other static formats are saved as PNG when the decoded image contains transparency, or JPEG otherwise; the filename and extension are updated to match the output. Live Photos, GIFs, SVGs and panoramas do not support file saving.
+
+Both options apply adjustments and geometry together. After overwriting, the already-rendered adjustment and crop records are cleared so the new original is not adjusted twice. Capture dates, GPS and EXIF metadata are preserved; thumbnails and analysis results are rebuilt for the saved image.
+
+A failed or interrupted save retains its recovery journal. Let Gallery finish or recover pending saves before rolling back or [switching to Immich](/guides/switch-back-to-immich). The switch-back script refuses to discard unfinished recovery records. After the migration-ledger split, switching to an earlier Gallery image alone is not a safe rollback; follow the [rollback guide](/install/upgrading#rolling-back-to-an-earlier-release).
 
 ## Video Trimming
 
@@ -87,7 +100,7 @@ When you download an edited asset, Gallery provides the edited version of the as
 
 ## Reverting Edits
 
-To revert an edited asset back to its original:
+To revert an ordinary non-destructive edit back to the asset's current original (not a file replaced by **Overwrite original**):
 
 1. Open the asset in the viewer
 2. Open the editor

@@ -134,6 +134,7 @@ const asset = (overrides: Partial<AssetResponseDto> = {}): AssetResponseDto => {
       city: null,
       state: null,
       country: null,
+      formattedAddress: null,
       description: '',
       projectionType: null,
       rating: null,

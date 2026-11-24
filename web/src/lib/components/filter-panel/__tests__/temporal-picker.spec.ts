@@ -383,3 +383,30 @@ describe('TemporalPicker component', () => {
     expect(monthView.getByTestId('month-btn-6').element().className).toContain('motion-reduce:transition-none');
   });
 });
+
+describe('temporal browsing with independent baseline buckets', () => {
+  const baseline = [
+    { timeBucket: '2024-01-01', count: 446 },
+    { timeBucket: '2024-07-01', count: 517 },
+    { timeBucket: '2024-08-01', count: 38 },
+    { timeBucket: '2023-05-01', count: 10 },
+  ];
+  it('orders the year cards newest first on descending timeline surfaces', async () => {
+    const view = await render(TemporalPicker, { timeBuckets: baseline, sortOrder: 'desc' });
+    const buttons = view.getByTestId('year-grid').element().querySelectorAll('button');
+    expect([...buttons].map((button) => button.dataset.testid)).toEqual(['year-btn-2024', 'year-btn-2023']);
+  });
+  it('keeps sibling month counts and switches directly from a selected month', async () => {
+    const onMonthSelect = vi.fn();
+    const view = await render(TemporalPicker, {
+      timeBuckets: baseline,
+      selectedYear: 2024,
+      selectedMonth: 7,
+      onMonthSelect,
+    });
+    await expect.element(view.getByTestId('month-btn-1')).toHaveTextContent('Jan 446');
+    await expect.element(view.getByTestId('month-btn-8')).toHaveTextContent('Aug 38');
+    await view.getByTestId('month-btn-8').click();
+    expect(onMonthSelect).toHaveBeenCalledWith(2024, 8);
+  });
+});

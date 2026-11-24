@@ -54,4 +54,5 @@ memories_current en:e0d1b682
 memories_show_upcoming en:0f87babc
 memories_upcoming en:5f1a2542
 reset_sqlite_error_hint en:0546b1f2
+slideshow_body exclusive
 version_announcement_closing

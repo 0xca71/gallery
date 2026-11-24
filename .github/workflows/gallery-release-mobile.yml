@@ -13,6 +13,7 @@ name: Release Mobile
 # See specs/2026-05-18-decoupled-release-design.md.
 
 on:
+  # Automatic runs disabled for this standalone private fork.
   workflow_dispatch:
     inputs:
       version:
@@ -28,6 +29,7 @@ permissions: {}
 
 jobs:
   validate:
+    if: ${{ github.repository == 'open-noodle/gallery' }}
     name: Validate
     runs-on: ubuntu-latest
     permissions:
@@ -53,12 +55,15 @@ jobs:
           echo "Version: $VERSION"
 
   build-mobile:
+    if: ${{ github.repository == 'open-noodle/gallery' }}
     name: Build Mobile
     needs: validate
     permissions:
       contents: read
-    uses: ./.github/workflows/gallery-build-mobile.yml
+    # The local reusable build is retired; preserve the current upstream Rust-era release template.
+    uses: open-noodle/gallery/.github/workflows/gallery-build-mobile.yml@94f05b13f3cd3adcb0663c273c192fea898b79d8
     with:
+      ref: ${{ github.sha }}
       environment: production
       version: ${{ inputs.version }}
     secrets:
@@ -75,6 +80,7 @@ jobs:
       FASTLANE_TEAM_ID: ${{ secrets.FASTLANE_TEAM_ID }}
 
   record:
+    if: ${{ github.repository == 'open-noodle/gallery' }}
     name: Record built commit
     needs: build-mobile
     runs-on: ubuntu-latest

@@ -53,6 +53,49 @@ describe('Image component', () => {
     expect(onLoad).toHaveBeenCalledOnce();
   });
 
+  it('waits for decode before making the original layer ready', async () => {
+    const onLoad = vi.fn();
+    const { baseElement } = await render(Image, { src: '/test.jpg', decodeBeforeLoad: true, onLoad });
+    const image = baseElement.querySelector('img')!;
+    let finishDecode!: () => void;
+    vi.spyOn(image, 'decode').mockReturnValue(
+      new Promise<void>((resolve) => {
+        finishDecode = resolve;
+      }),
+    );
+    image.dispatchEvent(new Event('load'));
+    expect(onLoad).not.toHaveBeenCalled();
+    finishDecode();
+    await expect.poll(() => onLoad.mock.calls.length).toBe(1);
+  });
+
+  it('ignores decoding a previous asset after navigation', async () => {
+    const onLoad = vi.fn();
+    const { baseElement, rerender } = await render(Image, { src: '/old.jpg', decodeBeforeLoad: true, onLoad });
+    let finishDecode!: () => void;
+    vi.spyOn(baseElement.querySelector('img')!, 'decode').mockReturnValue(
+      new Promise<void>((resolve) => {
+        finishDecode = resolve;
+      }),
+    );
+    baseElement.querySelector('img')!.dispatchEvent(new Event('load'));
+    await rerender({ src: '/new.jpg', decodeBeforeLoad: true, onLoad });
+    finishDecode();
+    await Promise.resolve();
+    expect(onLoad).not.toHaveBeenCalled();
+  });
+
+  it('reports original decoding failure without replacing the preview', async () => {
+    const onLoad = vi.fn();
+    const onError = vi.fn();
+    const { baseElement } = await render(Image, { src: '/test.jpg', decodeBeforeLoad: true, onLoad, onError });
+    const image = baseElement.querySelector('img')!;
+    vi.spyOn(image, 'decode').mockRejectedValue(new Error('Invalid image'));
+    image.dispatchEvent(new Event('load'));
+    await expect.poll(() => onError.mock.calls.length).toBe(1);
+    expect(onLoad).not.toHaveBeenCalled();
+  });
+
   it('calls onError when image fails to load', async () => {
     const onError = vi.fn();
     const { baseElement } = await render(Image, { src: '/test.jpg', onError });

@@ -1,9 +1,7 @@
 name: Static Code Analysis
 on:
   workflow_dispatch:
-  pull_request:
-  push:
-    branches: [main, 'release/*']
+    # Automatic runs disabled for this standalone private fork.
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -13,6 +11,7 @@ permissions: {}
 
 jobs:
   pre-job:
+    if: ${{ github.repository == 'immich-app/immich' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -38,7 +37,7 @@ jobs:
   mobile-dart-analyze:
     name: Run Dart Code Analysis
     needs: pre-job
-    if: ${{ fromJSON(needs.pre-job.outputs.should_run).mobile == true }}
+    if: ${{ github.repository == 'immich-app/immich' && (fromJSON(needs.pre-job.outputs.should_run).mobile == true) }}
     runs-on: ubuntu-latest
     permissions:
       contents: read

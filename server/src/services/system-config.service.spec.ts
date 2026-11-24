@@ -1165,3 +1165,16 @@ describe(SystemConfigService.name, () => {
     });
   });
 });
+
+describe('environment-only public viewer configuration', () => {
+  it('publishes the configured deletion threshold without exposing backup credentials', async () => {
+    const { sut, mocks } = newTestService(SystemConfigService);
+    mocks.config.getEnv.mockReturnValue(mockEnvData({ webDeleteToastThreshold: 42 }));
+
+    const config = await sut.getPublicConfig();
+
+    expect(config.webDeleteToastThreshold).toBe(42);
+    expect(config).not.toHaveProperty('backup');
+    expect(config).not.toHaveProperty('oauth.clientSecret');
+  });
+});

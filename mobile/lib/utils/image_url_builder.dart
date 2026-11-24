@@ -2,8 +2,9 @@ import 'package:immich_mobile/domain/models/store.model.dart';
 import 'package:immich_mobile/entities/store.entity.dart';
 import 'package:openapi/api.dart';
 
-String getOriginalUrlForRemoteId(final String id, {bool edited = true}) {
-  return '${Store.get(StoreKey.serverEndpoint)}/assets/$id/original?edited=$edited';
+String getOriginalUrlForRemoteId(final String id, {bool edited = true, DateTime? updatedAt}) {
+  final url = '${Store.get(StoreKey.serverEndpoint)}/assets/$id/original?edited=$edited';
+  return updatedAt == null ? url : '$url&v=${updatedAt.microsecondsSinceEpoch}';
 }
 
 String getThumbnailUrlForRemoteId(
@@ -11,9 +12,11 @@ String getThumbnailUrlForRemoteId(
   AssetMediaSize type = AssetMediaSize.thumbnail,
   bool edited = true,
   String? thumbhash,
+  DateTime? updatedAt,
 }) {
   final url = '${Store.get(StoreKey.serverEndpoint)}/assets/$id/thumbnail?size=$type&edited=$edited';
-  return thumbhash != null ? '$url&c=${Uri.encodeComponent(thumbhash)}' : url;
+  final cached = thumbhash != null ? '$url&c=${Uri.encodeComponent(thumbhash)}' : url;
+  return updatedAt == null ? cached : '$cached&v=${updatedAt.microsecondsSinceEpoch}';
 }
 
 String getPlaybackUrlForRemoteId(final String id) {

@@ -25,8 +25,8 @@ name: PR Release Candidate Cleanup
 # only PR-derived input is the PR number, an integer.
 
 on:
-  pull_request_target: # zizmor: ignore[dangerous-triggers] nothing from the PR is checked out or executed
-    types: [closed]
+  workflow_dispatch:
+    # Automatic runs disabled for this standalone private fork.
 
 concurrency:
   group: pr-rc-cleanup-${{ github.event.pull_request.number }}
@@ -36,6 +36,7 @@ permissions: {}
 
 jobs:
   cleanup:
+    if: ${{ github.repository == 'open-noodle/gallery' }}
     name: Delete RC images
     # Runs for every closed PR, fork PRs included: maintainers can build RCs of fork
     # PRs (gallery-pr-rc-comment.yml, label-approved). Deliberately NOT gated on the

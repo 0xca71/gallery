@@ -53,6 +53,21 @@ describe(AssetController.name, () => {
     });
   });
 
+  describe('DELETE /assets/:id/live-photo', () => {
+    it('requires a valid photo id', async () => {
+      const { status } = await request(ctx.getHttpServer()).delete('/assets/123/live-photo');
+      expect(status).toBe(400);
+      expect(service.unlinkAndDeleteLivePhoto).not.toHaveBeenCalled();
+    });
+
+    it('routes a valid request to the unlink-and-delete operation', async () => {
+      const id = factory.uuid();
+      const { status } = await request(ctx.getHttpServer()).delete(`/assets/${id}/live-photo`);
+      expect(status).toBe(200);
+      expect(service.unlinkAndDeleteLivePhoto).toHaveBeenCalledWith(undefined, id);
+    });
+  });
+
   describe('DELETE /assets', () => {
     it('should require a valid uuid', async () => {
       const { status, body } = await request(ctx.getHttpServer())
@@ -61,6 +76,23 @@ describe(AssetController.name, () => {
 
       expect(status).toBe(400);
       expect(body).toEqual(factory.responses.validationError([{ path: ['ids', 0], message: 'Invalid UUID' }]));
+    });
+  });
+
+  describe('POST /assets/:id/address', () => {
+    it('requires a valid asset id', async () => {
+      const { status } = await request(ctx.getHttpServer()).post('/assets/123/address');
+      expect(status).toBe(400);
+      expect(service.ensureAssetAddress).not.toHaveBeenCalled();
+    });
+
+    it('returns the detailed address response', async () => {
+      const id = factory.uuid();
+      service.ensureAssetAddress.mockResolvedValue({ formattedAddress: '中国湖北省武汉市' });
+      const { status, body } = await request(ctx.getHttpServer()).post(`/assets/${id}/address`);
+      expect(status).toBe(200);
+      expect(body).toEqual({ formattedAddress: '中国湖北省武汉市' });
+      expect(service.ensureAssetAddress).toHaveBeenCalledWith(undefined, id);
     });
   });
 

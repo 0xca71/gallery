@@ -1063,6 +1063,18 @@ describe(AssetMediaService.name, () => {
         }),
       );
     });
+
+    it('rejects a missing fullsize image when fallback is explicitly disabled', async () => {
+      const asset = AssetFactory.from({
+        originalFileName: 'IMG_001.arw',
+        originalPath: '/data/library/IMG_001.arw',
+      }).build();
+      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([asset.id]));
+      mocks.asset.getForThumbnail.mockResolvedValue({ ...asset, path: null });
+      await expect(
+        sut.viewThumbnail(authStub.admin, asset.id, { size: AssetMediaSize.FULLSIZE, fallback: false }),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
   });
 
   describe('playbackVideo', () => {

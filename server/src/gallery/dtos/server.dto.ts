@@ -9,6 +9,15 @@ import { SpatialSceneServerFeatures } from 'src/gallery/dtos/spatial-scene.dto.j
 /** ServerConfigSchema */
 export const GalleryServerConfigExtension = {
   availableMemoryTypes: z.array(z.string()).describe('Globally-available memory type keys'),
+  webDeleteToastThreshold: z
+    .int()
+    .min(0)
+    .describe('Number of selected assets above which delete notifications stay open'),
+};
+
+// Environment-only viewer preference; not an admin-editable SystemConfig setting.
+export const GalleryPublicConfigExtension = {
+  webDeleteToastThreshold: z.int().min(0),
 };
 
 /** ServerFeaturesSchema */

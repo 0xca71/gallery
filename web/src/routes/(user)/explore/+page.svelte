@@ -1,22 +1,32 @@
 <script lang="ts">
   import OnEvents from '#lib/components/OnEvents.svelte';
+  import type { FilmstripAsset } from '#lib/components/asset-viewer/AssetViewerFilmstrip.svelte';
   import ImageThumbnail from '#lib/components/assets/thumbnail/ImageThumbnail.svelte';
+  import RandomSection from '#lib/components/explore/RandomSection.svelte';
   import PersonIndicator from '#lib/components/faces-page/PersonIndicator.svelte';
   import UserPageLayout from '#lib/components/layouts/UserPageLayout.svelte';
   import MemoryCard from '#lib/components/memories/MemoryCard.svelte';
   import EmptyPlaceholder from '#lib/components/shared-components/EmptyPlaceholder.svelte';
   import SingleGridRow from '#lib/components/shared-components/SingleGridRow.svelte';
   import Portal from '#lib/elements/Portal.svelte';
+  import { keepSpacesLoaded } from '#lib/gallery/library-view/library-view.svelte.ts';
   import { peopleSortManager } from '#lib/gallery/managers/people-sort-manager.svelte.ts';
   import { assetViewerManager } from '#lib/managers/asset-viewer-manager.svelte.ts';
   import { authManager } from '#lib/managers/auth-manager.svelte.ts';
   import { Route } from '#lib/route.ts';
   import { getAssetMediaUrl, memoryLaneTitle } from '#lib/utils.ts';
+  import { getNextAsset, getPreviousAsset } from '#lib/utils/asset-utils.ts';
   import { getGlobalPersonHref, getGlobalPersonThumbnailUrl } from '#lib/utils/global-person-route.ts';
   import { lazyComponent } from '#lib/utils/lazy-component.svelte.ts';
   import { getAltText } from '#lib/utils/thumbnail-util.ts';
   import { toTimelineAsset } from '#lib/utils/timeline-util.ts';
-  import { AssetMediaSize, getAssetInfo, type PersonResponseDto, type SearchExploreResponseDto } from '@immich/sdk';
+  import {
+    AssetMediaSize,
+    getAssetInfo,
+    type AssetResponseDto,
+    type PersonResponseDto,
+    type SearchExploreResponseDto,
+  } from '@immich/sdk';
   import { ImageCarousel } from '@immich/ui';
   import { t } from 'svelte-i18n';
   import type { PageData } from './$types';
@@ -26,6 +36,26 @@
   }
 
   let { data }: Props = $props();
+  keepSpacesLoaded();
+  let randomViewerAssets = $state<AssetResponseDto[]>([]);
+  const onRandomSelect = (assets: AssetResponseDto[], asset: AssetResponseDto) => {
+    randomViewerAssets = assets;
+    assetViewerManager.setAsset(asset);
+  };
+  const randomViewerIndex = $derived(
+    randomViewerAssets.findIndex((asset) => asset.id === assetViewerManager.asset?.id),
+  );
+  const selectFilmstripAsset = (asset: FilmstripAsset) => {
+    if ('type' in asset) {
+      assetViewerManager.setAsset(asset);
+    }
+  };
+  const resolveSlideshowStepAsset = (asset: AssetResponseDto, order: 'previous' | 'next') =>
+    order === 'previous' ? getPreviousAsset(randomViewerAssets, asset) : getNextAsset(randomViewerAssets, asset);
+  const resolveSlideshowRandomAsset = (isPlayable: (asset: AssetResponseDto) => boolean) => {
+    const playable = randomViewerAssets.filter((asset) => isPlayable(asset));
+    return playable[Math.floor(Math.random() * playable.length)];
+  };
 
   const getFieldItems = (items: SearchExploreResponseDto[], field: string) => {
     const targetField = items.find((item) => item.fieldName === field);
@@ -60,12 +90,15 @@
   };
 
   const onViewAsset = async (id: string) => {
+    randomViewerAssets = [];
     const asset = await getAssetInfo({ ...authManager.params, id });
     assetViewerManager.setAsset(asset);
   };
 
   const assetCursor = $derived({
     current: assetViewerManager.asset!,
+    previousAsset: randomViewerAssets[randomViewerIndex - 1],
+    nextAsset: randomViewerAssets[randomViewerIndex + 1],
   });
 
   const getPersonHref = (person: PersonResponseDto) => getGlobalPersonHref(person, Route.explore());
@@ -80,6 +113,22 @@
 <OnEvents {onPersonThumbnailReady} />
 
 <UserPageLayout title={data.meta.title}>
+  <div class="px-2 md:px-4">
+    <RandomSection
+      onselect={onRandomSelect}
+      viewerAssetId={assetViewerManager.isViewing && randomViewerAssets.length > 0
+        ? assetViewerManager.asset?.id
+        : undefined}
+      onassetschange={(assets) => {
+        if (randomViewerAssets.length > 0) {
+          randomViewerAssets = assets;
+          if (assets.length === 0) {
+            assetViewerManager.showAssetViewer(false);
+          }
+        }
+      }}
+    />
+  </div>
   {#if hasPeople}
     <div class="mt-2 mb-6 px-2 md:px-4">
       <div class="flex justify-between">
@@ -207,7 +256,11 @@
     <Portal target="body">
       <AssetViewer
         cursor={assetCursor}
-        showNavigation={false}
+        showNavigation={randomViewerAssets.length > 1}
+        filmstripAssets={randomViewerAssets}
+        onFilmstripAssetSelect={selectFilmstripAsset}
+        {resolveSlideshowStepAsset}
+        {resolveSlideshowRandomAsset}
         onClose={() => assetViewerManager.showAssetViewer(false)}
       />
     </Portal>

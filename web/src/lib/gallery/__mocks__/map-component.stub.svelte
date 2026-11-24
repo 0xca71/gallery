@@ -9,6 +9,7 @@
     city?: string | null;
     state?: string | null;
     country?: string | null;
+    formattedAddress?: string | null;
   };
 
   interface Props {

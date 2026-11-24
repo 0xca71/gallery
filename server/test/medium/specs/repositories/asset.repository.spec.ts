@@ -1,10 +1,12 @@
 import { Insertable, Kysely, sql } from 'kysely';
 import { chunk } from 'lodash-es';
 import { JOBS_LIBRARY_PAGINATION_SIZE } from 'src/constants.js';
+import type { LockableProperty } from 'src/database.js';
 import {
   AssetFileType,
   AssetOrder,
   AssetOrderBy,
+  AssetStatus,
   AssetType,
   AssetVisibility,
   SharedSpaceRole,
@@ -200,6 +202,112 @@ const keyframeRow = (assetId: string, n: number) => ({
 });
 
 describe(AssetRepository.name, () => {
+  describe('unlinkAndDeleteLivePhoto', () => {
+    it.each([false, true])(
+      'atomically unlinks the photo and marks its video deleted (external=%s)',
+      async (external) => {
+        const { ctx, sut } = setup();
+        const { user } = await ctx.newUser();
+        const { library } = external ? await ctx.newLibrary({ ownerId: user.id }) : { library: null };
+        const { asset: video } = await ctx.newAsset({
+          ownerId: user.id,
+          type: AssetType.Video,
+          libraryId: library?.id ?? null,
+          isExternal: external,
+        });
+        const { asset: photo } = await ctx.newAsset({
+          ownerId: user.id,
+          livePhotoVideoId: video.id,
+          libraryId: library?.id ?? null,
+          isExternal: external,
+        });
+        await ctx.newExif({ assetId: photo.id, livePhotoCID: 'keep-original-metadata' });
+
+        await expect(
+          sut.unlinkAndDeleteLivePhoto({ photoId: photo.id, videoId: video.id, ownerId: user.id }),
+        ).resolves.toBe('success');
+        expect(await sut.getById(photo.id, { exifInfo: true })).toMatchObject({
+          livePhotoVideoId: null,
+          exifInfo: { livePhotoCID: 'keep-original-metadata' },
+        });
+        expect(await sut.getById(video.id)).toMatchObject({ status: AssetStatus.Deleted, deletedAt: expect.any(Date) });
+      },
+    );
+
+    it('keeps both associations and the video when another photo references it', async () => {
+      const { ctx, sut } = setup();
+      const { user } = await ctx.newUser();
+      const { asset: video } = await ctx.newAsset({ ownerId: user.id, type: AssetType.Video });
+      const { asset: photo } = await ctx.newAsset({ ownerId: user.id, livePhotoVideoId: video.id });
+      await ctx.newAsset({ ownerId: user.id, livePhotoVideoId: video.id });
+
+      await expect(
+        sut.unlinkAndDeleteLivePhoto({ photoId: photo.id, videoId: video.id, ownerId: user.id }),
+      ).resolves.toBe('shared');
+      expect(await sut.getById(photo.id)).toMatchObject({ livePhotoVideoId: video.id });
+      expect(await sut.getById(video.id)).toMatchObject({ status: AssetStatus.Active, deletedAt: null });
+    });
+
+    it('does not delete a stale association', async () => {
+      const { ctx, sut } = setup();
+      const { user } = await ctx.newUser();
+      const { asset: video } = await ctx.newAsset({ ownerId: user.id, type: AssetType.Video });
+      const { asset: photo } = await ctx.newAsset({ ownerId: user.id });
+
+      await expect(
+        sut.unlinkAndDeleteLivePhoto({ photoId: photo.id, videoId: video.id, ownerId: user.id }),
+      ).resolves.toBe('changed');
+      expect(await sut.getById(video.id)).toMatchObject({ status: AssetStatus.Active, deletedAt: null });
+    });
+
+    it('rechecks locked visibility inside the atomic operation', async () => {
+      const { ctx, sut } = setup();
+      const { user } = await ctx.newUser();
+      const { asset: video } = await ctx.newAsset({
+        ownerId: user.id,
+        type: AssetType.Video,
+        visibility: AssetVisibility.Locked,
+      });
+      const { asset: photo } = await ctx.newAsset({ ownerId: user.id, livePhotoVideoId: video.id });
+      await expect(
+        sut.unlinkAndDeleteLivePhoto({ photoId: photo.id, videoId: video.id, ownerId: user.id }),
+      ).resolves.toBe('changed');
+      expect(await sut.getById(photo.id)).toMatchObject({ livePhotoVideoId: video.id });
+      await expect(
+        sut.unlinkAndDeleteLivePhoto({
+          photoId: photo.id,
+          videoId: video.id,
+          ownerId: user.id,
+          hasElevatedPermission: true,
+        }),
+      ).resolves.toBe('success');
+    });
+
+    it('prevents new links and automatic matches to a video pending permanent deletion', async () => {
+      const { ctx, sut } = setup();
+      const { user } = await ctx.newUser();
+      const { asset: video } = await ctx.newAsset({
+        ownerId: user.id,
+        type: AssetType.Video,
+        status: AssetStatus.Deleted,
+        deletedAt: new Date(),
+      });
+      const { asset: photo } = await ctx.newAsset({ ownerId: user.id });
+      await ctx.newExif({ assetId: video.id, livePhotoCID: 'deleted-video' });
+
+      await expect(sut.update({ id: photo.id, livePhotoVideoId: video.id })).resolves.toBeUndefined();
+      expect(await sut.getById(photo.id)).toMatchObject({ livePhotoVideoId: null });
+      await expect(
+        sut.findLivePhotoMatch({
+          ownerId: user.id,
+          otherAssetId: photo.id,
+          livePhotoCID: 'deleted-video',
+          type: AssetType.Video,
+        }),
+      ).resolves.toBeUndefined();
+    });
+  });
+
   describe('deleteFile', () => {
     it('should delete only the requested asset and file type', async () => {
       const { ctx, sut } = setup();
@@ -1862,6 +1970,99 @@ describe(AssetRepository.name, () => {
   });
 
   describe('upsertExif', () => {
+    it.each([
+      { latitude: 30.6, longitude: 114.18, locked: false, address: 'saved' },
+      { latitude: 31.6, longitude: 114.18, locked: false, address: null },
+      { latitude: 31.6, longitude: 115, locked: true, address: 'saved' },
+      { latitude: null, longitude: null, locked: false, address: null },
+    ])(
+      'keeps detailed addresses consistent with effective GPS ($latitude/$longitude, locked=$locked)',
+      async ({ latitude, longitude, locked, address }) => {
+        const { ctx, sut } = setup();
+        const { user } = await ctx.newUser();
+        const { asset } = await ctx.newAsset({ ownerId: user.id });
+        await sut.upsertExif({
+          exif: {
+            assetId: asset.id,
+            latitude: 30.6,
+            longitude: 114.18,
+            formattedAddress: 'saved',
+            lockedProperties: locked ? ['latitude', 'longitude'] : [],
+          },
+          lockedPropertiesBehavior: 'override',
+        });
+        await sut.upsertExif({ exif: { assetId: asset.id, latitude, longitude }, lockedPropertiesBehavior: 'skip' });
+        const exif = await ctx.database
+          .selectFrom('asset_exif')
+          .select(['latitude', 'longitude', 'formattedAddress'])
+          .where('assetId', '=', asset.id)
+          .executeTakeFirstOrThrow();
+        expect(exif).toEqual({
+          latitude: locked ? 30.6 : latitude,
+          longitude: locked ? 114.18 : longitude,
+          formattedAddress: address,
+        });
+      },
+    );
+
+    it.each([
+      { locks: ['latitude', 'longitude'], city: 'Manual city', latitude: 30.6, longitude: 114.18 },
+      { locks: ['latitude'], city: null, latitude: 30.6, longitude: 115 },
+      { locks: [], city: 'File city', latitude: 31.6, longitude: 115 },
+    ] satisfies { locks: LockableProperty[]; city: string | null; latitude: number; longitude: number }[])(
+      'keeps geographic filter values consistent with GPS locks $locks',
+      async ({ locks, city, latitude, longitude }) => {
+        const { ctx, sut } = setup();
+        const { user } = await ctx.newUser();
+        const { asset } = await ctx.newAsset({ ownerId: user.id });
+        await ctx.newExif({
+          assetId: asset.id,
+          latitude: 30.6,
+          longitude: 114.18,
+          city: 'Manual city',
+          state: 'Manual state',
+          country: 'Manual country',
+          formattedAddress: 'Manual address',
+          lockedProperties: locks,
+        });
+        await sut.upsertExif({
+          exif: {
+            assetId: asset.id,
+            latitude: 31.6,
+            longitude: 115,
+            city: 'File city',
+            state: 'File state',
+            country: 'File country',
+          },
+          lockedPropertiesBehavior: 'skip',
+        });
+        const persisted = await ctx.database
+          .selectFrom('asset_exif')
+          .select(['latitude', 'longitude', 'country', 'state', 'city', 'formattedAddress'])
+          .where('assetId', '=', asset.id)
+          .executeTakeFirstOrThrow();
+        expect(persisted).toEqual({
+          latitude,
+          longitude,
+          city,
+          formattedAddress: locks.length === 2 ? 'Manual address' : null,
+          state: city === null ? null : city === 'Manual city' ? 'Manual state' : 'File state',
+          country: city === null ? null : city === 'Manual city' ? 'Manual country' : 'File country',
+        });
+      },
+    );
+
+    it('retains the address when a metadata write omits GPS', async () => {
+      const { ctx, sut } = setup();
+      const { user } = await ctx.newUser();
+      const { asset } = await ctx.newAsset({ ownerId: user.id });
+      await ctx.newExif({ assetId: asset.id, latitude: 30.6, longitude: 114.18, formattedAddress: 'saved' });
+      await sut.upsertExif({ exif: { assetId: asset.id, description: 'updated' }, lockedPropertiesBehavior: 'skip' });
+      expect(await sut.getById(asset.id, { exifInfo: true })).toMatchObject({
+        exifInfo: { latitude: 30.6, longitude: 114.18, formattedAddress: 'saved', description: 'updated' },
+      });
+    });
+
     it('should replace stored audio metadata on a second extraction', async () => {
       const { ctx, sut } = setup();
       const { user } = await ctx.newUser();

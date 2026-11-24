@@ -1,4 +1,5 @@
 import { Kysely } from 'kysely';
+import { AssetEditSaveRepository } from 'src/gallery/repositories/asset-edit-save.repository.js';
 import { CleanupRepository } from 'src/gallery/repositories/cleanup.repository.js';
 import { DataSaverVideoRepository } from 'src/gallery/repositories/data-saver-video.repository.js';
 import { FaceSearchRepository } from 'src/gallery/repositories/face-search.repository.js';
@@ -17,8 +18,10 @@ import { SpatialSceneRepository } from 'src/gallery/repositories/spatial-scene.r
 import { StorageUsageRepository } from 'src/gallery/repositories/storage-usage.repository.js';
 import { VideoFaceRepository } from 'src/gallery/repositories/video-face.repository.js';
 import { VideoTrimRepository } from 'src/gallery/repositories/video-trim.repository.js';
+import { AmapRepository } from 'src/repositories/amap.repository.js';
 import { AssetFavoriteRepository } from 'src/repositories/asset-favorite.repository.js';
 import { ClassificationRepository } from 'src/repositories/classification.repository.js';
+import { ConfigRepository } from 'src/repositories/config.repository.js';
 import { FaceIdentityRepository } from 'src/repositories/face-identity.repository.js';
 import { FacePersonVerdictRepository } from 'src/repositories/face-person-verdict.repository.js';
 import { FaceRepairDeclineRepository } from 'src/repositories/face-repair-decline.repository.js';
@@ -49,6 +52,7 @@ export const withGalleryRepositories = (deps: Dep[], instances: unknown[]) => {
 
 export const newGalleryRealRepository = <T extends ClassConstructor<any>>(key: T, db: Kysely<DB>): InstanceType<T> => {
   switch (key) {
+    case AssetEditSaveRepository:
     case AssetFavoriteRepository:
     case FaceIdentityRepository:
     case FaceRepairDeclineRepository:
@@ -73,6 +77,10 @@ export const newGalleryRealRepository = <T extends ClassConstructor<any>>(key: T
       return new key(db) as InstanceType<T>;
     }
 
+    case AmapRepository: {
+      return new key(new ConfigRepository(), LoggingRepository.create(), db) as InstanceType<T>;
+    }
+
     case ClassificationRepository:
     case CleanupRepository:
     case VideoTrimRepository: {
@@ -87,6 +95,7 @@ export const newGalleryRealRepository = <T extends ClassConstructor<any>>(key: T
 
 export const newGalleryMockRepository = <T>(key: ClassConstructor<T>) => {
   switch (key) {
+    case AssetEditSaveRepository:
     case ClassificationRepository:
     case FaceIdentityRepository:
     case FacePersonVerdictRepository:
@@ -107,6 +116,10 @@ export const newGalleryMockRepository = <T>(key: ClassConstructor<T>) => {
     case DataSaverVideoRepository:
     case VideoFaceRepository: {
       return automock(key);
+    }
+
+    case AmapRepository: {
+      return automock(AmapRepository, { args: [undefined, { setContext: () => {} }] });
     }
 
     case QueueMaintenanceRepository: {

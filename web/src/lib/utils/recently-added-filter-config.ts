@@ -95,6 +95,8 @@ export function buildRecentlyAddedFilterConfig(
       return mapSuggestions(await getFilterSuggestions({}));
     },
     providers: {
+      states: async (country, filterContext) =>
+        activeSearch() ? [] : getSearchSuggestions({ $type: SearchSuggestionType.State, country, ...filterContext }),
       cities: async (country, filterContext) => {
         const context = activeSearch();
         if (!context) {
@@ -102,7 +104,12 @@ export function buildRecentlyAddedFilterConfig(
         }
         // Scope by the LIVE filters (mirroring Photos' `filters: { ...filters, country }`), not by
         // the panel's FilterContext — see the module design note above.
-        const facets = await fetchFacets(context, { ...context.filters, country });
+        const facets = await fetchFacets(context, {
+          ...context.filters,
+          country,
+          state: filterContext?.state,
+          city: undefined,
+        });
         return facets.cities;
       },
       cameraModels: async (make, filterContext) => {

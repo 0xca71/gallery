@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable } from '@nestjs/common';
 import { ExifDateTime, WriteTags, exiftool } from 'exiftool-vendored';
 import ffmpeg, { FfprobeData, FfprobeStream } from 'fluent-ffmpeg';
 import { camelCase, upperFirst } from 'lodash-es';
@@ -8,7 +8,7 @@ import fs from 'node:fs/promises';
 import { Writable } from 'node:stream';
 import sharp, { Sharp } from 'sharp';
 import { ORIENTATION_TO_SHARP_ROTATION } from 'src/constants.js';
-import { Exif } from 'src/database.js';
+import { Exif, LockableProperty } from 'src/database.js';
 import { AssetEditActionItem } from 'src/dtos/editing.dto.js';
 import {
   AacProfile,
@@ -24,6 +24,8 @@ import {
   LogLevel,
   RawExtractedFormat,
 } from 'src/enum.js';
+import type { ImageAdjust } from 'src/gallery/dtos/image-adjust.dto.js';
+import type { SavedImageFormat } from 'src/gallery/utils/asset-edit-save.js';
 import { applyImageAdjust } from 'src/gallery/utils/image-adjust.js';
 import { LoggingRepository } from 'src/repositories/logging.repository.js';
 import type {
@@ -38,8 +40,9 @@ import type {
   VideoInfo,
   VideoPacketInfo,
 } from 'src/types.js';
+import { mergeTimeZone } from 'src/utils/date.js';
 import { handlePromiseError } from 'src/utils/misc.js';
-import { createAffineMatrix } from 'src/utils/transform.js';
+import { createAffineMatrix, hasArbitraryRotation } from 'src/utils/transform.js';
 
 const probe = (input: string, options: string[]): Promise<FfprobeData> =>
   new Promise((resolve, reject) =>
@@ -156,9 +159,173 @@ export class MediaRepository {
     return await this.transform(decoded, options);
   }
 
+  /** Render from the full original, never from a cached preview or embedded RAW thumbnail. */
+  async renderSavedImage(
+    input: string,
+    output: string,
+    edits: AssetEditActionItem[],
+    format: SavedImageFormat,
+    expected?: ImageDimensions,
+    overwrite = false,
+    adjust?: ImageAdjust,
+  ) {
+    const header = await sharp(input).metadata();
+    if (
+      ['gif', 'svg'].includes(header.format ?? '') ||
+      (header.pages ?? 1) > 1 ||
+      (overwrite && header.format !== format)
+    ) {
+      throw new BadRequestException('unsupported_format');
+    }
+    let decoded = await this.decodeImage(input, { colorspace: Colorspace.Srgb, processInvalidImages: false });
+    if (expected && (decoded.info.width !== expected.width || decoded.info.height !== expected.height)) {
+      throw new BadRequestException('Full original image could not be decoded at the expected dimensions');
+    }
+    const crop = edits.find((edit) => edit.action === 'crop');
+    const arbitraryRotation = hasArbitraryRotation(edits);
+    const extractCrop = async () => {
+      if (!crop) {
+        return;
+      }
+      const { x: left, y: top, width, height } = crop.parameters;
+      if (left + width > decoded.info.width || top + height > decoded.info.height) {
+        throw new BadRequestException('Crop parameters exceed the rendered image bounds');
+      }
+      decoded = await sharp(decoded.data, { raw: decoded.info })
+        .extract({ left, top, width, height })
+        .raw()
+        .toBuffer({ resolveWithObject: true });
+    };
+    if (!arbitraryRotation) {
+      await extractCrop();
+    }
+    // Right-angle rotations are lossless pixel permutations. Applying a general affine matrix
+    // instead interpolates edge pixels against a black background.
+    for (const edit of edits) {
+      if (edit.action === 'crop') {
+        continue;
+      }
+      let pipeline = sharp(decoded.data, { raw: decoded.info });
+      pipeline =
+        edit.action === 'rotate'
+          ? pipeline.rotate(edit.parameters.angle)
+          : edit.parameters.axis === 'horizontal'
+            ? pipeline.flip()
+            : pipeline.flop();
+      decoded = await pipeline.raw().toBuffer({ resolveWithObject: true });
+    }
+    if (arbitraryRotation) {
+      await extractCrop();
+    }
+    if (adjust) {
+      decoded = applyImageAdjust(decoded, adjust);
+    }
+    const info = await this.tag(decoded, Colorspace.Srgb)
+      .toFormat(format, {
+        quality: 95,
+        lossless: format === 'webp',
+        ...(format === 'jpeg' && { chromaSubsampling: '4:4:4' }),
+      })
+      .toFile(output);
+    return { width: info.width, height: info.height };
+  }
+
+  async writeSavedImageMetadata(
+    source: string,
+    output: string,
+    exif: Exif & { lockedProperties?: LockableProperty[] | null },
+    dimensions: ImageDimensions,
+    fallbackDate: Date,
+  ) {
+    const tags = await exiftool.read(source);
+    await exiftool.write(
+      output,
+      {},
+      {
+        ignoreMinorErrors: true,
+        writeArgs: ['-TagsFromFile', source, '-EXIF:all', '-IPTC:all', '-XMP:all', '-overwrite_original'],
+      },
+    );
+    const locked = exif.lockedProperties ?? [];
+    const captureDate = exif.dateTimeOriginal ?? fallbackDate;
+    const zonedCapture = mergeTimeZone(captureDate.toISOString(), exif.timeZone);
+    const date =
+      locked.includes('dateTimeOriginal') || locked.includes('timeZone') || !tags.DateTimeOriginal
+        ? (mergeTimeZone(captureDate.toISOString(), exif.timeZone)?.toISO() ?? captureDate.toISOString())
+        : undefined;
+    const overrides: WriteTags = {
+      ExifImageWidth: dimensions.width,
+      ExifImageHeight: dimensions.height,
+      'Orientation#': 1,
+      ColorSpace: 1,
+      ...(date && {
+        DateTimeOriginal: date,
+        CreateDate: date,
+        SubSecTimeOriginal: String(captureDate.getUTCMilliseconds()).padStart(3, '0'),
+        SubSecTimeDigitized: String(captureDate.getUTCMilliseconds()).padStart(3, '0'),
+        OffsetTimeOriginal: zonedCapture?.toFormat('ZZ') ?? '+00:00',
+        OffsetTimeDigitized: zonedCapture?.toFormat('ZZ') ?? '+00:00',
+      }),
+      ...(locked.includes('description') && { ImageDescription: exif.description, Description: exif.description }),
+      ...((locked.includes('latitude') || locked.includes('longitude')) && {
+        GPSLatitude: exif.latitude,
+        GPSLongitude: exif.longitude,
+      }),
+      ...(locked.includes('rating') && { Rating: exif.rating }),
+    };
+    await this.normalizeSavedMetadata(output, overrides);
+    const written = await exiftool.read(output);
+    if (
+      Number(written.Orientation) !== 1 ||
+      Number(written.ExifImageWidth) !== dimensions.width ||
+      Number(written.ExifImageHeight) !== dimensions.height
+    ) {
+      throw new Error('Saved image metadata validation failed');
+    }
+  }
+
+  async normalizeSavedSidecar(output: string, dimensions: ImageDimensions, exif?: Exif, fallbackDate?: Date) {
+    const date = exif && (exif.dateTimeOriginal ?? fallbackDate);
+    await this.normalizeSavedMetadata(output, {
+      ExifImageWidth: dimensions.width,
+      ExifImageHeight: dimensions.height,
+      'Orientation#': 1,
+      ...(exif && {
+        Description: exif.description,
+        ImageDescription: exif.description,
+        GPSLatitude: exif.latitude,
+        GPSLongitude: exif.longitude,
+        Rating: exif.rating,
+        DateTimeOriginal: date ? mergeTimeZone(date.toISOString(), exif.timeZone)?.toISO() : undefined,
+      }),
+    });
+  }
+
+  private async normalizeSavedMetadata(output: string, overrides: WriteTags) {
+    await exiftool.write(output, overrides, {
+      ignoreMinorErrors: true,
+      writeArgs: [
+        '-overwrite_original',
+        '-ThumbnailImage=',
+        '-PreviewImage=',
+        '-JpgFromRaw=',
+        '-XMP-crs:Crop*=',
+        '-XMP-crs:HasCrop=False',
+        '-XMP-crs:Rotation=',
+        '-XMP-crs:Flip=',
+        '-XMP-mwg-rs:RegionInfo=',
+        '-XMP-MP:RegionInfo=',
+        '-XMP-tiff:Orientation#=1',
+        `-XMP-tiff:ImageWidth=${overrides.ExifImageWidth}`,
+        `-XMP-tiff:ImageHeight=${overrides.ExifImageHeight}`,
+      ],
+    });
+  }
+
   private edit(pipeline: Sharp, edits: AssetEditActionItem[]): Sharp {
     const crop = edits.find((edit) => edit.action === 'crop');
-    if (crop) {
+    const arbitraryRotation = hasArbitraryRotation(edits);
+    if (crop && !arbitraryRotation) {
       pipeline = pipeline.extract({
         left: Math.round(crop.parameters.x),
         top: Math.round(crop.parameters.y),
@@ -174,6 +341,15 @@ export class MediaRepository {
         [a, b],
         [c, d],
       ]);
+    }
+
+    if (crop && arbitraryRotation) {
+      pipeline = pipeline.extract({
+        left: Math.round(crop.parameters.x),
+        top: Math.round(crop.parameters.y),
+        width: Math.round(crop.parameters.width),
+        height: Math.round(crop.parameters.height),
+      });
     }
 
     return pipeline;

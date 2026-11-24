@@ -67,6 +67,7 @@ packageExtensions:
       typescript: '*'
 patchedDependencies:
   '@immich/ui@0.91.1': patches/@immich__ui@0.91.1.patch
+  '@zoom-image/core@0.43.1': patches/@zoom-image__core@0.43.1.patch
 dedupePeerDependents: false
 preferWorkspacePackages: true
 injectWorkspacePackages: true

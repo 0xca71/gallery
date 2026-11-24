@@ -1098,6 +1098,9 @@ export enum JobName {
 
   // Video trim encode, poster and thumbnails (or their removal), queued by trim writes
   AssetVideoTrimGenerate = 'AssetVideoTrimGenerate',
+
+  // Durable image file publication, distinct from non-destructive preview generation.
+  AssetEditSave = 'AssetEditSave',
 }
 
 export const JobNameSchema = z.enum(JobName).describe('Job name').meta({ id: 'JobName' });

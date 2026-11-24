@@ -33,6 +33,7 @@
     asset: TimelineAsset;
     groupIndex?: number;
     thumbnailSize?: number;
+    preload?: boolean;
     thumbnailWidth?: number;
     thumbnailHeight?: number;
     selected?: boolean;
@@ -55,6 +56,7 @@
     asset = $bindable(),
     groupIndex = 0,
     thumbnailSize = undefined,
+    preload = true,
     thumbnailWidth = undefined,
     thumbnailHeight = undefined,
     selected = false,
@@ -243,6 +245,7 @@
         class={['absolute group-focus-visible:rounded-lg', imageClass]}
         brokenAssetClass={['z-1 absolute group-focus-visible:rounded-lg', brokenAssetClass]}
         url={getAssetMediaUrl({ id: asset.id, size: AssetMediaSize.Thumbnail, cacheKey: asset.thumbhash })}
+        {preload}
         altText={$getAltText(asset)}
         widthStyle="{width}px"
         heightStyle="{height}px"

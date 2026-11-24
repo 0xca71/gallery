@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { Insertable, Kysely, NotNull, Transaction, expressionBuilder, sql, type Updateable } from 'kysely';
 import { InjectKysely } from 'nestjs-kysely';
 import { ChunkedArray, ChunkedSet, DummyValue, GenerateSql } from 'src/decorators.js';
+import type { MapMarkerResponseDto } from 'src/dtos/map.dto.js';
 import {
   AlbumUserRole,
   AssetType,
@@ -2244,6 +2245,7 @@ export class SharedSpaceRepository {
         'asset_exif.city',
         'asset_exif.state',
         'asset_exif.country',
+        'asset_exif.formattedAddress',
       ])
       .execute();
   }
@@ -2251,7 +2253,7 @@ export class SharedSpaceRepository {
   @GenerateSql({
     params: [{ userIds: [DummyValue.UUID], visibility: AssetVisibility.Timeline }],
   })
-  getFilteredMapMarkers(options: AssetSearchBuilderOptions) {
+  getFilteredMapMarkers(options: AssetSearchBuilderOptions): Promise<MapMarkerResponseDto[]> {
     // The map answers the filter panel like the timeline does, so the panel's taken, place, camera
     // and rating filters come from the shared asset filter; scope and the remaining filters (text,
     // type, favourites, tags, people, albums) stay with upstream search. The filter's asset_exif
@@ -2268,6 +2270,7 @@ export class SharedSpaceRepository {
         'asset_exif.city',
         'asset_exif.state',
         'asset_exif.country',
+        'asset_exif.formattedAddress',
       ])
       .$narrowType<{ lat: NotNull; lon: NotNull }>()
       .execute();

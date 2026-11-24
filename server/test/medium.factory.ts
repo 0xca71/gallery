@@ -31,6 +31,7 @@ import { AccessRepository } from 'src/repositories/access.repository.js';
 import { ActivityRepository } from 'src/repositories/activity.repository.js';
 import { AlbumUserRepository } from 'src/repositories/album-user.repository.js';
 import { AlbumRepository } from 'src/repositories/album.repository.js';
+import { AmapRepository } from 'src/repositories/amap.repository.js';
 import { ApiKeyRepository } from 'src/repositories/api-key.repository.js';
 import { AssetEditRepository } from 'src/repositories/asset-edit.repository.js';
 import { AssetFileRepository } from 'src/repositories/asset-file.repository.js';
@@ -768,6 +769,7 @@ const newRealRepository = <T extends Dep>(key: T, db: Kysely<DB>): InstanceType<
         new SystemMetadataRepository(db),
         LoggingRepository.create(),
         db as unknown as ConstructorParameters<typeof MapRepository>[3],
+        new AmapRepository(new ConfigRepository(), LoggingRepository.create(), db),
       ) as InstanceType<T>;
     }
 
@@ -819,9 +821,11 @@ const newMockRepository = <T>(key: ClassConstructor<T>) => {
     }
 
     case DatabaseRepository: {
-      return automock(DatabaseRepository, {
+      const mock = automock(DatabaseRepository, {
         args: [undefined, { setContext: () => {} }, { getEnv: () => ({ database: { vectorExtension: '' } }) }],
       });
+      mock.withAssetLock.mockImplementation((_assetId, fn) => fn());
+      return mock;
     }
 
     case CronRepository: {

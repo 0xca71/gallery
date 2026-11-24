@@ -1,6 +1,7 @@
 import { animateRemoval } from '#lib/gallery/motion/index.ts';
 import { TimelineManager } from '#lib/managers/timeline-manager/timeline-manager.svelte.ts';
 import type { TimelineAsset } from '#lib/managers/timeline-manager/types.ts';
+import { getDeleteToastOptions, getDeleteToastThreshold } from '#lib/utils/delete-toast.ts';
 import { AssetVisibility, deleteAssets as deleteBulk, restoreAssets, type StackResponseDto } from '@immich/sdk';
 import { toastManager } from '@immich/ui';
 import { t } from 'svelte-i18n';
@@ -12,6 +13,7 @@ export type OnUndoDelete = (assets: TimelineAsset[]) => void;
 export type OnRestore = (ids: string[]) => void;
 export type OnLink = (assets: { still: TimelineAsset; motion: TimelineAsset }) => void;
 export type OnUnlink = (assets: { still: TimelineAsset; motion: TimelineAsset }) => void;
+export type OnUnlinkAndDelete = (assets: { still: TimelineAsset; motionId: string }) => void;
 export type OnArchive = (ids: string[], visibility: AssetVisibility) => void;
 export type OnFavorite = (ids: string[], favorite: boolean) => void;
 export type OnSetVisibility = (ids: string[]) => void;
@@ -39,7 +41,7 @@ export const deleteAssets = async (
             ? { label: $t('undo'), color: 'secondary', onclick: () => undoDeleteAssets(onUndoDelete, assets) }
             : undefined,
       },
-      { timeout: 5000 },
+      getDeleteToastOptions(ids.length, getDeleteToastThreshold()),
     );
   } catch (error) {
     handleError(error, $t('errors.unable_to_delete_assets'));

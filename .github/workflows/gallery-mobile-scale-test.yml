@@ -11,11 +11,8 @@ name: Gallery Mobile Scale Test
 # specs/2026-04-08-mobile-shared-space-drift-sync-scale-notes.md.
 
 on:
-  schedule:
-    # 03:27 UTC every day. Offset from the hour so it doesn't pile on with
-    # other nightly jobs.
-    - cron: '27 3 * * *'
   workflow_dispatch:
+    # Automatic runs disabled for this standalone private fork.
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -23,6 +20,7 @@ concurrency:
 
 jobs:
   scale-test:
+    if: ${{ github.repository == 'open-noodle/gallery' }}
     name: 100k-asset library backfill (scale)
     runs-on: ubuntu-latest
     timeout-minutes: 30

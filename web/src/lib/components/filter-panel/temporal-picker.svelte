@@ -12,6 +12,7 @@
     dateBefore?: string;
     selectedYear?: number;
     selectedMonth?: number;
+    sortOrder?: 'asc' | 'desc' | 'relevance';
     onCustomRangeChange?: (dateAfter?: string, dateBefore?: string) => void;
     onYearSelect?: (year: number | undefined) => void;
     onMonthSelect?: (year: number, month: number | undefined) => void;
@@ -25,12 +26,13 @@
     dateBefore,
     selectedYear,
     selectedMonth,
+    sortOrder = 'asc',
     onCustomRangeChange,
     onYearSelect,
     onMonthSelect,
   }: Props = $props();
 
-  let years = $derived(aggregateYears(timeBuckets));
+  let years = $derived(aggregateYears(timeBuckets, sortOrder));
   let months = $derived(selectedYear === undefined ? [] : getMonthsForYear(timeBuckets, selectedYear));
   let fromValue = $state('');
   let toValue = $state('');

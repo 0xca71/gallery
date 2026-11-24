@@ -63,6 +63,29 @@ const seedSpace = async () => {
 };
 
 describe('checkSharedLinkAccess — individual link from a space', () => {
+  it('projects a contributed asset detailed address and original GPS into the shared-link payload', async () => {
+    const { ctx, sharedLinkRepo, sharer, space, contributedAsset } = await seedSpace();
+    await ctx.newSharedSpaceAsset({ spaceId: space.id, assetId: contributedAsset.id });
+    await ctx.newExif({
+      assetId: contributedAsset.id,
+      latitude: 30.6,
+      longitude: 114.18,
+      formattedAddress: '中国湖北省武汉市硚口区长丰街道',
+    });
+    const { sharedLink } = await ctx.newSharedLink({
+      userId: sharer.id,
+      type: SharedLinkType.Individual,
+      spaceId: space.id,
+      assetIds: [contributedAsset.id],
+    });
+    const result = await sharedLinkRepo.get(sharer.id, sharedLink.id);
+    expect(result?.assets.find(({ id }) => id === contributedAsset.id)?.exifInfo).toMatchObject({
+      latitude: 30.6,
+      longitude: 114.18,
+      formattedAddress: '中国湖北省武汉市硚口区长丰街道',
+    });
+  });
+
   it('serves an asset contributed by another member while it is in the space', async () => {
     const { ctx, accessRepo, sharer, space, contributedAsset } = await seedSpace();
     await ctx.newSharedSpaceAsset({ spaceId: space.id, assetId: contributedAsset.id });

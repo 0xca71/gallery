@@ -25,6 +25,38 @@ const CLUSTER_GROUPS_UI =
 // deletes an upstream path on purpose, with the commit that did it.
 export const FORK_DELETED_PATHS: { path: string; why: string }[] = [
   {
+    path: '.github/workflows/build-mobile.yml',
+    why: 'retired from standalone private CI; upstream-only release templates use a pinned remote workflow',
+  },
+  {
+    path: '.github/workflows/docs-build.yml',
+    why: 'retired from standalone private CI; this fork does not build or deploy the upstream docs site',
+  },
+  {
+    path: '.github/workflows/docs-deploy.yml',
+    why: 'retired from standalone private CI; this fork does not deploy the upstream docs site',
+  },
+  {
+    path: '.github/workflows/fdroid.yml',
+    why: 'retired from standalone private CI; this fork does not publish F-Droid releases',
+  },
+  {
+    path: '.github/workflows/gallery-build-mobile.yml',
+    why: 'retired from standalone private CI; upstream-only mobile release uses a pinned Rust-era remote workflow',
+  },
+  {
+    path: '.github/workflows/gallery-docs-deploy.yml',
+    why: 'retired from standalone private CI; this fork does not deploy the Gallery docs site',
+  },
+  {
+    path: '.github/workflows/gallery-ml-smoke.yml',
+    why: 'retired from standalone private CI; the local Gallery ML smoke command remains available',
+  },
+  {
+    path: '.github/workflows/gallery-mobile-smoke.yml',
+    why: 'retired from standalone private CI; current native and mobile verification remains in test.yml',
+  },
+  {
     path: 'mobile/test/presentation/pages/search_page_test.dart',
     why: `${MOBILE_SEARCH}; upstream's test for that page (immich-31800) arrived on release/v3.4 after rc.1`,
   },

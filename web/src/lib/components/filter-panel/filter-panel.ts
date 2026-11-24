@@ -86,7 +86,7 @@ export interface PersonOption {
 
 export interface LocationOption {
   value: string;
-  type: 'country' | 'city';
+  type: 'country' | 'state' | 'city';
 }
 
 export interface CameraOption {
@@ -116,6 +116,8 @@ export interface FilterSuggestionsResponse {
 
 export interface FilterPanelConfig {
   sections: FilterSection[];
+  /** Cache boundary for dependent location lists when the surface/query changes. */
+  locationScopeKey?: () => string;
   suggestionsProvider?: (filters: FilterState) => Promise<FilterSuggestionsResponse>;
   /**
   Facets for this surface's scope with no filters applied (#910). The panel only calls this when it
@@ -132,6 +134,7 @@ export interface FilterPanelConfig {
     people?: (context?: FilterContext) => Promise<PersonOption[]>;
     allPeople?: () => Promise<PersonOption[]>;
     locations?: (context?: FilterContext) => Promise<LocationOption[]>;
+    states?: (country: string, context?: FilterContext) => Promise<string[]>;
     cities?: (country: string, context?: FilterContext) => Promise<string[]>;
     cameras?: (context?: FilterContext) => Promise<CameraOption[]>;
     cameraModels?: (make: string, context?: FilterContext) => Promise<string[]>;

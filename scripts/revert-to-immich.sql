@@ -31,6 +31,7 @@
 --     by that
 --   * Gallery-only API key permissions
 --   * Asset duplicate checksums
+--   * Detailed photo addresses (asset_exif.formattedAddress)
 --   * Library sync state (library_audit, library_user, library.createId)
 --   * Storage migration history
 --   * Library Cleanup progress: keep decisions (cleanup_decision), reviewed
@@ -47,7 +48,8 @@
 -- HOW TO RUN
 -- =============================================================================
 --
--- 1. Stop every Immich/Gallery container (server, microservices, web). The
+-- 1. Finish or recover pending image file saves in Gallery, then stop every
+--    Immich/Gallery container (server, microservices, web). The
 --    script takes ACCESS EXCLUSIVE locks on many tables; a running server
 --    will either deadlock with it or race it.
 --
@@ -93,6 +95,16 @@ BEGIN
   IF current_setting('gallery.revert_token', true) IS DISTINCT FROM 'i_accept_data_loss' THEN
     RAISE EXCEPTION USING
       MESSAGE = 'revert-to-immich.sql refused: read the header, then set gallery.revert_token = ''i_accept_data_loss'' before running.';
+  END IF;
+END $$;
+
+-- Refuse to discard file-publication recovery records before any destructive write.
+DO $$
+BEGIN
+  IF to_regclass('public.asset_edit_save') IS NOT NULL THEN
+    IF EXISTS (SELECT 1 FROM public.asset_edit_save WHERE status IN ('queued', 'rendering', 'publishing', 'processing')) THEN
+      RAISE EXCEPTION 'Finish or recover pending image file saves in Gallery before reverting.';
+    END IF;
   END IF;
 END $$;
 
@@ -668,6 +680,9 @@ END $$;
 -- matter because of CASCADE, but we group related tables for readability.
 -- -----------------------------------------------------------------------------
 
+-- Settled image file-save journals
+DROP TABLE IF EXISTS "asset_edit_save" CASCADE;
+
 -- Library sync / audit
 DROP TABLE IF EXISTS "library_user" CASCADE;
 DROP TABLE IF EXISTS "library_audit" CASCADE;
@@ -805,6 +820,7 @@ ALTER TABLE "person"            DROP COLUMN IF EXISTS "type";
 ALTER TABLE "person"            DROP COLUMN IF EXISTS "species";
 ALTER TABLE "asset_job_status"  DROP COLUMN IF EXISTS "petsDetectedAt";
 ALTER TABLE "asset_job_status"  DROP COLUMN IF EXISTS "classifiedAt";
+ALTER TABLE "asset_exif"        DROP COLUMN IF EXISTS "formattedAddress";
 -- Databases from before 1798200000000-DropLibraryCreateId.
 DROP INDEX IF EXISTS "library_createId_idx";
 -- Library Cleanup indexes on Immich tables.
@@ -886,6 +902,7 @@ UPDATE "user_metadata"
 -- -----------------------------------------------------------------------------
 DELETE FROM "migration_overrides"
  WHERE "name" IN (
+   'index_asset_edit_save_active_asset_idx',
    'function_asset_library_delete_audit',
    'function_library_after_insert',
    'function_library_user_delete_after_audit',
@@ -1217,6 +1234,9 @@ DELETE FROM "kysely_migrations"
   '1793100000000-AddSharedSpaceAlbumFolderTable',
   '1793200000000-SharedSpaceAlbumFolderAuditTable',
   '1793300000000-ClearPreOptionMFaceRepairScans',
+  '1793400000000-AddAssetFormattedAddress',
+  '1793500000000-AddAssetEditSave',
+  '1793600000000-AddAssetEditSaveAdjustSnapshot',
   '1793400000000-AddCleanupTables',
   -- #763 per-user favorites. Renumbered off 1784000000000/1784100000000 during the v3.2.0 rebase:
   -- 1784000000000 was already taken by FixFaceRepairScanInFlightIndexOverride above.
@@ -1344,6 +1364,7 @@ BEGIN
        'shared_space', 'user_group_member', 'user_group',
        'classification_prompt_embedding', 'classification_category',
        'storage_migration_log', 'asset_duplicate_checksum',
+       'asset_edit_save',
        'face_person_verdict', 'face_repair_scan', 'face_repair_decline',
        'face_repair_scan_flagged_face', 'face_repair_lock',
        'pet_search',

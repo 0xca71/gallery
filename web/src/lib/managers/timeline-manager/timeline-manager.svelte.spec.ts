@@ -6,6 +6,7 @@ import { factory } from '#test/unit/factories.ts';
 import { test } from '#test/unit/fixtures.ts';
 import type { Mock } from '#test/unit/mocks/mock.ts';
 import {
+  AssetOrder,
   AssetOrderBy,
   AssetVisibility,
   TimeBucketSize,
@@ -1494,3 +1495,55 @@ describe('TimelineManager scroll scaling', () => {
     expect(timelineManager.renderOffset).toBeCloseTo(fakeEl.scrollTop - timelineManager.scrollTop, 6);
   });
 });
+
+test('isInitializedForOptions waits for the exact filter and grouping query', async ({ api }) => {
+  api.on({ getTimeBuckets: () => ({ json: [{ timeBucket: '2024-01-01', count: 1 }] }) });
+  const manager = new TimelineManager();
+  const options = { visibility: AssetVisibility.Timeline, personIds: ['person-1'], grouping: 'day' as const };
+  expect(manager.isInitializedForOptions(options)).toBe(false);
+  await manager.updateOptions(options);
+  expect(manager.isInitializedForOptions(options)).toBe(true);
+  expect(manager.isInitializedForOptions({ ...options, grouping: 'year' })).toBe(false);
+  const pending = Promise.withResolvers<TimeBucketsResponseDto[]>();
+  api.on({ getTimeBuckets: async () => ({ json: await pending.promise }) });
+  const changed = { ...options, personIds: ['person-2'] };
+  const reload = manager.updateOptions(changed);
+  await vi.waitFor(() => expect(manager.isInitializedForOptions(changed)).toBe(false));
+  pending.resolve([{ timeBucket: '2024-01-01', count: 2 }]);
+  await reload;
+  expect(manager.isInitializedForOptions(changed)).toBe(true);
+  manager.destroy();
+});
+
+test.for([AssetOrder.Asc, AssetOrder.Desc])(
+  'resolves scrubber days from loaded %s day geometry',
+  async (order, { api }) => {
+    const dates = ['2024-01-03T12:00:00.000Z', '2024-01-20T12:00:00.000Z'];
+    // The SDK returns sorted assets, and each day needs its own visual row for a vertical scrubber
+    // to distinguish the two dates (Gallery packs sparse neighboring days onto one row).
+    const orderedDates = order === AssetOrder.Asc ? dates : dates.toReversed();
+    const assets = orderedDates.flatMap((date) =>
+      Array.from({ length: 8 }, () =>
+        factory.timelineAsset({
+          ratio: 1,
+          fileCreatedAt: fromISODateTimeUTCToObject(date),
+          localDateTime: fromISODateTimeUTCToObject(date),
+        }),
+      ),
+    );
+    mockTimeBuckets(api, [{ timeBucket: '2024-01-01', count: assets.length }], {
+      '2024-01-01': toResponseDto(...assets),
+    });
+    const manager = new TimelineManager();
+    await manager.updateOptions({ order, grouping: 'day' });
+    await manager.updateViewport({ width: 1588, height: 1000 });
+    await manager.ensureScrubberMonthGeometry({ year: 2024, month: 1 });
+    expect(manager.getScrubberDateAtMonthScrollPercent({ year: 2024, month: 1 }, 0)?.day).toBe(
+      order === AssetOrder.Asc ? 3 : 20,
+    );
+    expect(manager.getScrubberDateAtMonthScrollPercent({ year: 2024, month: 1 }, 1)?.day).toBe(
+      order === AssetOrder.Asc ? 20 : 3,
+    );
+    manager.destroy();
+  },
+);

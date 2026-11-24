@@ -1,4 +1,5 @@
 import { Mocked } from 'vitest';
+import { AssetEditSaveRepository } from 'src/gallery/repositories/asset-edit-save.repository.js';
 import { CleanupRepository } from 'src/gallery/repositories/cleanup.repository.js';
 import { DataSaverVideoRepository } from 'src/gallery/repositories/data-saver-video.repository.js';
 import { FaceSearchRepository } from 'src/gallery/repositories/face-search.repository.js';
@@ -19,6 +20,7 @@ import { SpatialSceneRepository } from 'src/gallery/repositories/spatial-scene.r
 import { StorageUsageRepository } from 'src/gallery/repositories/storage-usage.repository.js';
 import { VideoFaceRepository } from 'src/gallery/repositories/video-face.repository.js';
 import { VideoTrimRepository } from 'src/gallery/repositories/video-trim.repository.js';
+import { AmapRepository } from 'src/repositories/amap.repository.js';
 import { AssetFavoriteRepository } from 'src/repositories/asset-favorite.repository.js';
 import { ClassificationRepository } from 'src/repositories/classification.repository.js';
 import { FaceIdentityRepository } from 'src/repositories/face-identity.repository.js';
@@ -68,6 +70,8 @@ export type GalleryServiceOverrides = {
   spatialScene: SpatialSceneRepository;
   dataSaverVideo: DataSaverVideoRepository;
   videoFace: VideoFaceRepository;
+  amap: AmapRepository;
+  assetEditSave: AssetEditSaveRepository;
 };
 
 export const getGalleryMocks = (loggerMock: { setContext: () => void }) => {
@@ -103,7 +107,16 @@ export const getGalleryMocks = (loggerMock: { setContext: () => void }) => {
     spatialScene: automock(SpatialSceneRepository, { strict: false }),
     dataSaverVideo: automock(DataSaverVideoRepository, { strict: false }),
     videoFace: automock(VideoFaceRepository, { strict: false }),
+    amap: automock(AmapRepository, { args: [undefined, loggerMock], strict: false }),
+    assetEditSave: automock(AssetEditSaveRepository, { strict: false }),
   };
+
+  mocks.assetEditSave.isSaving.mockResolvedValue(false);
+  mocks.assetEditSave.isPathSaving.mockResolvedValue(false);
+  mocks.assetEditSave.getSavingAssetIds.mockResolvedValue(new Set<string>());
+  mocks.assetEditSave.getInFlight.mockResolvedValue([]);
+  mocks.assetEditSave.getActiveOriginalPaths.mockResolvedValue(new Set<string>());
+  mocks.assetEditSave.assertNotSaving.mockResolvedValue();
 
   mocks.galleryAsset.getOwnedManifestAssets.mockResolvedValue([]);
   mocks.galleryAsset.getExternalAssetIds.mockResolvedValue(new Set<string>());
@@ -153,4 +166,6 @@ export const newGalleryRepositories = (
     overrides.spatialScene || (mocks.spatialScene as As<SpatialSceneRepository>),
     overrides.dataSaverVideo || (mocks.dataSaverVideo as As<DataSaverVideoRepository>),
     overrides.videoFace || (mocks.videoFace as As<VideoFaceRepository>),
+    overrides.amap || (mocks.amap as As<AmapRepository>),
+    overrides.assetEditSave || (mocks.assetEditSave as As<AssetEditSaveRepository>),
   );
