@@ -8,6 +8,7 @@ import { getForAssetFace } from 'test/mappers.js';
 import { ServiceMocks, newTestService } from 'test/utils.js';
 
 // #1061: a stored flagged face carrying the photo context getScanFlaggedFaces now returns.
+// eslint-disable-next-line unicorn/no-unnecessary-parameters
 const stored = (assetFaceId: string) => ({
   assetFaceId,
   suspectedOwnerId: 'owner-1',
@@ -35,7 +36,7 @@ describe(FaceRepairService.name, () => {
   // backend serve — no decode, no sharp, no temp dir. T2.2 and T2.8 are the tests that keep it that way.
   const stubServe = () =>
     vi
-      .spyOn(sut as any, 'serveFromBackend')
+      .spyOn((sut as any).backendMedia, 'serveFromBackend')
       .mockResolvedValue(
         new ImmichFileResponse({ path: '/preview.jpg', contentType: 'image/jpeg', cacheControl: CacheControl.None }),
       );
@@ -43,9 +44,12 @@ describe(FaceRepairService.name, () => {
   describe('getAdminFaceThumbnail', () => {
     it('serves a face crop for a face on another user’s asset, with no ownership check', async () => {
       const face = AssetFaceFactory.create({ id: 'face-1', assetId: 'asset-1' });
-      mocks.person.getFaceByIdIncludingTombstoned.mockResolvedValue(getForAssetFace(face));
+      mocks.galleryPerson.getFaceByIdIncludingTombstoned.mockResolvedValue(getForAssetFace(face));
       mocks.asset.getForThumbnail.mockResolvedValue({ path: '/preview.jpg' } as any);
-      vi.spyOn(sut as any, 'ensureLocalFile').mockResolvedValue({ localPath: '/preview.jpg', cleanup: vi.fn() });
+      vi.spyOn((sut as any).backendMedia, 'ensureLocalFile').mockResolvedValue({
+        localPath: '/preview.jpg',
+        cleanup: vi.fn(),
+      });
       mocks.media.decodeImage.mockResolvedValue({
         data: Buffer.from('img'),
         info: { width: 100, height: 100, channels: 3, format: 'jpeg', size: 0, premultiplied: false },
@@ -56,8 +60,8 @@ describe(FaceRepairService.name, () => {
 
       const result = await sut.getAdminFaceThumbnail('face-1');
 
-      expect(mocks.person.getFaceByIdIncludingTombstoned).toHaveBeenCalledWith('face-1');
-      expect(mocks.access.person.checkOwnerAccess).not.toHaveBeenCalled();
+      expect(mocks.galleryPerson.getFaceByIdIncludingTombstoned).toHaveBeenCalledWith('face-1');
+      expect(mocks.access.galleryPerson.checkOwnerAccess).not.toHaveBeenCalled();
       expect(mocks.media.generateThumbnail).toHaveBeenCalled();
       if (result instanceof ImmichStreamResponse) {
         result.stream.destroy();
@@ -66,9 +70,12 @@ describe(FaceRepairService.name, () => {
 
     it('serves a tombstoned (deletedAt) face — resolutions history still renders', async () => {
       const face = AssetFaceFactory.create({ id: 'face-1', assetId: 'asset-1', deletedAt: new Date() });
-      mocks.person.getFaceByIdIncludingTombstoned.mockResolvedValue(getForAssetFace(face));
+      mocks.galleryPerson.getFaceByIdIncludingTombstoned.mockResolvedValue(getForAssetFace(face));
       mocks.asset.getForThumbnail.mockResolvedValue({ path: '/preview.jpg' } as any);
-      vi.spyOn(sut as any, 'ensureLocalFile').mockResolvedValue({ localPath: '/preview.jpg', cleanup: vi.fn() });
+      vi.spyOn((sut as any).backendMedia, 'ensureLocalFile').mockResolvedValue({
+        localPath: '/preview.jpg',
+        cleanup: vi.fn(),
+      });
       mocks.media.decodeImage.mockResolvedValue({
         data: Buffer.from('img'),
         info: { width: 100, height: 100, channels: 3, format: 'jpeg', size: 0, premultiplied: false },
@@ -86,14 +93,14 @@ describe(FaceRepairService.name, () => {
     });
 
     it('throws NotFound for an unknown face id', async () => {
-      mocks.person.getFaceByIdIncludingTombstoned.mockRejectedValue(new Error('no rows'));
+      mocks.galleryPerson.getFaceByIdIncludingTombstoned.mockRejectedValue(new Error('no rows'));
 
       await expect(sut.getAdminFaceThumbnail('nope')).rejects.toThrow(NotFoundException);
     });
 
     it('throws NotFound when the asset has no thumbnail source', async () => {
       const face = AssetFaceFactory.create({ id: 'face-1', assetId: 'asset-1' });
-      mocks.person.getFaceByIdIncludingTombstoned.mockResolvedValue(getForAssetFace(face));
+      mocks.galleryPerson.getFaceByIdIncludingTombstoned.mockResolvedValue(getForAssetFace(face));
       mocks.asset.getForThumbnail.mockResolvedValue({ path: null } as any);
 
       await expect(sut.getAdminFaceThumbnail('face-1')).rejects.toThrow(NotFoundException);
@@ -111,14 +118,14 @@ describe(FaceRepairService.name, () => {
   describe('getAdminFacePreview', () => {
     it('T2.1/T2.2/T2.7/T2.8: serves another user’s preview uncropped, via the backend, cached', async () => {
       const face = AssetFaceFactory.create({ id: 'face-1', assetId: 'asset-1' });
-      mocks.person.getFaceByIdOnLiveAsset.mockResolvedValue(getForAssetFace(face));
+      mocks.galleryPerson.getFaceByIdOnLiveAsset.mockResolvedValue(getForAssetFace(face));
       mocks.asset.getForThumbnail.mockResolvedValue({ path: '/preview.jpg' } as any);
       const serve = stubServe();
 
       await sut.getAdminFacePreview('face-1');
 
-      expect(mocks.person.getFaceByIdOnLiveAsset).toHaveBeenCalledWith('face-1');
-      expect(mocks.access.person.checkOwnerAccess).not.toHaveBeenCalled();
+      expect(mocks.galleryPerson.getFaceByIdOnLiveAsset).toHaveBeenCalledWith('face-1');
+      expect(mocks.access.galleryPerson.checkOwnerAccess).not.toHaveBeenCalled();
       expect(mocks.media.generateThumbnail).not.toHaveBeenCalled(); // uncropped: no sharp pass
       expect(mocks.media.decodeImage).not.toHaveBeenCalled();
       expect(serve).toHaveBeenCalledWith('/preview.jpg', 'image/jpeg', CacheControl.PrivateWithCache);
@@ -126,7 +133,7 @@ describe(FaceRepairService.name, () => {
 
     it('T2.9: asks for the UNEDITED preview — the box lives in that image’s coordinate space', async () => {
       const face = AssetFaceFactory.create({ id: 'face-1', assetId: 'asset-1' });
-      mocks.person.getFaceByIdOnLiveAsset.mockResolvedValue(getForAssetFace(face));
+      mocks.galleryPerson.getFaceByIdOnLiveAsset.mockResolvedValue(getForAssetFace(face));
       mocks.asset.getForThumbnail.mockResolvedValue({ path: '/preview.jpg' } as any);
       stubServe();
 
@@ -137,7 +144,7 @@ describe(FaceRepairService.name, () => {
 
     it('T2.3: falls back to the thumbnail file when there is no preview file', async () => {
       const face = AssetFaceFactory.create({ id: 'face-1', assetId: 'asset-1' });
-      mocks.person.getFaceByIdOnLiveAsset.mockResolvedValue(getForAssetFace(face));
+      mocks.galleryPerson.getFaceByIdOnLiveAsset.mockResolvedValue(getForAssetFace(face));
       mocks.asset.getForThumbnail
         .mockResolvedValueOnce({ path: null } as any)
         .mockResolvedValueOnce({ path: '/thumb.jpg' } as any);
@@ -150,7 +157,7 @@ describe(FaceRepairService.name, () => {
 
     it('T2.6: derives the content type from the file — a webp preview is not served as jpeg', async () => {
       const face = AssetFaceFactory.create({ id: 'face-1', assetId: 'asset-1' });
-      mocks.person.getFaceByIdOnLiveAsset.mockResolvedValue(getForAssetFace(face));
+      mocks.galleryPerson.getFaceByIdOnLiveAsset.mockResolvedValue(getForAssetFace(face));
       mocks.asset.getForThumbnail.mockResolvedValue({ path: '/preview.webp' } as any);
       const serve = stubServe();
 
@@ -160,14 +167,14 @@ describe(FaceRepairService.name, () => {
     });
 
     it('T2.5: throws NotFound for an unknown, trashed or locked face id — all indistinguishable', async () => {
-      mocks.person.getFaceByIdOnLiveAsset.mockRejectedValue(new Error('no rows'));
+      mocks.galleryPerson.getFaceByIdOnLiveAsset.mockRejectedValue(new Error('no rows'));
 
       await expect(sut.getAdminFacePreview('nope')).rejects.toThrow(NotFoundException);
     });
 
     it('T2.4: throws NotFound when the asset has neither a preview nor a thumbnail file', async () => {
       const face = AssetFaceFactory.create({ id: 'face-1', assetId: 'asset-1' });
-      mocks.person.getFaceByIdOnLiveAsset.mockResolvedValue(getForAssetFace(face));
+      mocks.galleryPerson.getFaceByIdOnLiveAsset.mockResolvedValue(getForAssetFace(face));
       mocks.asset.getForThumbnail.mockResolvedValue({ path: null } as any);
 
       await expect(sut.getAdminFacePreview('face-1')).rejects.toThrow(NotFoundException);

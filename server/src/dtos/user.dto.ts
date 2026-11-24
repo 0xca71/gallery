@@ -1,10 +1,10 @@
 import { createZodDto } from 'nestjs-zod';
 import z from 'zod';
-import type { MaybeDehydrated, UserMetadataItem } from 'src/types.js';
 import { User, UserAdmin } from 'src/database.js';
 import { HistoryBuilder } from 'src/decorators.js';
 import { pinCodeRegex } from 'src/dtos/auth.dto.js';
 import { UserAvatarColor, UserAvatarColorSchema, UserMetadataKey, UserStatusSchema } from 'src/enum.js';
+import type { MaybeDehydrated, UserMetadataItem } from 'src/types.js';
 import { asDateTimeString } from 'src/utils/date.js';
 import { isoDatetimeToDate, sanitizeFilename, stringToBool, toEmail } from 'src/validation.js';
 
@@ -151,7 +151,8 @@ export function mapUserAdmin(entity: UserAdmin): UserAdminResponseDto {
     createdAt: entity.createdAt,
     deletedAt: entity.deletedAt,
     updatedAt: entity.updatedAt,
-    oauthId: entity.oauthId,
+    // TODO(v4): remove the mapping and make `oauthId` nullable
+    oauthId: entity.oauthId ?? '',
     quotaSizeInBytes: entity.quotaSizeInBytes,
     quotaUsageInBytes: entity.quotaUsageInBytes,
     status: entity.status,

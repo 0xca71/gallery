@@ -1,22 +1,25 @@
 <script lang="ts">
-  import { invalidateAll } from '$app/navigation';
-  import UserAvatar from '$lib/components/shared-components/UserAvatar.svelte';
-  import RoleBadge from '$lib/components/spaces/role-badge.svelte';
-  import SpaceAddMemberModal from '$lib/modals/SpaceAddMemberModal.svelte';
-  import { authManager } from '$lib/managers/auth-manager.svelte';
-  import { getAssetMediaUrl } from '$lib/utils';
-  import { handleError } from '$lib/utils/handle-error';
-  import { formatTimeAgo } from '$lib/utils/timesince';
+  import UserAvatar from '#lib/components/shared-components/UserAvatar.svelte';
+  import RoleBadge from '#lib/components/spaces/role-badge.svelte';
+  import SpaceMemberPermissionSettings from '#lib/gallery/components/spaces/space-member-permission-settings.svelte';
+  import { showAddSpaceMembersModal } from '#lib/gallery/spaces/add-space-members.ts';
+  import { formatTimeAgo } from '#lib/gallery/utils/time-ago.ts';
+  import { authManager } from '#lib/managers/auth-manager.svelte.ts';
+  import { getAssetMediaUrl } from '#lib/utils.ts';
+  import { handleError } from '#lib/utils/handle-error.ts';
   import {
-    removeMember,
     SharedSpaceRole,
-    updateMember,
     UserAvatarColor,
+    removeMember,
+    updateMember,
+    updateSpace,
     type SharedSpaceMemberResponseDto,
+    type SharedSpaceUpdateDto,
   } from '@immich/sdk';
-  import { Button, Field, modalManager, Select, type SelectOption } from '@immich/ui';
+  import { Button, Field, Select, modalManager, type SelectOption } from '@immich/ui';
   import { mdiAccountPlusOutline } from '@mdi/js';
   import { t } from 'svelte-i18n';
+  import { invalidateAll } from '$app/navigation';
   import type { PageData } from './$types';
 
   let { data }: { data: PageData } = $props();
@@ -24,6 +27,19 @@
   const members = $derived(data.members);
   const currentMember = $derived(members.find((m) => m.userId === authManager.user.id));
   const isOwner = $derived(currentMember?.role === SharedSpaceRole.Owner);
+
+  // An absent memberManagement block (older server) falls back to today's rule: owners only, no owner controls.
+  const canAddMembers = $derived(space.memberManagement?.canAddMembers ?? isOwner);
+  const canChangeRoles = $derived(space.memberManagement?.canChangeRoles ?? isOwner);
+
+  const handleSettingsChange = async (dto: SharedSpaceUpdateDto) => {
+    try {
+      await updateSpace({ id: space.id, sharedSpaceUpdateDto: dto });
+      await invalidateAll();
+    } catch (error) {
+      handleError(error, $t('errors.unable_to_update_space'));
+    }
+  };
 
   const toAvatarUser = (m: SharedSpaceMemberResponseDto) => ({
     id: m.userId,
@@ -35,11 +51,11 @@
   });
 
   async function handleAddMember() {
-    const result = await modalManager.show(SpaceAddMemberModal, {
-      spaceId: space.id,
-      existingMemberIds: members.map((m) => m.userId),
-    });
-    if (result) {
+    const added = await showAddSpaceMembersModal(
+      space.id,
+      members.map((m) => m.userId),
+    );
+    if (added.length > 0) {
       await invalidateAll();
     }
   }
@@ -73,12 +89,16 @@
 <div class="mx-auto w-full max-w-3xl p-4">
   <div class="mb-3 flex items-center justify-between">
     <h2 class="text-base font-semibold">{$t('members')} ({members.length})</h2>
-    {#if isOwner}
+    {#if canAddMembers}
       <Button size="small" leadingIcon={mdiAccountPlusOutline} onclick={handleAddMember} data-testid="members-invite">
         {$t('spaces_add_member')}
       </Button>
     {/if}
   </div>
+
+  {#if isOwner && space.memberManagement}
+    <SpaceMemberPermissionSettings {space} onChange={handleSettingsChange} />
+  {/if}
 
   <div data-testid="member-list" class="rounded-xl border border-gray-200 dark:border-gray-800">
     {#each members as member (member.userId)}
@@ -89,14 +109,14 @@
             <p class="truncate text-sm font-medium">{member.name}</p>
             <p class="truncate text-xs text-gray-500">{member.email}</p>
           </div>
-          {#if isOwner && member.role !== 'owner'}
+          {#if canChangeRoles && member.role !== 'owner' && member.userId !== currentMember?.userId}
             <Field class="w-28 shrink-0">
               <Select
                 value={member.role as string as SharedSpaceRole}
                 options={[
                   { label: $t('role_editor'), value: SharedSpaceRole.Editor },
                   { label: $t('role_viewer'), value: SharedSpaceRole.Viewer },
-                  { label: $t('remove'), value: 'remove' },
+                  ...(isOwner ? [{ label: $t('remove'), value: 'remove' }] : []),
                 ] as SelectOption<SharedSpaceRole | 'remove'>[]}
                 onChange={(value) => void handleRoleChange(member, value)}
               />

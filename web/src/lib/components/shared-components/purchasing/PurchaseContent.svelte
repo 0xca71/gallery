@@ -1,5 +1,5 @@
 <script lang="ts">
-  import Logo from '$lib/components/shared-components/Logo.svelte';
+  import Logo from '#lib/components/shared-components/Logo.svelte';
   import { Button, Heading, Icon } from '@immich/ui';
   import { mdiForumOutline, mdiStarOutline } from '@mdi/js';
   import { t } from 'svelte-i18n';

@@ -5,6 +5,9 @@ import { Readable } from 'node:stream';
 import { text } from 'node:stream/consumers';
 import { StorageCore } from 'src/cores/storage.core.js';
 import { AssetFileType, IntegrityReport, JobName, JobStatus, SystemMetadataKey } from 'src/enum.js';
+import { DataSaverVideoRepository } from 'src/gallery/repositories/data-saver-video.repository.js';
+import { SpatialSceneRepository } from 'src/gallery/repositories/spatial-scene.repository.js';
+import { VideoFaceRepository } from 'src/gallery/repositories/video-face.repository.js';
 import { AssetRepository } from 'src/repositories/asset.repository.js';
 import { ConfigRepository } from 'src/repositories/config.repository.js';
 import { EventRepository } from 'src/repositories/event.repository.js';
@@ -20,10 +23,19 @@ import { getKyselyDB, makeStream } from 'test/utils.js';
 
 let defaultDatabase: Kysely<DB>;
 
+// eslint-disable-next-line unicorn/no-unnecessary-parameters
 const setup = (db?: Kysely<DB>) => {
   return newMediumService(IntegrityService, {
     database: db || defaultDatabase,
-    real: [IntegrityRepository, AssetRepository, ConfigRepository, SystemMetadataRepository],
+    real: [
+      IntegrityRepository,
+      AssetRepository,
+      ConfigRepository,
+      SystemMetadataRepository,
+      SpatialSceneRepository,
+      DataSaverVideoRepository,
+      VideoFaceRepository,
+    ],
     mock: [LoggingRepository, EventRepository, StorageRepository, JobRepository],
   });
 };

@@ -4,8 +4,6 @@ import { R_OK } from 'node:constants';
 import { Stats } from 'node:fs';
 import path, { isAbsolute, parse } from 'node:path';
 import picomatch from 'picomatch';
-import type { ArgOf } from 'src/repositories/event.repository.js';
-import type { JobOf } from 'src/types.js';
 import { JOBS_LIBRARY_PAGINATION_SIZE } from 'src/constants.js';
 import { StorageCore } from 'src/cores/storage.core.js';
 import { OnEvent, OnJob } from 'src/decorators.js';
@@ -30,11 +28,13 @@ import {
   JobStatus,
   QueueName,
 } from 'src/enum.js';
+import type { ArgOf } from 'src/repositories/event.repository.js';
 import { AssetSyncResult } from 'src/repositories/library.repository.js';
 import { AssetTable } from 'src/schema/tables/asset.table.js';
 import { BaseService } from 'src/services/base.service.js';
+import type { JobOf } from 'src/types.js';
 import { mimeTypes } from 'src/utils/mime-types.js';
-import { batched, findOrFail, handlePromiseError } from 'src/utils/misc.js';
+import { batched, createLibraryMatcher, findOrFail, handlePromiseError } from 'src/utils/misc.js';
 
 @Injectable()
 export class LibraryService extends BaseService {
@@ -79,11 +79,13 @@ export class LibraryService extends BaseService {
       start: library.scan.enabled,
     });
 
-    if (library.watch.enabled !== this.watchLibraries) {
-      // Watch configuration changed, update accordingly
-      this.watchLibraries = library.watch.enabled;
-      await (this.watchLibraries ? this.watchAll() : this.unwatchAll());
+    if (library.watch.enabled === this.watchLibraries) {
+      return;
     }
+
+    // Watch configuration changed, update accordingly
+    this.watchLibraries = library.watch.enabled;
+    await (this.watchLibraries ? this.watchAll() : this.unwatchAll());
   }
 
   private async watch(id: string): Promise<boolean> {
@@ -133,6 +135,7 @@ export class LibraryService extends BaseService {
       {
         usePolling: false,
         ignoreInitial: true,
+        ignored: library.exclusionPatterns,
         awaitWriteFinish: {
           stabilityThreshold: 5000,
           pollInterval: 1000,
@@ -244,6 +247,8 @@ export class LibraryService extends BaseService {
         '**/.stfolder/**',
       ],
     });
+
+    await this.eventRepository.emit('LibraryCreate');
     return mapLibrary(library);
   }
 
@@ -264,9 +269,6 @@ export class LibraryService extends BaseService {
     await Promise.all(
       job.paths.map(async (path) => {
         try {
-          if (await this.assetEditSaveRepository.isPathSaving(path)) {
-            return;
-          }
           const asset = await this.processEntity(path, library.ownerId, job.libraryId);
           assetImports.push(asset);
         } catch (error) {
@@ -292,20 +294,7 @@ export class LibraryService extends BaseService {
 
     await this.queuePostSyncJobs(assetIds);
 
-    // Queue face match for spaces linked to this library
-    if (assetIds.length > 0) {
-      const linkedSpaces = await this.sharedSpaceRepository.getSpacesLinkedToLibrary(job.libraryId);
-      for (const link of linkedSpaces) {
-        if (link.faceRecognitionEnabled) {
-          for (const assetId of assetIds) {
-            await this.jobRepository.queue({
-              name: JobName.SharedSpaceFaceMatch,
-              data: { spaceId: link.spaceId, assetId },
-            });
-          }
-        }
-      }
-    }
+    await this.eventRepository.emit('LibraryAssetsCreate', { libraryId: job.libraryId, assetIds });
 
     return JobStatus.Success;
   }
@@ -373,6 +362,7 @@ export class LibraryService extends BaseService {
     }
 
     const library = await this.libraryRepository.update(id, dto);
+    await this.eventRepository.emit('LibraryUpdate');
     return mapLibrary(library);
   }
 
@@ -385,6 +375,8 @@ export class LibraryService extends BaseService {
 
     await this.libraryRepository.softDelete(id);
     await this.jobRepository.queue({ name: JobName.LibraryDelete, data: { id } });
+
+    await this.eventRepository.emit('LibraryDelete');
   }
 
   @OnJob({ name: JobName.LibraryDelete, queue: QueueName.Library })
@@ -493,14 +485,13 @@ export class LibraryService extends BaseService {
   @OnJob({ name: JobName.LibrarySyncAssets, queue: QueueName.Library })
   async handleSyncAssets(job: JobOf<JobName.LibrarySyncAssets>): Promise<JobStatus> {
     const assets = await this.assetJobRepository.getForSyncAssets(job.assetIds);
+    const isInLibrary = createLibraryMatcher(job);
 
     const assetIdsToOffline: string[] = [];
     const trashedAssetIdsToOffline: string[] = [];
     const assetIdsToOnline: string[] = [];
     const trashedAssetIdsToOnline: string[] = [];
     const assetIdsToUpdate: string[] = [];
-    const savingAssetIds =
-      (await this.assetEditSaveRepository.getSavingAssetIds(assets.map((asset) => asset.id))) ?? new Set<string>();
 
     this.logger.debug(`Checking batch of ${assets.length} existing asset(s) in library ${job.libraryId}`);
 
@@ -511,9 +502,6 @@ export class LibraryService extends BaseService {
     for (let i = 0; i < assets.length; i++) {
       const asset = assets[i];
       const stat = stats[i];
-      if (savingAssetIds.has(asset.id)) {
-        continue;
-      }
       const action = this.checkExistingAsset(asset, stat);
       switch (action) {
         case AssetSyncResult.DO_NOTHING: {
@@ -532,31 +520,19 @@ export class LibraryService extends BaseService {
           break;
         }
         case AssetSyncResult.CHECK_OFFLINE: {
-          const isInImportPath = job.importPaths.some((path) => asset.originalPath.startsWith(path));
-
-          if (!isInImportPath) {
+          if (!isInLibrary(asset.originalPath)) {
             this.logger.verbose(
-              `Offline asset ${asset.originalPath} is still not in any import path, keeping offline in library ${job.libraryId}`,
+              `Offline asset ${asset.originalPath} is still not in any import path or covered by an exclusion pattern, keeping offline in library ${job.libraryId}`,
             );
             break;
           }
 
-          const isExcluded = job.exclusionPatterns.some((pattern) => picomatch.isMatch(asset.originalPath, pattern));
-
-          if (!isExcluded) {
-            this.logger.debug(`Offline asset ${asset.originalPath} is now online in library ${job.libraryId}`);
-            if (asset.status === AssetStatus.Trashed) {
-              trashedAssetIdsToOnline.push(asset.id);
-            } else {
-              assetIdsToOnline.push(asset.id);
-            }
-            break;
+          this.logger.debug(`Offline asset ${asset.originalPath} is now online in library ${job.libraryId}`);
+          if (asset.status === AssetStatus.Trashed) {
+            trashedAssetIdsToOnline.push(asset.id);
+          } else {
+            assetIdsToOnline.push(asset.id);
           }
-
-          this.logger.verbose(
-            `Offline asset ${asset.originalPath} is in an import path but still covered by exclusion pattern, keeping offline in library ${job.libraryId}`,
-          );
-
           break;
         }
       }
@@ -708,14 +684,6 @@ export class LibraryService extends BaseService {
     // This is only for handling file unlink events via the file watcher
     this.logger.verbose(`Deleting asset(s) ${job.paths} from library ${job.libraryId}`);
     for (const assetPath of job.paths) {
-      // An atomic replacement can emit unlink followed by add. Preserve the existing identity
-      // when the target is present again by the time the delayed watcher job runs.
-      if (
-        (await this.assetEditSaveRepository.isPathSaving(assetPath)) ||
-        (await this.storageRepository.checkFileExists(assetPath))
-      ) {
-        continue;
-      }
       const asset = await this.assetRepository.getByLibraryIdAndOriginalPath(job.libraryId, assetPath);
       if (asset) {
         await this.assetRepository.remove(asset);
@@ -742,13 +710,10 @@ export class LibraryService extends BaseService {
       `Checking ${assetCount} asset(s) against import paths and exclusion patterns in library ${library.id}...`,
     );
 
-    const offlineResult = await this.assetRepository.detectOfflineExternalAssets(
+    const affectedAssetCount = await this.assetRepository.detectOfflineExternalAssets(
       library.id,
-      library.importPaths,
-      library.exclusionPatterns,
+      createLibraryMatcher(library),
     );
-
-    const affectedAssetCount = Number(offlineResult.numUpdatedRows);
 
     this.logger.log(
       `${affectedAssetCount} asset(s) out of ${assetCount} were offlined due to import paths and/or exclusion pattern(s) in library ${library.id}`,

@@ -10,6 +10,17 @@ select
       (
         select
           "asset".*,
+          coalesce(
+            (
+              select
+                "asset_video_trim"."duration"
+              from
+                "asset_video_trim"
+              where
+                "asset_video_trim"."assetId" = "asset"."id"
+            ),
+            "asset"."duration"
+          ) as "duration",
           to_json("exifInfo") as "exifInfo"
         from
           "asset"
@@ -30,7 +41,6 @@ select
               "asset_exif"."fNumber",
               "asset_exif"."focalLength",
               "asset_exif"."fps",
-              "asset_exif"."formattedAddress",
               "asset_exif"."iso",
               "asset_exif"."latitude",
               "asset_exif"."lensModel",
@@ -64,6 +74,89 @@ from
 where
   "stack"."ownerId" = $1
 
+-- StackRepository.search (with authUserId)
+select
+  "stack".*,
+  (
+    select
+      coalesce(json_agg(agg), '[]')
+    from
+      (
+        select
+          "asset".*,
+          coalesce(
+            (
+              select
+                "asset_video_trim"."duration"
+              from
+                "asset_video_trim"
+              where
+                "asset_video_trim"."assetId" = "asset"."id"
+            ),
+            "asset"."duration"
+          ) as "duration",
+          to_json("exifInfo") as "exifInfo",
+          exists (
+            select
+              1 as "exists"
+            from
+              "asset_favorite"
+            where
+              "asset_favorite"."assetId" = "asset"."id"
+              and "asset_favorite"."userId" = $1::uuid
+          ) as "isFavoriteForUser"
+        from
+          "asset"
+          inner join lateral (
+            select
+              "asset_exif"."assetId",
+              "asset_exif"."autoStackId",
+              "asset_exif"."bitsPerSample",
+              "asset_exif"."city",
+              "asset_exif"."colorspace",
+              "asset_exif"."country",
+              "asset_exif"."dateTimeOriginal",
+              "asset_exif"."description",
+              "asset_exif"."exifImageHeight",
+              "asset_exif"."exifImageWidth",
+              "asset_exif"."exposureTime",
+              "asset_exif"."fileSizeInByte",
+              "asset_exif"."fNumber",
+              "asset_exif"."focalLength",
+              "asset_exif"."fps",
+              "asset_exif"."iso",
+              "asset_exif"."latitude",
+              "asset_exif"."lensModel",
+              "asset_exif"."livePhotoCID",
+              "asset_exif"."longitude",
+              "asset_exif"."make",
+              "asset_exif"."model",
+              "asset_exif"."modifyDate",
+              "asset_exif"."orientation",
+              "asset_exif"."profileDescription",
+              "asset_exif"."projectionType",
+              "asset_exif"."rating",
+              "asset_exif"."state",
+              "asset_exif"."tags",
+              "asset_exif"."timeZone"
+            from
+              "asset_exif"
+            where
+              "asset_exif"."assetId" = "asset"."id"
+          ) as "exifInfo" on true
+        where
+          "asset"."deletedAt" is null
+          and "asset"."stackId" = "stack"."id"
+          and "asset"."visibility" in ('archive', 'timeline')
+        order by
+          "asset"."fileCreatedAt" asc
+      ) as agg
+  ) as "assets"
+from
+  "stack"
+where
+  "stack"."ownerId" = $2
+
 -- StackRepository.delete
 delete from "stack"
 where
@@ -79,6 +172,17 @@ select
       (
         select
           "asset".*,
+          coalesce(
+            (
+              select
+                "asset_video_trim"."duration"
+              from
+                "asset_video_trim"
+              where
+                "asset_video_trim"."assetId" = "asset"."id"
+            ),
+            "asset"."duration"
+          ) as "duration",
           (
             select
               coalesce(json_agg(agg), '[]')
@@ -118,7 +222,6 @@ select
               "asset_exif"."fNumber",
               "asset_exif"."focalLength",
               "asset_exif"."fps",
-              "asset_exif"."formattedAddress",
               "asset_exif"."iso",
               "asset_exif"."latitude",
               "asset_exif"."lensModel",
@@ -151,6 +254,108 @@ from
   "stack"
 where
   "id" = $1::uuid
+
+-- StackRepository.getById (with authUserId)
+select
+  *,
+  (
+    select
+      coalesce(json_agg(agg), '[]')
+    from
+      (
+        select
+          "asset".*,
+          coalesce(
+            (
+              select
+                "asset_video_trim"."duration"
+              from
+                "asset_video_trim"
+              where
+                "asset_video_trim"."assetId" = "asset"."id"
+            ),
+            "asset"."duration"
+          ) as "duration",
+          (
+            select
+              coalesce(json_agg(agg), '[]')
+            from
+              (
+                select
+                  "tag"."id",
+                  "tag"."value",
+                  "tag"."createdAt",
+                  "tag"."updatedAt",
+                  "tag"."color",
+                  "tag"."parentId"
+                from
+                  "tag"
+                  inner join "tag_asset" on "tag"."id" = "tag_asset"."tagId"
+                where
+                  "tag_asset"."assetId" = "asset"."id"
+              ) as agg
+          ) as "tags",
+          to_json("exifInfo") as "exifInfo",
+          exists (
+            select
+              1 as "exists"
+            from
+              "asset_favorite"
+            where
+              "asset_favorite"."assetId" = "asset"."id"
+              and "asset_favorite"."userId" = $1::uuid
+          ) as "isFavoriteForUser"
+        from
+          "asset"
+          inner join lateral (
+            select
+              "asset_exif"."assetId",
+              "asset_exif"."autoStackId",
+              "asset_exif"."bitsPerSample",
+              "asset_exif"."city",
+              "asset_exif"."colorspace",
+              "asset_exif"."country",
+              "asset_exif"."dateTimeOriginal",
+              "asset_exif"."description",
+              "asset_exif"."exifImageHeight",
+              "asset_exif"."exifImageWidth",
+              "asset_exif"."exposureTime",
+              "asset_exif"."fileSizeInByte",
+              "asset_exif"."fNumber",
+              "asset_exif"."focalLength",
+              "asset_exif"."fps",
+              "asset_exif"."iso",
+              "asset_exif"."latitude",
+              "asset_exif"."lensModel",
+              "asset_exif"."livePhotoCID",
+              "asset_exif"."longitude",
+              "asset_exif"."make",
+              "asset_exif"."model",
+              "asset_exif"."modifyDate",
+              "asset_exif"."orientation",
+              "asset_exif"."profileDescription",
+              "asset_exif"."projectionType",
+              "asset_exif"."rating",
+              "asset_exif"."state",
+              "asset_exif"."tags",
+              "asset_exif"."timeZone"
+            from
+              "asset_exif"
+            where
+              "asset_exif"."assetId" = "asset"."id"
+          ) as "exifInfo" on true
+        where
+          "asset"."deletedAt" is null
+          and "asset"."stackId" = "stack"."id"
+          and "asset"."visibility" in ('archive', 'timeline')
+        order by
+          "asset"."fileCreatedAt" asc
+      ) as agg
+  ) as "assets"
+from
+  "stack"
+where
+  "id" = $2::uuid
 
 -- StackRepository.getForAssetRemoval
 select

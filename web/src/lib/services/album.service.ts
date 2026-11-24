@@ -1,39 +1,46 @@
+import { authManager } from '#lib/managers/auth-manager.svelte.ts';
+import type { TimelineAsset } from '#lib/managers/timeline-manager/types.ts';
+import AddUsersModal from '#lib/modals/AddUsersModal.svelte';
+import AlbumEditModal from '#lib/modals/AlbumEditModal.svelte';
+import AlbumOptionsModal from '#lib/modals/AlbumOptionsModal.svelte';
+import SharedLinkCreateModal from '#lib/modals/SharedLinkCreateModal.svelte';
 import {
-  addAssetsToAlbum as addToAlbum,
-  addAssetsToAlbums as addToAlbums,
-  addUsersToAlbum,
-  AlbumUserRole,
-  BulkIdErrorReason,
-  deleteAlbum,
-  linkAlbum,
-  removeUserFromAlbum,
-  updateAlbumInfo,
-  updateAlbumUser,
-  type AlbumResponseDto,
-  type AlbumsAddAssetsResponseDto,
-  type AssetResponseDto,
-  type BulkIdResponseDto,
-  type SharedSpaceResponseDto,
-  type UpdateAlbumDto,
-  type UserResponseDto,
-} from '@immich/sdk';
-import { modalManager, toastManager, type ActionItem } from '@immich/ui';
-import { mdiImageOutline, mdiLink, mdiPlus, mdiPlusBoxOutline, mdiShareVariantOutline, mdiUpload } from '@mdi/js';
+  addAssetsToAlbumsMutation,
+  addUsersToAlbumMutation,
+  deleteAlbumMutation,
+  removeUserFromAlbumMutation,
+  updateAlbumInfoMutation,
+  updateAlbumUserMutation,
+} from '#lib/queries/album.query.ts';
+import { executeMutation } from '#lib/queries/client.ts';
+import { Route } from '#lib/route.ts';
+import { createAlbumAndRedirect } from '#lib/utils/album-utils.ts';
+import { downloadArchive } from '#lib/utils/asset-utils.ts';
+import { openFileUploadDialog } from '#lib/utils/file-uploader.ts';
+import { getFormatter } from '#lib/utils/i18n.ts';
+import { AlbumUserRole, type AlbumResponseDto, type UserResponseDto } from '@immich/sdk';
+import { modalManager, type ActionItem } from '@immich/ui';
+import {
+  mdiCogOutline,
+  mdiDownload,
+  mdiExitToApp,
+  mdiImageOutline,
+  mdiLink,
+  mdiPlus,
+  mdiPlusBoxOutline,
+  mdiRenameOutline,
+  mdiShareVariantOutline,
+  mdiTrashCanOutline,
+  mdiUpload,
+} from '@mdi/js';
 import { type MessageFormatter } from 'svelte-i18n';
 import { goto } from '$app/navigation';
-import { authManager } from '$lib/managers/auth-manager.svelte';
-import { eventManager } from '$lib/managers/event-manager.svelte';
-import type { TimelineAsset } from '$lib/managers/timeline-manager/types';
-import AlbumAddUsersModal from '$lib/modals/AlbumAddUsersModal.svelte';
-import AlbumOptionsModal from '$lib/modals/AlbumOptionsModal.svelte';
-import SharedLinkCreateModal from '$lib/modals/SharedLinkCreateModal.svelte';
-import SpacePickerModal from '$lib/modals/SpacePickerModal.svelte';
-import { Route } from '$lib/route';
-import { createAlbumAndRedirect } from '$lib/utils/album-utils';
-import { downloadArchive } from '$lib/utils/asset-utils';
-import { openFileUploadDialog } from '$lib/utils/file-uploader';
-import { handleError } from '$lib/utils/handle-error';
-import { getFormatter } from '$lib/utils/i18n';
+import { page } from '$app/state';
+
+export const isAlbumOwner = (album: AlbumResponseDto) => album.albumUsers[0].user.id === authManager.user.id;
+export const isAlbumEditor = (album: AlbumResponseDto) =>
+  isAlbumOwner(album) ||
+  album.albumUsers.find(({ user: { id } }) => id === authManager.user.id)?.role === AlbumUserRole.Editor;
 
 export const getAlbumsActions = ($t: MessageFormatter) => {
   const Create: ActionItem = {
@@ -46,20 +53,19 @@ export const getAlbumsActions = ($t: MessageFormatter) => {
 };
 
 export const getAlbumActions = ($t: MessageFormatter, album: AlbumResponseDto) => {
-  const isOwned = album.albumUsers[0].user.id === authManager.user.id;
-
-  const Share: ActionItem = {
-    title: $t('share'),
-    icon: mdiShareVariantOutline,
-    $if: () => isOwned,
-    onAction: () => modalManager.show(AlbumOptionsModal, { album }),
-  };
+  const isOwned = isAlbumOwner(album);
+  const isEditor = isAlbumEditor(album);
 
   const AddUsers: ActionItem = {
-    title: $t('invite_people'),
+    title: $t('add_user'),
     icon: mdiPlus,
     color: 'primary',
-    onAction: () => modalManager.show(AlbumAddUsersModal, { album }),
+    onAction: () =>
+      modalManager.show(AddUsersModal, {
+        excludedUserIds: album.albumUsers.map(({ user: { id } }) => id),
+        // TODO that explicit UserResponseDto[] shouldn't be necessary, but svelte's types seem to be messed up right now and AlbumAddUsersModal has a bad type
+        onAddUsers: (users: UserResponseDto[]) => handleAddUsersToAlbum(album, users),
+      }),
   };
 
   const CreateSharedLink: ActionItem = {
@@ -69,10 +75,61 @@ export const getAlbumActions = ($t: MessageFormatter, album: AlbumResponseDto) =
     onAction: () => modalManager.show(SharedLinkCreateModal, { albumId: album.id }),
   };
 
-  return { Share, AddUsers, CreateSharedLink };
+  const Delete: ActionItem = {
+    title: $t('delete_album'),
+    icon: mdiTrashCanOutline,
+    $if: () => isOwned,
+    onAction: () => handleDeleteAlbum(album),
+  };
+
+  const Download: ActionItem = {
+    title: $t('download'),
+    icon: mdiDownload,
+    $if: () => album.assetCount > 0,
+    onAction: () => handleDownloadAlbum(album),
+  };
+
+  // Gallery (#990): editing follows the server's Permission.AlbumUpdate (owner ∪ editor), so an
+  // album editor can change the album's name, description and creation date. Share and delete stay
+  // owner-only (Permission.AlbumDelete is owner-only; share keeps the stricter UI gate).
+  const Edit: ActionItem = {
+    title: $t('edit_album'),
+    icon: mdiRenameOutline,
+    $if: () => isEditor,
+    onAction: () => modalManager.show(AlbumEditModal, { album }),
+  };
+
+  // Gallery: gate on membership, not just non-ownership. A Space member can reach an album through its Space link
+  // without being an album user, and the server rejects leaving an album you were never shared into.
+  const isNonOwnerMember = album.albumUsers.some(
+    ({ user, role }) => user.id === authManager.user.id && role !== AlbumUserRole.Owner,
+  );
+
+  const Leave: ActionItem = {
+    title: $t('leave_album'),
+    icon: mdiExitToApp,
+    $if: () => isNonOwnerMember,
+    onAction: () => handleLeaveAlbum(album),
+  };
+
+  const Options: ActionItem = {
+    title: $t('options'),
+    icon: mdiCogOutline,
+    $if: () => album.assetCount > 0,
+    onAction: () => modalManager.show(AlbumOptionsModal, { album, readOnly: !isOwned }),
+  };
+
+  const Share: ActionItem = {
+    title: $t('share'),
+    icon: mdiShareVariantOutline,
+    $if: () => isOwned,
+    onAction: () => modalManager.show(AlbumOptionsModal, { album }),
+  };
+
+  return { AddUsers, CreateSharedLink, Delete, Download, Edit, Leave, Options, Share };
 };
 
-export const getAlbumAssetActions = ($t: MessageFormatter, album: AlbumResponseDto, asset: AssetResponseDto) => {
+export const getAlbumAssetActions = ($t: MessageFormatter, album: AlbumResponseDto, asset: { id: string }) => {
   const SetCover: ActionItem = {
     title: $t('set_as_album_cover'),
     icon: mdiImageOutline,
@@ -89,11 +146,7 @@ export const getAlbumAssetsActions = ($t: MessageFormatter, album: AlbumResponse
     icon: mdiPlusBoxOutline,
     $if: () => assets.length > 0,
     onAction: () =>
-      addAssetsToAlbums(
-        [album.id],
-        assets.map(({ id }) => id),
-        { notify: true },
-      ).then(() => undefined),
+      executeMutation(addAssetsToAlbumsMutation, { albumIds: [album.id], assetIds: assets.map(({ id }) => id) }),
   };
 
   const Upload: ActionItem = {
@@ -106,134 +159,13 @@ export const getAlbumAssetsActions = ($t: MessageFormatter, album: AlbumResponse
   return { AddAssets, Upload };
 };
 
-/**
- * Single-album add that reports WHICH assets the server accepted.
- *
- * `POST /albums/:id/assets` answers HTTP 200 with per-asset outcomes, so "the call did not throw"
- * is not "every photo landed" — an asset can come back `success:false, error:no_permission`. A
- * caller that paints the whole selection into the album on a non-throwing call shows photos that
- * disappear on the next reload. Cross-owner adds make that routine, because an asset visible
- * through a space is not necessarily one the #764 contribution path will accept.
- */
-export const addAssetsToAlbumWithOutcome = async (
-  albumId: string,
-  assetIds: string[],
-  { notify }: { notify: boolean },
-): Promise<{ ok: boolean; addedIds: string[]; deniedIds: string[] }> => {
-  const $t = await getFormatter();
-
-  try {
-    const results = await addToAlbum({ ...authManager.params, id: albumId, bulkIdsDto: { ids: assetIds } });
-    if (notify) {
-      notifyAddToAlbum($t, albumId, assetIds, results);
-    }
-    eventManager.emit('AlbumAddAssets', { assetIds, albumIds: [albumId] });
-    return {
-      ok: true,
-      addedIds: results.filter(({ success }) => success).map(({ id }) => id),
-      // An asset already in the album comes back `success:false, error:duplicate`. That is not a
-      // refusal — the photo is already where the caller wanted it and there is nothing to retry —
-      // so it must not be lumped in with a genuine permission denial.
-      deniedIds: results
-        .filter(({ success, error }) => !success && error !== BulkIdErrorReason.Duplicate)
-        .map(({ id }) => id),
-    };
-  } catch (error) {
-    handleError(error, $t('errors.error_adding_assets_to_album'));
-    return { ok: false, addedIds: [], deniedIds: [] };
+const leaveAlbumPage = (album: AlbumResponseDto) => {
+  if (page.params.albumId === album.id) {
+    void goto(Route.albums());
   }
 };
 
-export const addAssetsToAlbums = async (albumIds: string[], assetIds: string[], { notify }: { notify: boolean }) => {
-  const $t = await getFormatter();
-
-  // Delegate the single-album case so both paths share one implementation (and one event emit).
-  if (albumIds.length === 1) {
-    const { ok } = await addAssetsToAlbumWithOutcome(albumIds[0], assetIds, { notify });
-    return ok;
-  }
-
-  try {
-    if (albumIds.length > 1) {
-      const results = await addToAlbums({ ...authManager.params, albumsAddAssetsDto: { albumIds, assetIds } });
-      if (notify) {
-        notifyAddToAlbums($t, albumIds, assetIds, results);
-      }
-    }
-
-    eventManager.emit('AlbumAddAssets', { assetIds, albumIds });
-    return true;
-  } catch (error) {
-    handleError(error, $t('errors.error_adding_assets_to_album'));
-    return false;
-  }
-};
-
-/**
- * Toast the outcome of an add-to-album call truthfully (#764). The server returns HTTP 200 with
- * per-asset failures, so severity must follow the result counts — a green "Successful" heading is
- * reserved for the all-succeeded case; nothing-added is a warning; partial / already-present is info.
- * Exported for unit testing.
- */
-export const notifyAddToAlbum = (
-  $t: MessageFormatter,
-  albumId: string,
-  assetIds: string[],
-  results: BulkIdResponseDto[],
-) => {
-  const successCount = results.filter(({ success }) => success).length;
-  const duplicateCount = results.filter(({ error }) => error === 'duplicate').length;
-  const total = assetIds.length;
-  const viewButton = { label: $t('view_album'), onclick: () => goto(Route.viewAlbum({ id: albumId })) };
-  const options = { timeout: 5000 };
-
-  if (successCount === total) {
-    toastManager.primary(
-      { description: $t('assets_added_to_album_count', { values: { count: successCount } }), button: viewButton },
-      options,
-    );
-  } else if (duplicateCount === total) {
-    toastManager.info(
-      { description: $t('assets_were_part_of_album_count', { values: { count: duplicateCount } }), button: viewButton },
-      options,
-    );
-  } else if (successCount > 0) {
-    toastManager.info(
-      {
-        description: $t('assets_added_to_album_partial_count', { values: { successCount, totalCount: total } }),
-        button: viewButton,
-      },
-      options,
-    );
-  } else {
-    // Nothing was added (no_permission and/or a mix that netted zero) — never render as success.
-    toastManager.warning(
-      { description: $t('assets_cannot_be_added_to_album_count', { values: { count: total } }) },
-      options,
-    );
-  }
-};
-
-const notifyAddToAlbums = (
-  $t: MessageFormatter,
-  albumIds: string[],
-  assetIds: string[],
-  results: AlbumsAddAssetsResponseDto,
-) => {
-  if (results.error === BulkIdErrorReason.Duplicate) {
-    toastManager.info($t('assets_were_part_of_albums_count', { values: { count: assetIds.length } }));
-  } else if (results.error) {
-    toastManager.warning($t('assets_cannot_be_added_to_albums', { values: { count: assetIds.length } }));
-  } else {
-    toastManager.primary(
-      $t('assets_added_to_albums_count', {
-        values: { albumTotal: albumIds.length, assetTotal: assetIds.length },
-      }),
-    );
-  }
-};
-
-export const handleUpdateUserAlbumRole = async ({
+export const handleUpdateUserAlbumRole = ({
   albumId,
   userId,
   role,
@@ -241,28 +173,14 @@ export const handleUpdateUserAlbumRole = async ({
   albumId: string;
   userId: string;
   role: AlbumUserRole;
-}) => {
-  const $t = await getFormatter();
+}) => executeMutation(updateAlbumUserMutation, [{ id: albumId, userId, updateAlbumUserDto: { role } }]);
 
-  try {
-    await updateAlbumUser({ id: albumId, userId, updateAlbumUserDto: { role } });
-    eventManager.emit('AlbumUserUpdate', { albumId, userId, role });
-  } catch (error) {
-    handleError(error, $t('errors.unable_to_change_album_user_role'));
-  }
-};
-
-export const handleAddUsersToAlbum = async (album: AlbumResponseDto, users: UserResponseDto[]) => {
-  const $t = await getFormatter();
-
-  try {
-    await addUsersToAlbum({ id: album.id, addUsersDto: { albumUsers: users.map(({ id }) => ({ userId: id })) } });
-    eventManager.emit('AlbumShare');
-    return true;
-  } catch (error) {
-    handleError(error, $t('errors.error_adding_users_to_album'));
-  }
-};
+export const handleAddUsersToAlbum = (album: AlbumResponseDto, users: UserResponseDto[], onSuccess?: () => void) =>
+  executeMutation(
+    addUsersToAlbumMutation,
+    [{ id: album.id, addUsersDto: { albumUsers: users.map(({ id }) => ({ userId: id })) } }],
+    { onSuccess },
+  );
 
 export const handleRemoveUserFromAlbum = async (album: AlbumResponseDto, albumUser: UserResponseDto) => {
   const $t = await getFormatter();
@@ -277,47 +195,36 @@ export const handleRemoveUserFromAlbum = async (album: AlbumResponseDto, albumUs
     return;
   }
 
-  try {
-    await removeUserFromAlbum({ id: album.id, userId: albumUser.id });
-    eventManager.emit('AlbumUserDelete', { albumId: album.id, userId: albumUser.id });
-  } catch (error) {
-    handleError(error, $t('errors.unable_to_remove_album_users'));
-  }
+  await executeMutation(removeUserFromAlbumMutation, [{ id: album.id, userId: albumUser.id }]);
 };
 
-const handleUpdateThumbnail = async (album: AlbumResponseDto, assetId: string) => {
+export const handleLeaveAlbum = async (album: AlbumResponseDto) => {
   const $t = await getFormatter();
 
-  try {
-    const response = await updateAlbumInfo({
-      id: album.id,
-      updateAlbumDto: {
-        albumThumbnailAssetId: assetId,
-      },
-    });
-    eventManager.emit('AlbumUpdate', response);
-    toastManager.primary($t('album_cover_updated'));
-  } catch (error) {
-    handleError(error, $t('errors.unable_to_update_album_cover'));
+  const confirmed = await modalManager.showDialog({
+    title: $t('leave_album'),
+    prompt: $t('are_you_sure_to_do_this'),
+    confirmText: $t('leave'),
+  });
+
+  if (!confirmed) {
+    return;
   }
+
+  await executeMutation(removeUserFromAlbumMutation, [{ id: album.id, userId: 'me' }], {
+    onSuccess: () => leaveAlbumPage(album),
+  });
 };
 
-export const handleUpdateAlbum = async ({ id }: { id: string }, dto: UpdateAlbumDto) => {
-  const $t = await getFormatter();
-
-  try {
-    const response = await updateAlbumInfo({ id, updateAlbumDto: dto });
-    eventManager.emit('AlbumUpdate', response);
-    toastManager.primary({
-      description: $t('album_info_updated'),
-      button: { label: $t('view_album'), onclick: () => goto(Route.viewAlbum({ id })) },
-    });
-
-    return true;
-  } catch (error) {
-    handleError(error, $t('errors.unable_to_update_album_info'));
-  }
-};
+const handleUpdateThumbnail = (album: AlbumResponseDto, assetId: string) =>
+  executeMutation(
+    () =>
+      updateAlbumInfoMutation({
+        success: { toast: 'album_cover_updated' },
+        error: { toast: 'errors.unable_to_update_album_cover' },
+      }),
+    [{ id: album.id, updateAlbumDto: { albumThumbnailAssetId: assetId } }],
+  );
 
 export const handleDeleteAlbum = async (album: AlbumResponseDto, options?: { prompt?: boolean; notify?: boolean }) => {
   const $t = await getFormatter();
@@ -331,45 +238,20 @@ export const handleDeleteAlbum = async (album: AlbumResponseDto, options?: { pro
     const description = $t('album_delete_confirmation_description');
     const success = await modalManager.showDialog({ prompt: `${confirmation} ${description}` });
     if (!success) {
-      return false;
+      return;
     }
   }
 
-  try {
-    await deleteAlbum({ id: album.id });
-    eventManager.emit('AlbumDelete', album);
-    if (notify) {
-      toastManager.primary();
-    }
-    return true;
-  } catch (error) {
-    handleError(error, $t('errors.unable_to_delete_album'), { notify });
-    return false;
-  }
+  await executeMutation(
+    () =>
+      deleteAlbumMutation(
+        notify ? { success: { toast: true }, error: { toast: 'errors.unable_to_delete_album' } } : {},
+      ),
+    [{ id: album.id }],
+    { onSuccess: () => leaveAlbumPage(album) },
+  );
 };
 
 export const handleDownloadAlbum = async (album: AlbumResponseDto) => {
   await downloadArchive(album.albumName, { albumId: album.id });
-};
-
-// L15: "Link to space" entry point from the album itself (mirrors the existing "link an album"
-// flow already available from inside a space — see SpaceLinkAlbumModal / the space albums page).
-// Reuses the existing SpacePickerModal (built for cmdk selection, never wired up) and the existing
-// `linkAlbum` PUT /shared-spaces/{id}/albums/{albumId} SDK call — no new backend, no new modal.
-export const handleLinkAlbumToSpace = async (album: AlbumResponseDto) => {
-  const $t = await getFormatter();
-
-  const space = await modalManager.show<{ onClose: (space?: SharedSpaceResponseDto) => void }>(SpacePickerModal, {});
-  if (!space) {
-    return false;
-  }
-
-  try {
-    await linkAlbum({ id: space.id, albumId: album.id });
-    toastManager.primary($t('album_linked_to_space', { values: { space: space.name } }));
-    return true;
-  } catch (error) {
-    handleError(error, $t('spaces_linked_albums_error_link'));
-    return false;
-  }
 };

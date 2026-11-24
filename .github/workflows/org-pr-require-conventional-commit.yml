@@ -1,8 +1,8 @@
 name: PR Conventional Commit
 
 on:
-  workflow_dispatch:
-    # Disabled for personal-use CI; keep the file for easy re-enable.
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
 
 jobs:
   validate-pr-title:

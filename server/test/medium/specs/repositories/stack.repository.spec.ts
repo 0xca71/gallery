@@ -1,6 +1,5 @@
 import { Kysely } from 'kysely';
 import { beforeAll, describe, expect, it } from 'vitest';
-import { AssetVisibility } from 'src/enum.js';
 import { LoggingRepository } from 'src/repositories/logging.repository.js';
 import { StackRepository } from 'src/repositories/stack.repository.js';
 import { DB } from 'src/schema/index.js';
@@ -19,144 +18,37 @@ const setup = (db?: Kysely<DB>) => {
   return { ctx, sut: ctx.get(StackRepository) };
 };
 
-const sorted = (ids: string[]) => [...ids].sort();
-
 beforeAll(async () => {
   defaultDatabase = await getKyselyDB();
 });
 
 describe(StackRepository.name, () => {
-  describe('getStackedAssetIds', () => {
-    it('returns an empty array for empty input', async () => {
-      const { sut } = setup();
-      await expect(sut.getStackedAssetIds([])).resolves.toEqual([]);
-    });
-
-    it('returns a non-stacked asset unchanged', async () => {
+  // #763 slice 1b Task 2 — stack.dto.ts's mapStack feeds each stack asset through mapAsset, which
+  // now reads `isFavoriteForUser` exclusively (slice 1b Task 1). getById (and search/create/update,
+  // sharing the withAssets helper) must project the overlay keyed to the CALLER.
+  describe('getById (#763)', () => {
+    it('projects isFavoriteForUser onto stack.assets for the requesting user, independent of the owner', async () => {
       const { ctx, sut } = setup();
-      const { user } = await ctx.newUser();
-      const { asset } = await ctx.newAsset({ ownerId: user.id });
+      const { user: owner } = await ctx.newUser();
+      const { user: viewer } = await ctx.newUser();
+      const { asset: primary } = await ctx.newAsset({ ownerId: owner.id });
+      const { asset: child } = await ctx.newAsset({ ownerId: owner.id });
+      // withAssets inner-joins asset_exif (via innerJoinLateral) — every asset needs a row there
+      // to be included at all.
+      await ctx.newExif({ assetId: primary.id, make: 'Test' });
+      await ctx.newExif({ assetId: child.id, make: 'Test' });
+      const { stack } = await ctx.newStack({ ownerId: owner.id }, [primary.id, child.id]);
 
-      await expect(sut.getStackedAssetIds([asset.id])).resolves.toEqual([asset.id]);
-    });
+      await ctx.database.insertInto('asset_favorite').values({ userId: viewer.id, assetId: child.id }).execute();
 
-    it('expands the stack primary to include all its children', async () => {
-      const { ctx, sut } = setup();
-      const { user } = await ctx.newUser();
-      const { asset: primary } = await ctx.newAsset({ ownerId: user.id });
-      const { asset: child } = await ctx.newAsset({ ownerId: user.id });
-      await ctx.newStack({ ownerId: user.id }, [primary.id, child.id]);
+      const asOwner = await sut.getById(stack.id, owner.id);
+      expect(asOwner?.assets.find((a) => a.id === child.id)?.isFavoriteForUser).toBe(false);
 
-      const result = await sut.getStackedAssetIds([primary.id]);
-      expect(sorted(result)).toEqual(sorted([primary.id, child.id]));
-    });
+      const asViewer = await sut.getById(stack.id, viewer.id);
+      expect(asViewer?.assets.find((a) => a.id === child.id)?.isFavoriteForUser).toBe(true);
 
-    it('expands a stack child to include the primary and every sibling', async () => {
-      const { ctx, sut } = setup();
-      const { user } = await ctx.newUser();
-      const { asset: primary } = await ctx.newAsset({ ownerId: user.id });
-      const { asset: childA } = await ctx.newAsset({ ownerId: user.id });
-      const { asset: childB } = await ctx.newAsset({ ownerId: user.id });
-      await ctx.newStack({ ownerId: user.id }, [primary.id, childA.id, childB.id]);
-
-      // Seeding from a NON-primary member must still return the whole stack —
-      // this is the exact case that broke #751 (child in a space, primary not).
-      const result = await sut.getStackedAssetIds([childA.id]);
-      expect(sorted(result)).toEqual(sorted([primary.id, childA.id, childB.id]));
-    });
-
-    it('deduplicates when multiple members of the same stack are passed', async () => {
-      const { ctx, sut } = setup();
-      const { user } = await ctx.newUser();
-      const { asset: primary } = await ctx.newAsset({ ownerId: user.id });
-      const { asset: child } = await ctx.newAsset({ ownerId: user.id });
-      await ctx.newStack({ ownerId: user.id }, [primary.id, child.id]);
-
-      const result = await sut.getStackedAssetIds([primary.id, child.id]);
-      expect(sorted(result)).toEqual(sorted([primary.id, child.id]));
-      expect(result).toHaveLength(2);
-    });
-
-    it('expands every distinct stack referenced by the input', async () => {
-      const { ctx, sut } = setup();
-      const { user } = await ctx.newUser();
-      const { asset: primaryA } = await ctx.newAsset({ ownerId: user.id });
-      const { asset: childA } = await ctx.newAsset({ ownerId: user.id });
-      const { asset: primaryB } = await ctx.newAsset({ ownerId: user.id });
-      const { asset: childB } = await ctx.newAsset({ ownerId: user.id });
-      await ctx.newStack({ ownerId: user.id }, [primaryA.id, childA.id]);
-      await ctx.newStack({ ownerId: user.id }, [primaryB.id, childB.id]);
-
-      const result = await sut.getStackedAssetIds([childA.id, primaryB.id]);
-      expect(sorted(result)).toEqual(sorted([primaryA.id, childA.id, primaryB.id, childB.id]));
-    });
-
-    it('unions stacked and non-stacked inputs', async () => {
-      const { ctx, sut } = setup();
-      const { user } = await ctx.newUser();
-      const { asset: primary } = await ctx.newAsset({ ownerId: user.id });
-      const { asset: child } = await ctx.newAsset({ ownerId: user.id });
-      const { asset: loner } = await ctx.newAsset({ ownerId: user.id });
-      await ctx.newStack({ ownerId: user.id }, [primary.id, child.id]);
-
-      const result = await sut.getStackedAssetIds([primary.id, loner.id]);
-      expect(sorted(result)).toEqual(sorted([primary.id, child.id, loner.id]));
-    });
-
-    it('excludes soft-deleted siblings from the expansion', async () => {
-      const { ctx, sut } = setup();
-      const { user } = await ctx.newUser();
-      const { asset: primary } = await ctx.newAsset({ ownerId: user.id });
-      const { asset: liveChild } = await ctx.newAsset({ ownerId: user.id });
-      const { asset: deletedChild } = await ctx.newAsset({ ownerId: user.id, deletedAt: new Date() });
-      await ctx.newStack({ ownerId: user.id }, [primary.id, liveChild.id, deletedChild.id]);
-
-      const result = await sut.getStackedAssetIds([primary.id]);
-      expect(sorted(result)).toEqual(sorted([primary.id, liveChild.id]));
-    });
-
-    it('excludes a soft-deleted input asset', async () => {
-      const { ctx, sut } = setup();
-      const { user } = await ctx.newUser();
-      const { asset: deleted } = await ctx.newAsset({ ownerId: user.id, deletedAt: new Date() });
-
-      await expect(sut.getStackedAssetIds([deleted.id])).resolves.toEqual([]);
-    });
-
-    it('ignores ids that do not exist', async () => {
-      const { ctx, sut } = setup();
-      const { user } = await ctx.newUser();
-      const { asset } = await ctx.newAsset({ ownerId: user.id });
-
-      const result = await sut.getStackedAssetIds([asset.id, '00000000-0000-0000-0000-000000000000']);
-      expect(result).toEqual([asset.id]);
-    });
-
-    it('excludes Hidden and Locked siblings when a visibility whitelist is given', async () => {
-      const { ctx, sut } = setup();
-      const { user } = await ctx.newUser();
-      const { asset: primary } = await ctx.newAsset({ ownerId: user.id, visibility: AssetVisibility.Timeline });
-      const { asset: archived } = await ctx.newAsset({ ownerId: user.id, visibility: AssetVisibility.Archive });
-      const { asset: hidden } = await ctx.newAsset({ ownerId: user.id, visibility: AssetVisibility.Hidden });
-      const { asset: locked } = await ctx.newAsset({ ownerId: user.id, visibility: AssetVisibility.Locked });
-      await ctx.newStack({ ownerId: user.id }, [primary.id, archived.id, hidden.id, locked.id]);
-
-      const result = await sut.getStackedAssetIds([primary.id], [AssetVisibility.Archive, AssetVisibility.Timeline]);
-      // Hidden/Locked (RBAC-sensitive tiers) must never be auto-contributed to a space.
-      expect(sorted(result)).toEqual(sorted([primary.id, archived.id]));
-    });
-
-    it('returns siblings of any visibility when no whitelist is given', async () => {
-      const { ctx, sut } = setup();
-      const { user } = await ctx.newUser();
-      const { asset: primary } = await ctx.newAsset({ ownerId: user.id, visibility: AssetVisibility.Timeline });
-      const { asset: hidden } = await ctx.newAsset({ ownerId: user.id, visibility: AssetVisibility.Hidden });
-      await ctx.newStack({ ownerId: user.id }, [primary.id, hidden.id]);
-
-      // The remove path passes no whitelist — it must reach every live member so
-      // nothing is left orphaned in the space.
-      const result = await sut.getStackedAssetIds([primary.id]);
-      expect(sorted(result)).toEqual(sorted([primary.id, hidden.id]));
+      const withoutAuthUserId = await sut.getById(stack.id);
+      expect(withoutAuthUserId?.assets.find((a) => a.id === child.id)?.isFavoriteForUser).toBeUndefined();
     });
   });
 });

@@ -1,33 +1,34 @@
 <script lang="ts">
-  import { goto } from '$app/navigation';
-  import { page } from '$app/stores';
-  import { QueryParameter, timeBeforeShowLoadingSpinner } from '$lib/constants';
-  import Dropdown from '$lib/elements/Dropdown.svelte';
-  import SearchBar from '$lib/elements/SearchBar.svelte';
-  import PeopleFaceStatisticsInfo from '$lib/components/people/people-face-statistics-info.svelte';
-  import PeopleManagementGrid from '$lib/components/people/people-management-grid.svelte';
-  import PeopleMergeSelector from '$lib/components/people/people-merge-selector.svelte';
-  import type { ManagedPerson } from '$lib/components/people/people-types';
-  import ManageSpacePeopleVisibility from '$lib/components/spaces/manage-space-people-visibility.svelte';
-  import ButtonContextMenu from '$lib/components/shared-components/context-menu/ButtonContextMenu.svelte';
-  import MenuOption from '$lib/components/shared-components/context-menu/MenuOption.svelte';
-  import { authManager } from '$lib/managers/auth-manager.svelte';
-  import { featureFlagsManager } from '$lib/managers/feature-flags-manager.svelte';
-  import PersonEditBirthDateModal from '$lib/modals/PersonEditBirthDateModal.svelte';
-  import { locale, PeopleFilterBy, PeopleSortBy, peopleViewSettings } from '$lib/stores/preferences.store';
-  import { createUrl, handlePromiseError } from '$lib/utils';
-  import { createCrossOwnerMergeHandlers, runMergeWithCrossOwnerConfirmation } from '$lib/utils/cross-owner-merge';
-  import { handleError } from '$lib/utils/handle-error';
-  import { clearQueryParam } from '$lib/utils/navigation';
-  import { peopleFilterToTypeParam as filterToTypeParam, resolvePeopleFilterBy } from '$lib/utils/people-filter';
-  import { sortPeople } from '$lib/utils/people-utils';
-  import { formatPeopleHeaderDescription } from '$lib/utils/people-statistics';
+  import PeopleFaceStatisticsInfo from '#lib/components/people/people-face-statistics-info.svelte';
+  import PeopleManagementGrid from '#lib/components/people/people-management-grid.svelte';
+  import PeopleMergeSelector from '#lib/components/people/people-merge-selector.svelte';
+  import type { ManagedPerson } from '#lib/components/people/people-types.ts';
+  import ButtonContextMenu from '#lib/components/shared-components/context-menu/ButtonContextMenu.svelte';
+  import MenuOption from '#lib/components/shared-components/context-menu/MenuOption.svelte';
+  import ManageSpacePeopleVisibility from '#lib/components/spaces/manage-space-people-visibility.svelte';
+  import { QueryParameter, timeBeforeShowLoadingSpinner } from '#lib/constants.ts';
+  import Dropdown from '#lib/elements/Dropdown.svelte';
+  import SearchBar from '#lib/elements/SearchBar.svelte';
+  import { confirmAndMergeSpacePerson, findSpacePersonNamed } from '#lib/gallery/people/space-person-name-merge.ts';
+  import { PeopleFilterBy, PeopleSortBy, peopleViewSettings } from '#lib/gallery/stores/preferences.store.ts';
+  import { authManager } from '#lib/managers/auth-manager.svelte.ts';
+  import { featureFlagsManager } from '#lib/managers/feature-flags-manager.svelte.ts';
+  import PersonEditBirthDateModal from '#lib/modals/PersonEditBirthDateModal.svelte';
+  import { locale } from '#lib/stores/preferences.store.ts';
+  import { handlePromiseError } from '#lib/utils.ts';
+  import { createCrossOwnerMergeHandlers, runMergeWithCrossOwnerConfirmation } from '#lib/utils/cross-owner-merge.ts';
+  import { getSpacePersonThumbnailUrl } from '#lib/utils/global-person-route.ts';
+  import { handleError } from '#lib/utils/handle-error.ts';
+  import { clearQueryParam } from '#lib/utils/navigation.ts';
+  import { peopleFilterToTypeParam as filterToTypeParam, resolvePeopleFilterBy } from '#lib/utils/people-filter.ts';
+  import { formatPeopleHeaderDescription } from '#lib/utils/people-statistics.ts';
+  import { appendUniqueById, sortPeople } from '#lib/utils/people-utils.ts';
   import {
+    SharedSpaceRole,
     getSpacePeople,
     getSpacePeopleFaceStatistics,
     getSpacePeopleStatistics,
     mergeSpacePeople,
-    SharedSpaceRole,
     updateSpacePerson,
     type SharedSpaceMemberResponseDto,
     type SharedSpacePeopleStatisticsResponseDto,
@@ -48,9 +49,11 @@
     mdiSortNumericDescending,
   } from '@mdi/js';
   import { onMount } from 'svelte';
-  import { fly } from 'svelte/transition';
-  import { quintOut } from 'svelte/easing';
   import { t } from 'svelte-i18n';
+  import { quintOut } from 'svelte/easing';
+  import { fly } from 'svelte/transition';
+  import { goto } from '$app/navigation';
+  import { page } from '$app/state';
   import type { PageData } from './$types';
 
   interface Props {
@@ -64,6 +67,13 @@
   const space: SharedSpaceResponseDto = $derived(data.space);
   const members: SharedSpaceMemberResponseDto[] = $derived(data.members);
   let people = $state<SharedSpacePersonResponseDto[]>([]);
+  // How many rows the SERVER has served, which is what OFFSET counts -- not `people.length`, which
+  // is what survived `appendUniqueById`. The two diverge the moment a shifted window repeats a row,
+  // and paging on the kept count would then re-request every dropped row (and, for a page that is
+  // all duplicates, re-request the same window forever). Same reasoning as the activity feed's
+  // `activityOffset`. One counter per list, since the two page independently.
+  let peopleOffset = $state(0);
+  let visibilityOffset = $state(0);
   let peopleStatistics = $state<SharedSpacePeopleStatisticsResponseDto | null>(null);
   let loadedSpaceId = $state('');
   let loading = $state(false);
@@ -123,7 +133,7 @@
     countVisiblePeople > 0 || visiblePeople.length > 0 || !!searchName.trim() || peopleFilterBy !== PeopleFilterBy.All,
   );
   const activeSearchFilterName = $derived(
-    searchName.trim() || ($page.url.searchParams.get(QueryParameter.SEARCHED_PEOPLE) ?? '').trim(),
+    searchName.trim() || (page.url.searchParams.get(QueryParameter.SEARCHED_PEOPLE) ?? '').trim(),
   );
   const activeStatisticsSearchName = $derived(activeSearchFilterName || null);
   const peopleStatisticsEnabled = $derived(featureFlagsManager.value.peopleStatistics);
@@ -165,6 +175,7 @@
     }
 
     people = data.people;
+    peopleOffset = data.people.length;
     peopleStatistics = data.peopleStatistics;
     hasSpacePeople = data.hasSpacePeople;
     statisticsSearchName = null;
@@ -179,22 +190,18 @@
   const canManageVisibility = $derived(isEditor && hasSpacePeople);
 
   onMount(() => {
-    const searchedPeople = $page.url.searchParams.get(QueryParameter.SEARCHED_PEOPLE);
+    const searchedPeople = page.url.searchParams.get(QueryParameter.SEARCHED_PEOPLE);
     if (searchedPeople) {
       searchName = searchedPeople;
       handlePromiseError(searchPeople(searchedPeople));
     }
   });
 
-  const getThumbUrl = (person: SharedSpacePersonResponseDto): string => {
-    return createUrl(`/shared-spaces/${space.id}/people/${person.id}/thumbnail`, { updatedAt: person.updatedAt });
-  };
-
   const toManagedPerson = (person: SharedSpacePersonResponseDto): ManagedPerson => ({
     id: person.id,
     displayName: person.name || '',
     canonicalName: person.name,
-    thumbnailUrl: getThumbUrl(person),
+    thumbnailUrl: getSpacePersonThumbnailUrl(person),
     href: `/spaces/${space.id}/people/${person.id}`,
     isHidden: person.isHidden,
     type: person.type,
@@ -237,18 +244,19 @@
   };
 
   async function updateSearchQueryParam() {
-    const currentSearch = $page.url.searchParams.get(QueryParameter.SEARCHED_PEOPLE) ?? '';
+    const currentSearch = page.url.searchParams.get(QueryParameter.SEARCHED_PEOPLE) ?? '';
     if (currentSearch === searchName) {
       return;
     }
 
+    const url = new URL(page.url.href);
     if (searchName) {
-      $page.url.searchParams.set(QueryParameter.SEARCHED_PEOPLE, searchName);
+      url.searchParams.set(QueryParameter.SEARCHED_PEOPLE, searchName);
     } else {
-      $page.url.searchParams.delete(QueryParameter.SEARCHED_PEOPLE);
+      url.searchParams.delete(QueryParameter.SEARCHED_PEOPLE);
     }
 
-    await goto($page.url, { keepFocus: true });
+    await goto(url, { reset: false });
   }
 
   async function refreshPeople() {
@@ -274,6 +282,7 @@
       }
 
       people = newPeople;
+      peopleOffset = newPeople.length;
       peopleStatistics = newStatistics;
       statisticsSearchName = requestSearchName || null;
       hasMore = people.length >= PAGE_SIZE;
@@ -323,6 +332,7 @@
       }
 
       people = newPeople;
+      peopleOffset = newPeople.length;
       peopleStatistics = newStatistics;
       statisticsSearchName = requestSearchName || null;
       hasMore = people.length >= PAGE_SIZE;
@@ -346,7 +356,7 @@
   async function onResetSearchBar() {
     searchName = '';
     cancelSearchRequest();
-    await clearQueryParam(QueryParameter.SEARCHED_PEOPLE, $page.url);
+    await clearQueryParam(QueryParameter.SEARCHED_PEOPLE, new URL(page.url.href));
     await refreshPeople();
   }
 
@@ -367,8 +377,13 @@
     }
     loading = true;
     try {
-      const more = await getSpacePeople(getPeopleQuery({ limit: PAGE_SIZE, offset: people.length }));
-      people = [...people, ...more];
+      const more = await getSpacePeople(getPeopleQuery({ limit: PAGE_SIZE, offset: peopleOffset }));
+      peopleOffset += more.length;
+      // Merged by id, not concatenated: the ordering this pages over keys on hidden state, name and
+      // asset count, and every face attach/detach recounts those -- so a shifted window can re-emit
+      // a row page 1 already returned, and a repeated key kills the keyed grid outright. Same
+      // reasoning, same helper, as the global people page.
+      people = appendUniqueById(people, more);
       hasMore = more.length >= PAGE_SIZE;
     } catch (error) {
       handleError(error, $t('spaces_error_loading_people'));
@@ -380,6 +395,7 @@
   async function openVisibilityModal() {
     try {
       allPeople = await getSpacePeople({ id: space.id, withHidden: true, limit: PAGE_SIZE });
+      visibilityOffset = allPeople.length;
     } catch (error) {
       handleError(error, $t('spaces_error_loading_people'));
       return;
@@ -401,9 +417,11 @@
         id: space.id,
         withHidden: true,
         limit: PAGE_SIZE,
-        offset: allPeople.length,
+        offset: visibilityOffset,
       });
-      allPeople = [...allPeople, ...more];
+      visibilityOffset += more.length;
+      // Same merge, same reason, as loadMore above -- this grid is keyed on the person id too.
+      allPeople = appendUniqueById(allPeople, more);
       hasMoreVisibility = more.length >= PAGE_SIZE;
     } catch (error) {
       handleError(error, $t('spaces_error_loading_people'));
@@ -412,10 +430,51 @@
     }
   }
 
+  const mergeIntoExistingPerson = async (
+    existingPerson: SharedSpacePersonResponseDto,
+    person: SharedSpacePersonResponseDto,
+  ) => {
+    const outcome = await confirmAndMergeSpacePerson({
+      spaceId: space.id,
+      sourceId: person.id,
+      targetId: existingPerson.id,
+    });
+    if (outcome === 'merged') {
+      await refreshPeople();
+    }
+    return outcome;
+  };
+
+  const searchNameSuggestions = async (name: string) => {
+    try {
+      return await getSpacePeople({ id: space.id, name, named: true, limit: 6 });
+    } catch (error) {
+      handleError(error, $t('errors.cant_search_people'));
+      return [];
+    }
+  };
+
+  const onSuggestionSelect = async (suggestion: SharedSpacePersonResponseDto, person: SharedSpacePersonResponseDto) => {
+    try {
+      await mergeIntoExistingPerson(suggestion, person);
+    } catch (error) {
+      handleError(error, $t('cannot_merge_people'));
+    }
+  };
+
   const onNameSubmit = async (name: string, person: SharedSpacePersonResponseDto) => {
     try {
       if (name === person.name) {
         return;
+      }
+      // Typing a name the space already has is almost always the same identity, so offer the merge
+      // first and only rename when it is declined (#1100). A merge that was wanted but refused
+      // leaves the name alone: renaming then would create the duplicate.
+      if (name.trim()) {
+        const existingPerson = await findSpacePersonNamed(space.id, name, person.id);
+        if (existingPerson && (await mergeIntoExistingPerson(existingPerson, person)) !== 'declined') {
+          return;
+        }
       }
       const updatedPerson = await updateSpacePerson({
         id: space.id,
@@ -595,6 +654,8 @@
         canEditNames={isEditor}
         canShowActions={isEditor}
         {onNameSubmit}
+        {searchNameSuggestions}
+        {onSuggestionSelect}
       >
         {#snippet actions(person)}
           <ButtonContextMenu
@@ -626,7 +687,7 @@
     <PeopleMergeSelector
       person={mergingPerson}
       getDisplayName={getMergeDisplayName}
-      getThumbnailUrl={getThumbUrl}
+      getThumbnailUrl={(candidate) => getSpacePersonThumbnailUrl(candidate)}
       loadPeople={loadMergePeople}
       {mergePeople}
       onBack={() => (mergingPerson = undefined)}

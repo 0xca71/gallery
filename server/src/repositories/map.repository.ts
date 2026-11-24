@@ -1,25 +1,24 @@
 import { Injectable } from '@nestjs/common';
-import isoCountries from 'i18n-iso-countries';
-import { type Expression, type Insertable, type Kysely, type NotNull, type SqlBool, sql } from 'kysely';
+import { Expression, Insertable, Kysely, NotNull, SqlBool, sql } from 'kysely';
 import { InjectKysely } from 'nestjs-kysely';
 import { createReadStream, existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import readLine from 'node:readline';
 import { citiesFile, reverseGeocodeMaxDistance } from 'src/constants.js';
 import { DummyValue, GenerateSql } from 'src/decorators.js';
-import { MapMarkerResponseDto } from 'src/dtos/map.dto.js';
 import { AssetVisibility, SystemMetadataKey } from 'src/enum.js';
-import { AmapRepository } from 'src/repositories/amap.repository.js';
 import { ConfigRepository } from 'src/repositories/config.repository.js';
 import { LoggingRepository } from 'src/repositories/logging.repository.js';
 import { SystemMetadataRepository } from 'src/repositories/system-metadata.repository.js';
 import { DB } from 'src/schema/index.js';
 import { GeodataPlacesTable } from 'src/schema/tables/geodata-places.table.js';
 import { NaturalEarthCountriesTable } from 'src/schema/tables/natural-earth-countries.table.js';
+import { favoriteExistsFor } from 'src/utils/favorite.js';
 import {
-  spaceAlbumAssetExists,
-  spaceAssetPathBranches,
+  ownedOrSharedWithViewer,
+  sharedWithViewer,
   spaceVisibilityGate,
+  type ViewerSpaces,
 } from 'src/utils/shared-space-album-scope.js';
 
 export interface MapMarkerSearchOptions {
@@ -46,14 +45,20 @@ interface MapDB extends DB {
   naturalearth_countries_tmp: NaturalEarthCountriesTable;
 }
 
+interface CountryNames {
+  byAlpha2: Map<string, string>;
+  byAlpha3: Map<string, string>;
+}
+
 @Injectable()
 export class MapRepository {
+  private countryNames?: Promise<CountryNames>;
+
   constructor(
     private configRepository: ConfigRepository,
     private metadataRepository: SystemMetadataRepository,
     private logger: LoggingRepository,
     @InjectKysely() private db: Kysely<MapDB>,
-    private amapRepository: AmapRepository,
   ) {
     this.logger.setContext(MapRepository.name);
   }
@@ -80,18 +85,16 @@ export class MapRepository {
   }
 
   @GenerateSql({ params: [DummyValue.UUID] })
-  getAlbumMapMarkers(albumId: string): Promise<MapMarkerResponseDto[]> {
-    return (
-      this.mapMarkersQuery()
-        .innerJoin('album_asset', 'asset.id', 'album_asset.assetId')
-        .where('album_asset.albumId', '=', albumId)
-        // security-2: never expose GPS / city / state / country of Hidden or Locked album assets. Flat
-        // gate (no owner exception), consistent with the album grid (withDefaultVisibility) and the album
-        // download path (downloadAlbumId). mapMarkersQuery() is asset-rooted, so asset.visibility is
-        // available without an extra join.
-        .where((eb) => spaceVisibilityGate(eb))
-        .execute()
-    );
+  getAlbumMapMarkers(albumId: string) {
+    // security-2: never expose GPS / city / state / country of Hidden or Locked album assets. Flat
+    // gate (no owner exception), consistent with the album grid (withDefaultVisibility) and the album
+    // download path (downloadAlbumId). mapMarkersQuery() is asset-rooted, so asset.visibility is
+    // available without an extra join.
+    return this.mapMarkersQuery()
+      .innerJoin('album_asset', 'asset.id', 'album_asset.assetId')
+      .where('album_asset.albumId', '=', albumId)
+      .where((eb) => spaceVisibilityGate(eb))
+      .execute();
   }
 
   @GenerateSql({ params: [DummyValue.UUID, [DummyValue.UUID], [DummyValue.UUID]] })
@@ -100,7 +103,7 @@ export class MapRepository {
     ownerIds: string[],
     albumIds: string[],
     { isArchived, isFavorite, fileCreatedAfter, fileCreatedBefore, timelineSpaceIds }: MapMarkerSearchOptions = {},
-  ): Promise<MapMarkerResponseDto[]> {
+  ) {
     return this.mapMarkersQuery()
       .$if(isArchived === true, (qb) =>
         qb.where((eb) =>
@@ -113,29 +116,23 @@ export class MapRepository {
       .$if(isArchived === false || isArchived === undefined, (qb) =>
         qb.where('asset.visibility', '=', AssetVisibility.Timeline),
       )
-      .$if(isFavorite !== undefined, (q) => q.where('isFavorite', '=', isFavorite!))
+      .$if(isFavorite !== undefined, (q) =>
+        q.where((eb) => (isFavorite ? favoriteExistsFor(eb, authUserId) : eb.not(favoriteExistsFor(eb, authUserId)))),
+      )
       .$if(fileCreatedAfter !== undefined, (q) => q.where('fileCreatedAt', '>=', fileCreatedAfter!))
       .$if(fileCreatedBefore !== undefined, (q) => q.where('fileCreatedAt', '<=', fileCreatedBefore!))
       .where((eb) => {
         const expression: Expression<SqlBool>[] = [];
+        const spaces: ViewerSpaces | undefined = timelineSpaceIds?.length
+          ? { scope: { spaceIds: timelineSpaceIds }, albumTimelineGate: 'space-tab' }
+          : undefined;
 
         if (ownerIds.length > 0) {
           expression.push(eb('ownerId', 'in', ownerIds));
         }
 
         if (albumIds.length > 0) {
-          const albumScope: Expression<SqlBool>[] = [eb('ownerId', 'in', ownerIds)];
-          if (timelineSpaceIds?.length) {
-            albumScope.push(
-              ...spaceAssetPathBranches(eb, {
-                correlateAssetId: 'asset.id',
-                correlateLibraryId: 'asset.libraryId',
-                scope: { spaceIds: timelineSpaceIds },
-                albumTimelineGate: 'space-tab',
-              }),
-            );
-          }
-
+          // An album asset still has to be one the viewer owns or sees through a timeline space.
           expression.push(
             eb.and([
               eb.exists((eb) =>
@@ -144,40 +141,13 @@ export class MapRepository {
                   .whereRef('asset.id', '=', 'album_asset.assetId')
                   .where('album_asset.albumId', 'in', albumIds),
               ),
-              eb.or(albumScope),
+              ownedOrSharedWithViewer(eb, eb('ownerId', 'in', ownerIds), spaces),
             ]),
           );
         }
 
-        if (timelineSpaceIds && timelineSpaceIds.length > 0) {
-          expression.push(
-            eb.and([
-              eb('asset.visibility', '=', AssetVisibility.Timeline),
-              eb.exists((eb) =>
-                eb
-                  .selectFrom('shared_space_asset')
-                  .whereRef('asset.id', '=', 'shared_space_asset.assetId')
-                  .where('shared_space_asset.spaceId', 'in', timelineSpaceIds),
-              ),
-            ]),
-            eb.and([
-              eb('asset.visibility', '=', AssetVisibility.Timeline),
-              eb.exists((eb) =>
-                eb
-                  .selectFrom('shared_space_library')
-                  .whereRef('asset.libraryId', '=', 'shared_space_library.libraryId')
-                  .where('shared_space_library.spaceId', 'in', timelineSpaceIds),
-              ),
-            ]),
-            eb.and([
-              eb('asset.visibility', '=', AssetVisibility.Timeline),
-              spaceAlbumAssetExists(eb, {
-                correlateAssetId: 'asset.id',
-                scope: { spaceIds: timelineSpaceIds },
-                albumTimelineGate: 'space-tab',
-              }),
-            ]),
-          );
+        if (spaces) {
+          expression.push(sharedWithViewer(eb, spaces));
         }
 
         return eb.or(expression);
@@ -203,17 +173,14 @@ export class MapRepository {
         'asset_exif.city',
         'asset_exif.state',
         'asset_exif.country',
-        'asset_exif.formattedAddress',
       ])
       .$narrowType<{ lat: NotNull; lon: NotNull }>();
   }
 
-  ensureDetailedAddress(assetId: string, source: 'metadata' | 'detail' = 'detail') {
-    return this.amapRepository.ensureAddress(assetId, source);
-  }
-
   async reverseGeocode(point: GeoPoint): Promise<ReverseGeocodeResult> {
     this.logger.debug(`Request: ${point.latitude},${point.longitude}`);
+
+    const countryNames = await this.loadCountryNames();
 
     const response = await this.db
       .selectFrom('geodata_places')
@@ -233,8 +200,7 @@ export class MapRepository {
       this.logger.verboseFn(() => `Raw: ${JSON.stringify(response, null, 2)}`);
 
       const { countryCode, name: city, admin1Name } = response;
-      // eslint-disable-next-line import-x/no-named-as-default-member
-      const country = isoCountries.getName(countryCode, 'en') ?? null;
+      const country = countryNames.byAlpha2.get(countryCode) ?? null;
       const state = admin1Name;
 
       return { country, state, city };
@@ -262,12 +228,57 @@ export class MapRepository {
     this.logger.verboseFn(() => `Raw: ${JSON.stringify(ne_response, ['id', 'admin', 'admin_a3', 'type'], 2)}`);
 
     const { admin_a3 } = ne_response;
-    // eslint-disable-next-line import-x/no-named-as-default-member
-    const country = isoCountries.getName(admin_a3, 'en') ?? null;
+    const country = countryNames.byAlpha3.get(admin_a3) ?? null;
     const state = null;
     const city = null;
 
     return { country, state, city };
+  }
+
+  // init() skips the geodata import when it is up to date, so load the names on demand
+  private async loadCountryNames(): Promise<CountryNames> {
+    this.countryNames ??= this.readCountryNames();
+    try {
+      return await this.countryNames;
+    } catch (error) {
+      this.countryNames = undefined;
+      throw error;
+    }
+  }
+
+  private async readCountryNames(): Promise<CountryNames> {
+    const byAlpha2 = new Map<string, string>();
+    const byAlpha3 = new Map<string, string>();
+
+    const { resourcePaths } = this.configRepository.getEnv();
+    const filePath = resourcePaths.geodata.countryInfo;
+    if (!existsSync(filePath)) {
+      throw new Error(`Geodata file ${filePath} not found`);
+    }
+
+    const lineReader = readLine.createInterface({ input: createReadStream(filePath) });
+    for await (const line of lineReader) {
+      if (line.startsWith('#')) {
+        continue;
+      }
+      // Columns: ISO alpha-2, ISO alpha-3, ISO numeric, fips, Country, ...
+      const fields = line.split('\t', 5);
+      const alpha2 = fields[0];
+      const alpha3 = fields[1];
+      const name = fields[4]?.trim();
+      if (!name) {
+        continue;
+      }
+      if (alpha2) {
+        byAlpha2.set(alpha2, name);
+      }
+      if (alpha3) {
+        byAlpha3.set(alpha3, name);
+      }
+    }
+
+    this.logger.log(`Loaded ${byAlpha2.size} country names from ${filePath}`);
+    return { byAlpha2, byAlpha3 };
   }
 
   private async importNaturalEarthCountries() {
@@ -370,6 +381,7 @@ export class MapRepository {
         admin2Name: admin2Map.get(`${lineSplit[8]}.${lineSplit[10]}.${lineSplit[11]}`) ?? null,
       };
       bufferGeodata.push(geoData);
+      // eslint-disable-next-line unicorn/prefer-continue
       if (bufferGeodata.length >= 5000) {
         const curLength = bufferGeodata.length;
         futures.push(

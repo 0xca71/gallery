@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:immich_mobile/domain/models/store.model.dart';
 import 'package:immich_mobile/entities/store.entity.dart';
+import 'package:immich_mobile/gallery/gallery_app_header.dart';
 import 'package:immich_mobile/infrastructure/repositories/network.repository.dart';
 import 'package:immich_mobile/infrastructure/repositories/settings.repository.dart';
 import 'package:immich_mobile/utils/debug_print.dart';
@@ -22,27 +23,36 @@ class ApiService {
   late AssetsApi assetsApi;
   late SearchApi searchApi;
   late ServerApi serverInfoApi;
+  // ignore: unused-code
   late MapApi mapApi;
   late PartnersApi partnersApi;
   late PeopleApi peopleApi;
   late SharedLinksApi sharedLinksApi;
   late SyncApi syncApi;
+  // ignore: unused-code
   late SystemConfigApi systemConfigApi;
   late ActivitiesApi activitiesApi;
+  // ignore: unused-code
   late DownloadApi downloadApi;
   late TrashApi trashApi;
   late StacksApi stacksApi;
   late ViewsApi viewApi;
+  // ignore: unused-code
   late MemoriesApi memoriesApi;
   late SessionsApi sessionsApi;
   late TagsApi tagsApi;
   late SharedSpacesApi sharedSpacesApi;
+  late CleanupApi cleanupApi;
+  late DuplicatesApi duplicatesApi;
   late TimelineApi timelineApi;
+  late PasskeysApi passkeysApi;
+  late ConfigPublicApi configPublicApi;
 
   ApiService() {
     // The below line ensures that the api clients are initialized when the service is instantiated
     // This is required to avoid late initialization errors when the clients are access before the endpoint is resolved
     setEndpoint('');
+    unawaited(galleryAppHeaders().then((headers) => headers.forEach(_apiClient.addDefaultHeader)));
   }
   final _log = Logger("ApiService");
 
@@ -76,7 +86,11 @@ class ApiService {
     sessionsApi = SessionsApi(_apiClient);
     tagsApi = TagsApi(_apiClient);
     sharedSpacesApi = SharedSpacesApi(_apiClient);
+    cleanupApi = CleanupApi(_apiClient);
+    duplicatesApi = DuplicatesApi(_apiClient);
     timelineApi = TimelineApi(_apiClient);
+    passkeysApi = PasskeysApi(_apiClient);
+    configPublicApi = ConfigPublicApi(_apiClient);
   }
 
   Future<String> resolveAndSetEndpoint(String serverUrl) async {
@@ -115,9 +129,11 @@ class ApiService {
   Future<bool> _isEndpointAvailable(String serverUrl) async {
     final endpoint = serverUrl.endsWith('/api') ? serverUrl : '$serverUrl/api';
 
+    // Probe with a throwaway client so the shared client keeps pointing at the active endpoint
+    final probeClient = ApiClient(basePath: endpoint)..client = NetworkRepository.client;
+
     try {
-      setEndpoint(endpoint);
-      await serverInfoApi.pingServer().timeout(const Duration(seconds: 5));
+      await ServerApi(probeClient).pingServer().timeout(const Duration(seconds: 5));
     } on TimeoutException catch (_) {
       return false;
     } on SocketException catch (_) {

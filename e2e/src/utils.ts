@@ -42,6 +42,7 @@ import {
   createUserAdmin,
   deleteAssets,
   deleteDatabaseBackup,
+  deleteLibrary,
   getAssetInfo,
   getConfig,
   getConfigDefaults,
@@ -55,6 +56,7 @@ import {
   unlinkAlbum as sdkUnlinkAlbum,
   searchAssets,
   setBaseUrl,
+  setHeaders,
   setMaintenanceMode,
   setupPinCode,
   signUpAdmin,
@@ -85,6 +87,7 @@ import { createGzip } from 'node:zlib';
 import pg from 'pg';
 import { io, type Socket } from 'socket.io-client';
 import { loginDto, signupDto } from 'src/fixtures.js';
+import { GALLERY_APP_HEADER } from 'src/gallery-client.js';
 import { makeRandomImage } from 'src/generators.js';
 import request from 'supertest';
 import { playwrightDbHost, playwrightDbPort, playwrightHost, playwriteBaseUrl } from '../playwright.config.js';
@@ -302,13 +305,13 @@ export const utils = {
     }
   },
 
-  waitForWebsocketEvent: ({ event, id, total: count, timeout: ms }: WaitOptions): Promise<void> => {
+  waitForWebsocketEvent: ({ event, id, total: count, timeout: ms = 10_000 }: WaitOptions): Promise<void> => {
     return new Promise<void>((resolve, reject) => {
       if (!id && !count) {
         reject(new Error('id or count must be provided for waitForWebsocketEvent'));
       }
 
-      const timeout = setTimeout(() => reject(new Error(`Timed out waiting for ${event} event`)), ms || 10_000);
+      const timeout = setTimeout(() => reject(new Error(`Timed out waiting for ${event} event`)), ms);
       const type = id ? `id=${id}` : `count=${count}`;
       console.log(`Waiting for ${event} [${type}]`);
       const set = events[event];
@@ -336,6 +339,7 @@ export const utils = {
 
   initSdk: () => {
     setBaseUrl(app);
+    setHeaders({ [GALLERY_APP_HEADER]: 'e2e' });
   },
 
   adminSetup: async (options?: AdminSetupOptions) => {
@@ -360,15 +364,15 @@ export const utils = {
   },
 
   /**
-   * Give the session elevated (PIN-verified) permission.
-   *
-   * Required before a SINGLE `PUT /assets/:id` that sets `visibility: locked`. That endpoint writes the
-   * visibility and then returns `this.get(auth, id)`, and `AssetAccess.checkOwnerAccess` excludes Locked
-   * assets from a non-elevated session — so the write lands but the response is a 400. The bulk endpoint
-   * (`PUT /assets`) returns void and therefore never hits the read-back, which is why most specs get away
-   * with it. Upstream's AssetService.update has the identical shape, so this is the caller's job, not a
-   * fork patch.
-   */
+  Give the session elevated (PIN-verified) permission.
+  
+  Required before a SINGLE `PUT /assets/:id` that sets `visibility: locked`. That endpoint writes the
+  visibility and then returns `this.get(auth, id)`, and `AssetAccess.checkOwnerAccess` excludes Locked
+  assets from a non-elevated session — so the write lands but the response is a 400. The bulk endpoint
+  (`PUT /assets`) returns void and therefore never hits the read-back, which is why most specs get away
+  with it. Upstream's AssetService.update has the identical shape, so this is the caller's job, not a
+  fork patch.
+  */
   elevateSession: async (accessToken: string, pinCode = '123456') => {
     // Idempotent: setupPinCode 400s with 'User already has a PIN code', so a second call for the same
     // user (another test in the same file, a retry) must not fail the suite.
@@ -415,20 +419,20 @@ export const utils = {
     sdkUnlinkAlbum({ id: spaceId, albumId }, { headers: asBearerAuth(accessToken) }),
 
   /**
-   * Upload an asset.
-   *
-   * Idempotent across vitest retries. `retry` re-runs the test body but not `beforeAll`/`beforeEach`,
-   * so an upload that reached the server on a previous attempt is still there. Re-uploading the same
-   * bytes hits the per-owner checksum constraint and the server answers DUPLICATE, which turns one
-   * slow upload into a deterministic failure on every remaining attempt (the asset checksum index has
-   * no `deletedAt` predicate, so even trashing the asset would not free it).
-   *
-   * A DUPLICATE response is therefore reported as CREATED, carrying the existing asset's id — the
-   * postcondition callers actually depend on ("an asset with these bytes exists, here is its id")
-   * already holds. `waitForWebsocketEvent` replays already-seen ids, so downstream waits still settle.
-   *
-   * Pass `allowDuplicate` to observe the raw status when duplicate detection is what's under test.
-   */
+  Upload an asset.
+  
+  Idempotent across vitest retries. `retry` re-runs the test body but not `beforeAll`/`beforeEach`,
+  so an upload that reached the server on a previous attempt is still there. Re-uploading the same
+  bytes hits the per-owner checksum constraint and the server answers DUPLICATE, which turns one
+  slow upload into a deterministic failure on every remaining attempt (the asset checksum index has
+  no `deletedAt` predicate, so even trashing the asset would not free it).
+  
+  A DUPLICATE response is therefore reported as CREATED, carrying the existing asset's id — the
+  postcondition callers actually depend on ("an asset with these bytes exists, here is its id")
+  already holds. `waitForWebsocketEvent` replays already-seen ids, so downstream waits still settle.
+  
+  Pass `allowDuplicate` to observe the raw status when duplicate detection is what's under test.
+  */
   createAsset: async (
     accessToken: string,
     dto?: Partial<Omit<AssetMediaCreateDto, 'assetData' | 'sidecarData'>> & {
@@ -542,16 +546,16 @@ export const utils = {
     assetId: string;
     personGroupId: string;
     /**
-     * Defaults to the schema default, `machine-learning`, because that is what the face-repair
-     * surfaces require: getScanFlaggedFaces (and the cross-engine console) join `face_search` on
-     * `sourceType = MachineLearning`, so a face seeded any other way is invisible to them and the
-     * scan silently finds nothing — see face-cleanup / face-review-cross-engine.
-     *
-     * Pass `'manual'` from specs that upload real assets and let detection run: on a stack with
-     * facial recognition enabled, `handleDetectFaces` treats an existing MachineLearning-sourced
-     * face as a prior ML detection, re-runs detection, finds 0 real faces in these fixtures, and
-     * deletes every face whose id was not re-confirmed — wiping the seeded face.
-     */
+    Defaults to the schema default, `machine-learning`, because that is what the face-repair
+    surfaces require: getScanFlaggedFaces (and the cross-engine console) join `face_search` on
+    `sourceType = MachineLearning`, so a face seeded any other way is invisible to them and the
+    scan silently finds nothing — see face-cleanup / face-review-cross-engine.
+    
+    Pass `'manual'` from specs that upload real assets and let detection run: on a stack with
+    facial recognition enabled, `handleDetectFaces` treats an existing MachineLearning-sourced
+    face as a prior ML detection, re-runs detection, finds 0 real faces in these fixtures, and
+    deletes every face whose id was not re-confirmed — wiping the seeded face.
+    */
     sourceType?: 'machine-learning' | 'manual';
   }): Promise<string> => {
     if (!client) {
@@ -566,9 +570,14 @@ export const utils = {
         RETURNING id
       ),
       person_row AS (
-        SELECT "identityId", type
-        FROM "person"
-        WHERE "personGroupId" = $2
+        SELECT
+          p."ownerId",
+          pi."identityId",
+          CASE WHEN pp."personGroupId" IS NULL THEN 'person' ELSE 'pet' END AS type
+        FROM "person" p
+        LEFT JOIN "person_identity" pi ON pi."personGroupId" = p."personGroupId"
+        LEFT JOIN "person_pet" pp ON pp."personGroupId" = p."personGroupId"
+        WHERE p."personGroupId" = $2
       ),
       inserted_identity AS (
         INSERT INTO "face_identity" ("type", "representativeFaceId")
@@ -580,11 +589,15 @@ export const utils = {
       resolved_identity AS (
         SELECT COALESCE((SELECT "identityId" FROM person_row), (SELECT id FROM inserted_identity)) AS id
       ),
+      inserted_person_identity AS (
+        INSERT INTO "person_identity" ("personGroupId", "ownerId", "identityId")
+        SELECT $2, "ownerId", (SELECT id FROM inserted_identity)
+        FROM person_row
+        WHERE "identityId" IS NULL
+      ),
       updated_person AS (
         UPDATE "person"
-        SET
-          "identityId" = (SELECT id FROM resolved_identity),
-          "faceAssetId" = COALESCE("faceAssetId", (SELECT id FROM inserted_face))
+        SET "faceAssetId" = COALESCE("faceAssetId", (SELECT id FROM inserted_face))
         WHERE "personGroupId" = $2
       ),
       updated_identity AS (
@@ -599,6 +612,73 @@ export const utils = {
       [assetId, personGroupId, sourceType],
     );
     return result.rows[0].id as string;
+  },
+
+  /**
+  Seeds a bare, UNASSIGNED asset_face (`personGroupId IS NULL`) directly via SQL — there is no HTTP
+  path that leaves a face unassigned: `POST /faces` (owner) requires `personId`, and the space
+  draw endpoint (`POST /shared-spaces/:id/assets/:assetId/faces`) always attaches on creation.
+  In production an unassigned face comes from ML detection, which does not run in this stack.
+  Used by the space-editor face-assign journey to seed the "unrecognised face" an editor names.
+  */
+  createUnassignedFace: async (assetId: string): Promise<string> => {
+    if (!client) {
+      throw new Error('Database client not connected');
+    }
+
+    const result = await client.query(
+      `INSERT INTO asset_face ("assetId", "personGroupId", "sourceType") VALUES ($1, NULL, 'machine-learning') RETURNING id`,
+      [assetId],
+    );
+    return result.rows[0].id as string;
+  },
+
+  /**
+  Spec §6.3.1: `face_identity_face`'s `identityId` for one face, or `undefined` if the face
+  has no identity link yet. No SDK/HTTP surface exposes this directly (space-person reads go
+  through `shared_space_person_face`, not the identity layer), so the space-editor face-assign
+  journey reads it straight from the DB to prove the identity-write-vs-skip behaviour that
+  `writeIdentity` gates -- without asserting on internal repository calls.
+  */
+  getFaceIdentityId: async (assetFaceId: string): Promise<string | undefined> => {
+    if (!client) {
+      throw new Error('Database client not connected');
+    }
+
+    const result = await client.query(`SELECT "identityId" FROM "face_identity_face" WHERE "assetFaceId" = $1`, [
+      assetFaceId,
+    ]);
+    return result.rows[0]?.identityId as string | undefined;
+  },
+
+  /**
+  Spec §6.3.1 (revised): the OWNER-side `asset_face.personGroupId` for one face, plus the owning
+  `person`'s name when it is set.
+  
+  This is the column a space-editor face edit now propagates onto, and it is the column the
+  asset-detail People row is seeded from -- so reading it directly is the sharpest available
+  proof that an editor's attach/detach reached the owner's own layer rather than stopping at
+  the space projection. The owner-facing `GET /assets/:id` assertion in the same spec proves the
+  user-visible half; this proves which column moved.
+  */
+  getFaceOwnerPerson: async (assetFaceId: string): Promise<{ personId: string | null; name: string | null }> => {
+    if (!client) {
+      throw new Error('Database client not connected');
+    }
+
+    const result = await client.query(
+      `SELECT af."personGroupId", p."name"
+         FROM "asset_face" af
+         LEFT JOIN "person" p ON p."personGroupId" = af."personGroupId"
+        WHERE af."id" = $1`,
+      [assetFaceId],
+    );
+    return {
+      // Still spelled `personId`: under the person_group re-key `personGroupId` IS the person id the
+      // HTTP API hands back (`PersonResponseDto.id`), which is what callers compare this against.
+      personId: (result.rows[0]?.personGroupId as string | null) ?? null,
+      name: (result.rows[0]?.name as string | null) ?? null,
+    };
   },
 
   // Slice 3 — M2: PersonResponseDto does not expose `faceAssetId` (only `thumbnailPath`, which is
@@ -623,6 +703,7 @@ export const utils = {
     ]);
   },
 
+  // eslint-disable-next-line unicorn/prefer-default-parameters
   createPet: async (ownerId: string, species: string, name?: string) => {
     if (!client) {
       throw new Error('Database client not connected');
@@ -633,9 +714,12 @@ export const utils = {
        INSERT INTO "person_group" ("clusterGroupId")
        SELECT "clusterGroupId" FROM "user" WHERE "id" = $1
        RETURNING id
+       ), new_pet AS (
+       INSERT INTO "person_pet" ("personGroupId", "species")
+       SELECT new_group.id, $2 FROM new_group
        )
-       INSERT INTO "person" ("ownerId", "personGroupId", "type", "species", "name", "thumbnailPath")
-       SELECT $1, new_group.id, 'pet', $2, $3, '/my/awesome/thumbnail.jpg' FROM new_group
+       INSERT INTO "person" ("ownerId", "personGroupId", "name", "thumbnailPath")
+       SELECT $1, new_group.id, $3, '/my/awesome/thumbnail.jpg' FROM new_group
        RETURNING "personGroupId" AS id`,
       [ownerId, species, name ?? species],
     );
@@ -765,6 +849,8 @@ export const utils = {
   updateLibrary: (accessToken: string, id: string, dto: UpdateLibraryDto) =>
     updateLibrary({ id, updateLibraryDto: dto }, { headers: asBearerAuth(accessToken) }),
 
+  deleteLibrary: (accessToken: string, id: string) => deleteLibrary({ id }, { headers: asBearerAuth(accessToken) }),
+
   createPartner: (accessToken: string, id: string) =>
     createPartner({ partnerCreateDto: { sharedWithId: id } }, { headers: asBearerAuth(accessToken) }),
 
@@ -849,7 +935,7 @@ export const utils = {
       {
         headers: asBearerAuth(accessToken),
         fetch: (...args: Parameters<typeof fetch>) =>
-          // eslint-disable-next-line unicorn/no-invalid-argument-count, unicorn/prefer-await
+          // eslint-disable-next-line unicorn/prefer-await
           fetch(...args).then((response) => {
             setCookie = response.headers.getSetCookie();
             return response;
@@ -956,13 +1042,13 @@ export const utils = {
   isQueueEmpty: async (accessToken: string, queue: keyof QueuesResponseLegacyDto) => {
     const queues = await getQueuesLegacy({ headers: asBearerAuth(accessToken) });
     const jobCounts = queues[queue].jobCounts;
-    return !jobCounts.active && !jobCounts.waiting;
+    return !jobCounts.active && (!jobCounts.waiting || queues[queue].queueStatus.isPaused);
   },
 
-  waitForQueueFinish: (accessToken: string, queue: keyof QueuesResponseLegacyDto, ms?: number) => {
+  waitForQueueFinish: (accessToken: string, queue: keyof QueuesResponseLegacyDto, ms: number = 15_000) => {
     // eslint-disable-next-line no-async-promise-executor
     return new Promise<void>(async (resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error('Timed out waiting for queue to empty')), ms || 10_000);
+      const timeout = setTimeout(() => reject(new Error('Timed out waiting for queue to empty')), ms);
 
       while (true) {
         const done = await utils.isQueueEmpty(accessToken, queue);
@@ -977,6 +1063,7 @@ export const utils = {
     });
   },
 
+  // eslint-disable-next-line unicorn/prefer-default-parameters
   waitForQueuePaused: (accessToken: string, queue: keyof QueuesResponseLegacyDto, ms?: number) => {
     // eslint-disable-next-line no-async-promise-executor
     return new Promise<void>(async (resolve, reject) => {

@@ -12,10 +12,7 @@ export interface MonthData {
 
 const MONTH_LABELS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
-export function aggregateYears(
-  buckets: Array<{ timeBucket: string; count: number }>,
-  sortOrder: 'asc' | 'desc' | 'relevance' = 'asc',
-): YearData[] {
+export function aggregateYears(buckets: Array<{ timeBucket: string; count: number }>): YearData[] {
   const yearMap = new Map<number, number>();
   for (const b of buckets) {
     const year = new Date(b.timeBucket).getUTCFullYear();
@@ -23,7 +20,7 @@ export function aggregateYears(
   }
   const maxCount = Math.max(...yearMap.values(), 1);
   return [...yearMap]
-    .sort(([a], [b]) => (sortOrder === 'asc' ? a - b : b - a))
+    .sort(([a], [b]) => a - b)
     .map(([year, count]) => ({
       year,
       count,
@@ -35,6 +32,7 @@ export function getMonthsForYear(buckets: Array<{ timeBucket: string; count: num
   const monthMap = new Map<number, number>();
   for (const b of buckets) {
     const d = new Date(b.timeBucket);
+    // eslint-disable-next-line unicorn/prefer-continue
     if (d.getUTCFullYear() === year) {
       const month = d.getUTCMonth() + 1;
       monthMap.set(month, (monthMap.get(month) ?? 0) + b.count);

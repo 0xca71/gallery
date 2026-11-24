@@ -1,8 +1,14 @@
 name: Weblate checks
 
-# The upstream workflow requires the Immich Weblate bot, which is not installed on this standalone fork.
 on:
-  workflow_dispatch:
+  pull_request:
+    branches: [main, 'release/*']
+    types:
+      - opened
+      - synchronize
+      - ready_for_review
+      - auto_merge_enabled
+      - auto_merge_disabled
 
 permissions: {}
 
@@ -32,7 +38,7 @@ jobs:
     needs: [pre-job]
     runs-on: ubuntu-latest
     permissions: {}
-    if: ${{ fromJSON(needs.pre-job.outputs.should_run).i18n == true }}
+    if: ${{ fromJSON(needs.pre-job.outputs.should_run).i18n == true && !startsWith(github.base_ref, 'release/') }}
     steps:
       - name: Bot review status
         env:

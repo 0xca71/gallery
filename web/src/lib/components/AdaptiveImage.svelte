@@ -1,5 +1,5 @@
 <script module lang="ts">
-  import { TUNABLES } from '$lib/utils/tunables';
+  import { TUNABLES } from '#lib/utils/tunables.ts';
 
   // Chrome renders HDR images with normally invisible seam lines in a regular
   // grid pattern. When the user pinch/scroll zooms, these seams become visible
@@ -50,28 +50,25 @@
 </script>
 
 <script lang="ts">
-  import AlphaBackground from '$lib/components/AlphaBackground.svelte';
-  import BrokenAsset from '$lib/components/assets/BrokenAsset.svelte';
-  import DelayedLoadingSpinner from '$lib/components/DelayedLoadingSpinner.svelte';
-  import ImageLayer from '$lib/components/ImageLayer.svelte';
-  import Thumbhash from '$lib/components/Thumbhash.svelte';
-  import { assetViewerManager } from '$lib/managers/asset-viewer-manager.svelte';
-  import { getAssetUrls } from '$lib/utils';
-  import { AdaptiveImageLoader, type QualityList } from '$lib/utils/adaptive-image-loader.svelte';
-  import { scaleToCover, scaleToFit, type Size } from '$lib/utils/container-utils';
-  import { getAltText } from '$lib/utils/thumbnail-util';
-  import { toTimelineAsset } from '$lib/utils/timeline-util';
+  import AlphaBackground from '#lib/components/AlphaBackground.svelte';
+  import DelayedLoadingSpinner from '#lib/components/DelayedLoadingSpinner.svelte';
+  import ImageLayer from '#lib/components/ImageLayer.svelte';
+  import Thumbhash from '#lib/components/Thumbhash.svelte';
+  import BrokenAsset from '#lib/components/assets/BrokenAsset.svelte';
+  import { assetViewerManager } from '#lib/managers/asset-viewer-manager.svelte.ts';
+  import { languageManager } from '#lib/managers/language-manager.svelte.ts';
+  import { getAssetUrls } from '#lib/utils.ts';
+  import { AdaptiveImageLoader, type QualityList } from '#lib/utils/adaptive-image-loader.svelte.ts';
+  import { scaleToCover, scaleToFit, type Size } from '#lib/utils/container-utils.ts';
+  import { getAltText } from '#lib/utils/thumbnail-util.ts';
+  import { toTimelineAsset } from '#lib/utils/timeline-util.ts';
   import type { AssetResponseDto, SharedLinkResponseDto } from '@immich/sdk';
   import { untrack, type Snippet } from 'svelte';
-  import { languageManager } from '$lib/managers/language-manager.svelte';
-  import { fittedPhoto } from '$lib/utils/zoom-geometry';
 
   type Props = {
     asset: AssetResponseDto;
     sharedLink?: SharedLinkResponseDto;
     objectFit?: 'contain' | 'cover';
-    rotation?: number;
-    retryOriginal?: number;
     container: Size;
     onUrlChange?: (url: string) => void;
     onImageReady?: () => void;
@@ -89,8 +86,6 @@
     asset,
     sharedLink,
     objectFit = 'contain',
-    rotation = 0,
-    retryOriginal = 0,
     container,
     onUrlChange,
     onImageReady,
@@ -100,9 +95,10 @@
   }: Props = $props();
 
   const afterThumbnail = (loader: AdaptiveImageLoader) => {
-    loader.trigger('preview');
     if (assetViewerManager.zoom > 1) {
       loader.trigger('original');
+    } else {
+      loader.trigger('preview');
     }
   };
 
@@ -125,9 +121,7 @@
     return qualityList;
   };
 
-  const loaderKey = $derived(
-    `${asset.id}:${asset.thumbhash}:${asset.updatedAt}:${sharedLink?.id}:${sharedLink?.allowDownload}:${sharedLink?.showMetadata}`,
-  );
+  const loaderKey = $derived(`${asset.id}:${asset.thumbhash}:${sharedLink?.id}`);
 
   const adaptiveImageLoader = $derived.by(() => {
     void loaderKey;
@@ -159,10 +153,7 @@
   const { insetInlineStart, top, displayWidth, displayHeight, rasterWidth, rasterHeight, rasterScale } = $derived.by(
     () => {
       const scaleFn = objectFit === 'cover' ? scaleToCover : scaleToFit;
-      const { width, height } =
-        objectFit === 'contain'
-          ? fittedPhoto(imageDimensions, container, rotation)
-          : scaleFn(imageDimensions, container);
+      const { width, height } = scaleFn(imageDimensions, container);
       if (maxRasterPixels === 0) {
         return {
           insetInlineStart: (container.width - width) / 2 + 'px',
@@ -212,12 +203,6 @@
   $effect(() => {
     if (assetViewerManager.zoom > 1 && status.quality.original !== 'success') {
       untrack(() => void adaptiveImageLoader.trigger('original'));
-    }
-  });
-
-  $effect(() => {
-    if (retryOriginal > 0) {
-      untrack(() => adaptiveImageLoader.retry('original'));
     }
   });
 

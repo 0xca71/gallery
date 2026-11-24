@@ -22,6 +22,8 @@ enum AppLifeCycleEnum { active, inactive, paused, resumed, detached, hidden }
 class AppLifeCycleNotifier extends StateNotifier<AppLifeCycleEnum> {
   final Ref _ref;
   bool _wasPaused = false;
+  bool _firstLaunch = true;
+  bool _fullSyncPending = false;
 
   // Add operation coordination
   Completer<void>? _resumeOperation;
@@ -30,6 +32,8 @@ class AppLifeCycleNotifier extends StateNotifier<AppLifeCycleEnum> {
   final _log = Logger("AppLifeCycleNotifier");
 
   AppLifeCycleNotifier(this._ref) : super(AppLifeCycleEnum.active);
+
+  void requestFullResume() => _fullSyncPending = true;
 
   Future<void> handleAppResume() async {
     state = AppLifeCycleEnum.resumed;
@@ -61,8 +65,15 @@ class AppLifeCycleNotifier extends StateNotifier<AppLifeCycleEnum> {
   }
 
   Future<void> _performResume() async {
+    if (_firstLaunch) {
+      // a delta sync can miss photos taken after a background launch
+      _fullSyncPending =
+          await _ref.read(backgroundWorkerFgServiceProvider).wasLaunchedInBackground() || _fullSyncPending;
+      _firstLaunch = false;
+    }
+
     // no need to resume because app was never really paused
-    if (!_wasPaused) {
+    if (!_wasPaused && !_fullSyncPending) {
       _log.info("Resume skipped, app was never paused");
       return;
     }
@@ -73,8 +84,7 @@ class AppLifeCycleNotifier extends StateNotifier<AppLifeCycleEnum> {
     // Needs to be logged in
     if (isAuthenticated) {
       // switch endpoint if needed
-      final endpoint = await _ref.read(authProvider.notifier).setOpenApiServiceEndpoint();
-      _log.info("Using server URL: $endpoint");
+      await _ref.read(authProvider.notifier).setOpenApiServiceEndpoint();
 
       await _ref.read(serverInfoProvider.notifier).getServerVersion();
     }
@@ -119,8 +129,12 @@ class AppLifeCycleNotifier extends StateNotifier<AppLifeCycleEnum> {
     final isAlbumLinkedSyncEnable = _ref.read(appConfigProvider).backup.syncAlbums;
 
     try {
+      // immich-31557: a delta sync can miss photos taken after a background launch, so force a
+      // full local sync once. The flag is consumed when the sync is scheduled.
+      final fullLocalSync = CurrentPlatform.isAndroid || _fullSyncPending;
+      _fullSyncPending = false;
       final sync = backgroundManager.syncRemoteThenLocal(
-        fullLocalSync: CurrentPlatform.isAndroid,
+        fullLocalSync: fullLocalSync,
         shouldRunLocal: _shouldContinueOperation,
       );
       final syncSuccess = await sync.remoteSync;

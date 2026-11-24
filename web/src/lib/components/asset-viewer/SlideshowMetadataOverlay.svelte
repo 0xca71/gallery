@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { SlideshowMetadataOverlayMode, slideshowStore } from '$lib/stores/slideshow.store';
-  import { fromISODateTime, fromISODateTimeUTC } from '$lib/utils/timeline-util';
+  import { SlideshowMetadataOverlayMode, slideshowStore } from '#lib/stores/slideshow.store.ts';
+  import { fromISODateTime, fromISODateTimeUTC } from '#lib/utils/timeline-util.ts';
   import type { AssetResponseDto } from '@immich/sdk';
   import { Text } from '@immich/ui';
   import { DateTime } from 'luxon';
@@ -25,8 +25,7 @@
   const dateString = $derived(dateTime.toLocaleString(DateTime.DATE_MED_WITH_WEEKDAY));
 
   const locationString = $derived(
-    asset.exifInfo?.formattedAddress?.trim() ||
-      [asset.exifInfo?.city, asset.exifInfo?.state, asset.exifInfo?.country].filter(Boolean).join(', '),
+    [asset.exifInfo?.city, asset.exifInfo?.state, asset.exifInfo?.country].filter(Boolean).join(', '),
   );
 
   const shouldShow = $derived.by(() => {

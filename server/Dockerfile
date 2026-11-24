@@ -1,4 +1,4 @@
-FROM ghcr.io/immich-app/base-server-dev:202608300913@sha256:188679bfc2e7a496bdc13bd145cf59d90b2fb8f9dbf7131b2c1a368cd637b1a0 AS builder
+FROM ghcr.io/immich-app/base-server-dev:202610291416@sha256:5f4f9f77059e1cd0182994419a19f4ee045c3fd48e611f5e77623ed63f7aa1e4 AS builder
 ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
   CI=1 \
   COREPACK_HOME=/tmp \
@@ -61,11 +61,21 @@ ENV IMMICH_BUILD=${BUILD_ID}
 
 RUN --mount=type=cache,id=pnpm,target=/buildcache/pnpm-store pnpm --filter immich-web build
 
+FROM sdk AS cli
+
+COPY ./packages/cli/package.json ./packages/cli/package.json
+RUN --mount=type=cache,id=pnpm,target=/buildcache/pnpm-store pnpm --filter @immich/cli install --frozen-lockfile
+
+COPY ./packages/cli ./packages/cli/
+RUN --mount=type=cache,id=pnpm,target=/buildcache/pnpm-store \
+  pnpm --filter @immich/cli build && \
+  pnpm --filter @immich/cli --prod --no-optional deploy /output/cli-pruned
+
 FROM plugin-sdk AS plugins
 
 ARG TARGETPLATFORM
 
-COPY --from=ghcr.io/jdx/mise:2026.9.2@sha256:812f7860a2fb911e1d5dd3375834abb2a08f8c783a23f783fcbccaf7fc7357aa /usr/local/bin/mise /usr/local/bin/mise
+COPY --from=ghcr.io/jdx/mise:2026.10.20@sha256:a3023a390ce9d79343741039d35a36aa41e4fe8198464bf8cc9ffd23ae081a24 /usr/local/bin/mise /usr/local/bin/mise
 
 # Gallery does NOT run `mise install --locked` here: resolving the full tool list hits the GitHub
 # API and has repeatedly failed the build on rate limits. Only js-pdk is needed, and it is fetched
@@ -88,20 +98,21 @@ RUN --mount=type=cache,id=pnpm,target=/buildcache/pnpm-store \
   mise exec --no-deps --jobs=1 github:extism/js-pdk@1.6.0 -- \
     pnpm --filter @immich/plugin-sdk --filter @immich/plugin-core --filter @immich/plugin-gallery build
 
-FROM ghcr.io/immich-app/base-server-prod:202608300913@sha256:e809772a5ee5babfe2073563a40757818f997feff8d161d30bf7b904ca49eb6b
+FROM ghcr.io/immich-app/base-server-prod:202610291416@sha256:6211bec52cbccc19076889b0c39ef473a1a1d02ceb635ccd2e0ecb4683e5fd4d
 
 WORKDIR /usr/src/app
 ENV NODE_ENV=production \
   NVIDIA_DRIVER_CAPABILITIES=all \
   NVIDIA_VISIBLE_DEVICES=all
 
-# The server package includes immich-admin and its start.sh launcher.
 COPY --from=server /output/server-pruned ./server
 COPY --from=web /usr/src/app/web/build /build/www
+COPY --from=cli /output/cli-pruned ./cli
 COPY --from=plugins /usr/src/app/packages/plugin-core/dist /build/plugins/immich-plugin-core/dist
 COPY --from=plugins /usr/src/app/packages/plugin-core/manifest.json /build/plugins/immich-plugin-core/manifest.json
 COPY --from=plugins /usr/src/app/packages/plugin-gallery/dist /build/plugins/gallery-core/dist
 COPY --from=plugins /usr/src/app/packages/plugin-gallery/manifest.json /build/plugins/gallery-core/manifest.json
+RUN ln -s ../../cli/bin/immich server/bin/immich
 COPY LICENSE /licenses/LICENSE.txt
 COPY LICENSE /LICENSE
 
@@ -121,6 +132,9 @@ ENV IMMICH_REPOSITORY_URL=https://github.com/immich-app/immich
 ENV IMMICH_SOURCE_REF=${BUILD_SOURCE_REF}
 ENV IMMICH_SOURCE_COMMIT=${BUILD_SOURCE_COMMIT}
 ENV IMMICH_SOURCE_URL=https://github.com/immich-app/immich/commit/${BUILD_SOURCE_COMMIT}
+
+COPY --from=ghcr.io/futo-org/backups/restic-proxy:v1.11.2@sha256:a88252d884d22a55749f45dd39a2458c6391ca3e4d3b0d9e0c2246786cf923be /usr/local/bin/restic-proxy /usr/local/bin/restic-proxy
+COPY --from=ghcr.io/futo-org/restic:0.19.1-futo.2@sha256:72a88670ee0bbb5485c74bd9a7fb3f36d46bf3f8e29c6d0886cd6039077a3184 /usr/bin/restic /usr/local/bin/restic
 
 VOLUME /data
 EXPOSE 2283

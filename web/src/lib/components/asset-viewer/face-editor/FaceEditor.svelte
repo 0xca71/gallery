@@ -1,14 +1,22 @@
 <script lang="ts">
-  import { shortcut } from '$lib/actions/shortcut';
-  import ImageThumbnail from '$lib/components/assets/thumbnail/ImageThumbnail.svelte';
-  import { assetViewerManager } from '$lib/managers/asset-viewer-manager.svelte';
-  import FaceCreateTagModal from '$lib/modals/CreateFaceModal.svelte';
-  import { faceManager } from '$lib/stores/face.svelte';
-  import { getPeopleThumbnailUrl } from '$lib/utils';
-  import { getNaturalSize, scaleToFit } from '$lib/utils/container-utils';
-  import { handleError } from '$lib/utils/handle-error';
-  import { normalizeSearchString } from '$lib/utils/string-utils';
-  import { createFace, getAllPeople, type PersonResponseDto } from '@immich/sdk';
+  import { shortcut } from '#lib/actions/shortcut.ts';
+  import ImageThumbnail from '#lib/components/assets/thumbnail/ImageThumbnail.svelte';
+  import type { FaceEditorSpace } from '#lib/gallery/asset-viewer/space-face-editor.ts';
+  import { assetViewerManager } from '#lib/managers/asset-viewer-manager.svelte.ts';
+  import FaceCreateTagModal from '#lib/modals/CreateFaceModal.svelte';
+  import { executeMutation } from '#lib/queries/client.ts';
+  import { createFaceMutation } from '#lib/queries/face.query.ts';
+  import { faceManager } from '#lib/stores/face.svelte.ts';
+  import { getPeopleThumbnailUrl } from '#lib/utils.ts';
+  import { getNaturalSize } from '#lib/utils/container-utils.ts';
+  import {
+    computeFaceCroppedCoordinates,
+    computeImageContentMetrics,
+    computeSelectorPosition,
+  } from '#lib/utils/face-box-drag.ts';
+  import { handleError } from '#lib/utils/handle-error.ts';
+  import { normalizeSearchString } from '#lib/utils/string-utils.ts';
+  import { getAllPeople, type PersonResponseDto } from '@immich/sdk';
   import { Button, Input, modalManager, toastManager } from '@immich/ui';
   import { Canvas, InteractiveFabricObject, Rect } from 'fabric';
   import { clamp } from 'lodash-es';
@@ -20,9 +28,10 @@
     containerWidth: number;
     containerHeight: number;
     assetId: string;
+    spaceFaces?: FaceEditorSpace; // Gallery: a space editor tags the space's people (FaceEditorPanel)
   };
 
-  let { htmlElement, containerWidth, containerHeight, assetId }: Props = $props();
+  let { htmlElement, containerWidth, containerHeight, assetId, spaceFaces }: Props = $props();
 
   let canvasEl: HTMLCanvasElement | undefined = $state();
   let canvas: Canvas | undefined = $state();
@@ -88,17 +97,7 @@
     searchInputEl?.focus();
   });
 
-  const imageContentMetrics = $derived.by(() => {
-    const natural = getNaturalSize(htmlElement);
-    const container = { width: containerWidth, height: containerHeight };
-    const { width: contentWidth, height: contentHeight } = scaleToFit(natural, container);
-    return {
-      contentWidth,
-      contentHeight,
-      offsetX: (containerWidth - contentWidth) / 2,
-      offsetY: (containerHeight - contentHeight) / 2,
-    };
-  });
+  const imageContentMetrics = $derived(computeImageContentMetrics(htmlElement, containerWidth, containerHeight));
 
   const setDefaultFaceRectanglePosition = (faceRect: Rect) => {
     const { offsetX, offsetY } = imageContentMetrics;
@@ -146,6 +145,10 @@
   };
 
   const getPeople = async () => {
+    if (spaceFaces) {
+      candidates = await spaceFaces.loadPeople();
+      return;
+    }
     const { hasNextPage, people, total } = await getAllPeople({ page, size: 1000, withHidden: false });
 
     if (candidates.length === total) {
@@ -180,43 +183,14 @@
     const listHeight = Math.min(MAX_LIST_HEIGHT, containerHeight - gap * 2 - chromeHeight);
     const selectorHeight = listHeight + chromeHeight;
 
-    const clampTop = (top: number) => clamp(top, gap, containerHeight - selectorHeight - gap);
-    const clampLeft = (left: number) => clamp(left, gap, containerWidth - selectorWidth - gap);
-
-    const overlapArea = (position: { top: number; left: number }) => {
-      const selectorRight = position.left + selectorWidth;
-      const selectorBottom = position.top + selectorHeight;
-      const faceRight = faceBox.left + faceBox.width;
-      const faceBottom = faceBox.top + faceBox.height;
-
-      const overlapX = Math.max(0, Math.min(selectorRight, faceRight) - Math.max(position.left, faceBox.left));
-      const overlapY = Math.max(0, Math.min(selectorBottom, faceBottom) - Math.max(position.top, faceBox.top));
-      return overlapX * overlapY;
-    };
-
-    const faceBottom = faceBox.top + faceBox.height;
-    const faceRight = faceBox.left + faceBox.width;
-
-    const positions = [
-      { top: clampTop(faceBottom + gap), left: clampLeft(faceBox.left) },
-      { top: clampTop(faceBox.top - selectorHeight - gap), left: clampLeft(faceBox.left) },
-      { top: clampTop(faceBox.top), left: clampLeft(faceRight + gap) },
-      { top: clampTop(faceBox.top), left: clampLeft(faceBox.left - selectorWidth - gap) },
-    ];
-
-    let bestPosition = positions[0];
-    let leastOverlap = Infinity;
-
-    for (const position of positions) {
-      const overlap = overlapArea(position);
-      if (overlap < leastOverlap) {
-        leastOverlap = overlap;
-        bestPosition = position;
-        if (overlap === 0) {
-          break;
-        }
-      }
-    }
+    const bestPosition = computeSelectorPosition({
+      faceBox,
+      selectorWidth,
+      selectorHeight,
+      containerWidth,
+      containerHeight,
+      gap,
+    });
 
     faceSelectorEl.style.top = `${bestPosition.top}px`;
     faceSelectorEl.style.left = `${bestPosition.left}px`;
@@ -244,23 +218,7 @@
       return;
     }
 
-    const { left, top, width, height } = faceRect.getBoundingRect();
-    const { offsetX, offsetY, contentWidth, contentHeight } = imageContentMetrics;
-    const natural = getNaturalSize(htmlElement);
-
-    const scaleX = natural.width / contentWidth;
-    const scaleY = natural.height / contentHeight;
-    const imageX = (left - offsetX) * scaleX;
-    const imageY = (top - offsetY) * scaleY;
-
-    return {
-      imageWidth: natural.width,
-      imageHeight: natural.height,
-      x: Math.floor(imageX),
-      y: Math.floor(imageY),
-      width: Math.floor(width * scaleX),
-      height: Math.floor(height * scaleY),
-    };
+    return computeFaceCroppedCoordinates(faceRect.getBoundingRect(), htmlElement, containerWidth, containerHeight);
   };
 
   type FaceCoordinates = NonNullable<ReturnType<typeof getFaceCroppedCoordinates>>;
@@ -302,38 +260,39 @@
   };
 
   const tagFace = async (person: PersonResponseDto) => {
-    try {
-      const data = getFaceCroppedCoordinates();
-      if (!data) {
-        toastManager.warning($t('error_tag_face_bounding_box'));
-        return;
+    const data = getFaceCroppedCoordinates();
+    if (!data) {
+      toastManager.warning($t('error_tag_face_bounding_box'));
+      return;
+    }
+
+    if (spaceFaces) {
+      try {
+        await spaceFaces.tag(person, data);
+      } catch (error) {
+        handleError(error, 'Error tagging face');
       }
+      onClose();
+      return;
+    }
 
-      const isConfirmed = await modalManager.showDialog({
-        prompt: person.name
-          ? $t('confirm_tag_face', { values: { name: person.name } })
-          : $t('confirm_tag_face_unnamed'),
-      });
+    const isConfirmed = await modalManager.showDialog({
+      prompt: person.name ? $t('confirm_tag_face', { values: { name: person.name } }) : $t('confirm_tag_face_unnamed'),
+    });
 
-      if (!isConfirmed) {
-        return;
-      }
+    if (!isConfirmed) {
+      return;
+    }
 
-      await createFace({
-        assetFaceCreateDto: {
-          assetId,
-          personId: person.id,
-          ...data,
-        },
-      });
-
+    const onSuccess = async () => {
       await assetViewerManager.setAssetId(assetId);
       faceManager.clear();
-      onClose();
-    } catch (error) {
-      handleError(error, 'Error tagging face');
-      onClose();
-    }
+    };
+
+    await executeMutation(createFaceMutation, [{ assetFaceCreateDto: { assetId, personId: person.id, ...data } }], {
+      onSuccess: () => void onSuccess(),
+      onSettled: onClose,
+    });
   };
 
   const showCreateFaceModal = async () => {
@@ -343,11 +302,9 @@
         return;
       }
 
-      const created = await modalManager.show(FaceCreateTagModal, {
-        assetId,
-        ...data,
-        previewUrl: getFacePreviewUrl(data),
-      });
+      const created = spaceFaces
+        ? await spaceFaces.create(data)
+        : await modalManager.show(FaceCreateTagModal, { assetId, ...data, previewUrl: getFacePreviewUrl(data) });
       if (!created) {
         return;
       }
@@ -366,7 +323,7 @@
 <svelte:document use:shortcut={{ shortcut: { key: 'Escape' }, onShortcut: onClose, ignoreInputFields: false }} />
 
 <div
-  id="face-editor-data"
+  data-testid="face-editor-data"
   class="absolute inset-s-0 top-0 z-5 size-full overflow-hidden"
   data-overlay-interactive
   data-face-left={faceBoxPosition.left}
@@ -374,10 +331,15 @@
   data-face-width={faceBoxPosition.width}
   data-face-height={faceBoxPosition.height}
 >
-  <canvas bind:this={canvasEl} id="face-editor" class="absolute inset-s-0 top-0"></canvas>
+  <canvas
+    bind:this={canvasEl}
+    id={spaceFaces ? 'space-face-editor' : 'face-editor'}
+    data-testid="face-editor"
+    class="absolute inset-s-0 top-0"
+  ></canvas>
 
   <div
-    id="face-selector"
+    data-testid="face-selector"
     bind:this={faceSelectorEl}
     class="absolute inset-s-[calc(50%-125px)] top-[calc(50%-250px)] w-62.5 max-w-62.5 rounded-xl border border-gray-200 bg-white px-2 py-4 backdrop-blur-sm transition-[top,left] duration-200 ease-out dark:border-gray-800 dark:bg-immich-dark-gray dark:text-immich-dark-fg"
   >
@@ -399,7 +361,7 @@
               <ImageThumbnail
                 curve
                 shadow
-                url={getPeopleThumbnailUrl(person)}
+                url={spaceFaces?.thumbnailUrl(person) ?? getPeopleThumbnailUrl(person)}
                 altText={person.name}
                 title={person.name}
                 widthStyle="30px"

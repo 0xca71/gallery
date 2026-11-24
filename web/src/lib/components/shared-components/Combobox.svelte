@@ -20,9 +20,8 @@
 </script>
 
 <script lang="ts">
-  import { focusOutside } from '$lib/actions/focus-outside';
-  import { shortcuts } from '$lib/actions/shortcut';
-  import { generateId } from '$lib/utils/generate-id';
+  import { focusOutside } from '#lib/actions/focus-outside.ts';
+  import { shortcuts } from '#lib/actions/shortcut.ts';
   import { Icon, IconButton, Label } from '@immich/ui';
   import { mdiChevronDown, mdiClose, mdiMagnify } from '@mdi/js';
   import { onMount, tick } from 'svelte';
@@ -37,19 +36,15 @@
     options?: ComboBoxOption[];
     selectedOption?: ComboBoxOption | undefined;
     placeholder?: string;
-    /**
-     * whether creating new items is allowed.
-     */
+    /** whether creating new items is allowed. */
     allowCreate?: boolean;
-    /**
-     * select first matching option on enter key.
-     */
+    /** select first matching option on enter key. */
     defaultFirstOption?: boolean;
     onSelect?: (option: ComboBoxOption | undefined) => void;
     /**
-     * Fires on every keystroke, for fields whose value is the typed text itself rather than a
-     * choice from `options`. Without it, text that is never selected is discarded on blur.
-     */
+    Fires on every keystroke, for fields whose value is the typed text itself rather than a
+    choice from `options`. Without it, text that is never selected is discarded on blur.
+    */
     onTextInput?: (value: string) => void;
     forceFocus?: boolean;
   }
@@ -68,17 +63,9 @@
     forceFocus = false,
   }: Props = $props();
 
-  /**
-   * Unique identifier for the combobox.
-   */
-  let id: string = generateId();
-  /**
-   * Indicates whether or not the dropdown autocomplete list should be visible.
-   */
+  /** Indicates whether or not the dropdown autocomplete list should be visible. */
   let isOpen = $state(false);
-  /**
-   * Keeps track of whether the combobox is actively being used.
-   */
+  /** Keeps track of whether the combobox is actively being used. */
   let isActive = $state(false);
   let searchQuery = $derived(selectedOption?.label || '');
   let selectedIndex: number | undefined = $state();
@@ -88,15 +75,12 @@
   let frameEnd = $state<HTMLElement>();
   let bounds: DOMRect | undefined = $state();
 
+  const id = $props.id();
   const inputId = `combobox-${id}`;
   const listboxId = `listbox-${id}`;
-  /**
-   * Buffer distance between the dropdown and top/bottom of the viewport.
-   */
+  /** Buffer distance between the dropdown and top/bottom of the viewport. */
   const dropdownOffset = 15;
-  /**
-   * Minimum space required for the dropdown to be displayed at the bottom of the input.
-   */
+  /** Minimum space required for the dropdown to be displayed at the bottom of the input. */
   const bottomBreakpoint = 225;
   const observer = new IntersectionObserver(
     (entries) => {
@@ -191,19 +175,19 @@
 
   // TODO: move this combobox component into @immich/ui
   /**
-   * The dropdown is `position: fixed`, but "fixed" does not always mean "against the
-   * viewport", so the offsets it is placed at are measured rather than assumed:
-   *
-   * - Bits UI dialogs use `contain: layout`, which positions fixed descendants in dialog space.
-   * - iPadOS Safari resolves fixed positions against the *document* while the on-screen
-   *   keyboard is up, so a dropdown placed at the input's client coordinates lands
-   *   `window.scrollY` too high - off-screen once the keyboard scrolls the page (#959).
-   *
-   * `frameStart` and `frameEnd` are zero-sized probes pinned to the top and bottom of
-   * whatever box this dropdown's `fixed` positions actually resolve against. Wherever
-   * `fixed` behaves like the viewport they read 0 and `window.innerHeight`, leaving the
-   * arithmetic below unchanged.
-   */
+  The dropdown is `position: fixed`, but "fixed" does not always mean "against the
+  viewport", so the offsets it is placed at are measured rather than assumed:
+  
+  - Bits UI dialogs use `contain: layout`, which positions fixed descendants in dialog space.
+  - iPadOS Safari resolves fixed positions against the *document* while the on-screen
+    keyboard is up, so a dropdown placed at the input's client coordinates lands
+    `window.scrollY` too high - off-screen once the keyboard scrolls the page (#959).
+  
+  `frameStart` and `frameEnd` are zero-sized probes pinned to the top and bottom of
+  whatever box this dropdown's `fixed` positions actually resolve against. Wherever
+  `fixed` behaves like the viewport they read 0 and `window.innerHeight`, leaving the
+  arithmetic below unchanged.
+  */
   const getFixedFrame = () => {
     const start = frameStart?.getBoundingClientRect();
     const end = frameEnd?.getBoundingClientRect();
@@ -215,9 +199,9 @@
   };
 
   /**
-   * The height the user can actually see. The on-screen keyboard shrinks the visual
-   * viewport, and on iPadOS it shrinks `window.innerHeight` along with it.
-   */
+  The height the user can actually see. The on-screen keyboard shrinks the visual
+  viewport, and on iPadOS it shrinks `window.innerHeight` along with it.
+  */
   const getVisibleHeight = () => window.visualViewport?.height || window.innerHeight;
 
   const calculatePosition = (boundary: DOMRect | undefined) => {
@@ -453,7 +437,7 @@
           {allowCreate ? searchQuery : $t('no_results')}
         </li>
       {/if}
-      {#each filteredOptions as option, index (option.id || option.label)}
+      {#each filteredOptions as option, index (option.id ?? `${option.value}:${option.label}`)}
         <!-- svelte-ignore a11y_click_events_have_key_events -->
         <li
           aria-selected={index === selectedIndex}

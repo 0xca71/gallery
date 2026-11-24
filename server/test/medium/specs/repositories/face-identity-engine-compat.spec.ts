@@ -1,5 +1,5 @@
 import { Kysely, sql } from 'kysely';
-import { GenericContainer, type StartedTestContainer, Wait } from 'testcontainers';
+import { GenericContainer, Wait, type StartedTestContainer } from 'testcontainers';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { FaceIdentityRepository } from 'src/repositories/face-identity.repository.js';
 import { DB } from 'src/schema/index.js';
@@ -26,6 +26,7 @@ let internals: Internals;
 
 // Deterministic, valid UUIDs (version 4, variant 8) keyed by a small integer.
 const uuid = (n: number) => `00000000-0000-4000-8000-${n.toString().padStart(12, '0')}`;
+// eslint-disable-next-line unicorn/no-unnecessary-parameters
 const vec = (x: number, y: number, z: number) => `[${x},${y},${z}]`;
 
 const insertFace = (faceId: string, embedding: string) =>

@@ -94,6 +94,12 @@ upstream-rolling-final-check:
 upstream-postrebase-audit:
 	$(UPSTREAM_PREFLIGHT) run postrebase-audit $(if $(BATCH),--batch $(BATCH),)
 
+# Review-only PR showing the rolling rebase as a diff against main (the rolling branch's own PR
+# re-adds the whole fork). Re-run to refresh it after the rolling branch moves.
+.PHONY: upstream-review-pr
+upstream-review-pr:
+	scripts/upstream-review-pr.sh $(if $(ROLLING),--rolling $(ROLLING),) $(if $(BASE),--base $(BASE),) $(if $(DRY_RUN),--dry-run,)
+
 .PHONY: mobile-drift-rebase-check
 mobile-drift-rebase-check:
 	$(UPSTREAM_PREFLIGHT) run mobile-drift-check $(if $(BATCH),--batch $(BATCH),)
@@ -104,7 +110,8 @@ ci-invariants-check:
 
 .PHONY: commit-autolink-check
 # `pnpm run <script> -- --range X` swallows the argument and reports a false OK, so invoke the CLI
-# directly. Override the range with: make commit-autolink-check RANGE=upstream/main..some-branch
+# directly. The default range starts at the ownership manifest's upstream ref; override it with:
+# make commit-autolink-check RANGE=<upstream-ref>..some-branch
 #
 # Resolve this repo's highest PR number at run time: anything above it is not ours, so `#N` resolves
 # to the upstream repo. Freezing this as a constant makes the check flag our OWN new PRs (it did —
@@ -140,7 +147,7 @@ gallery-ml-smoke:
 
 .PHONY: fork-ownership-coverage-check
 fork-ownership-coverage-check:
-	git diff --name-only upstream/main...origin/main | sort > /tmp/gallery-fork-files.txt
+	git diff --name-only "upstream/$$(awk '$$1 == "upstream_branch:" { print $$2; exit }' docs/fork/ownership.yml)...origin/main" | sort > /tmp/gallery-fork-files.txt
 	$(UPSTREAM_PREFLIGHT) run coverage -- /tmp/gallery-fork-files.txt docs/fork/ownership.yml --expected-head "$$(git rev-parse origin/main)"
 
 prod:

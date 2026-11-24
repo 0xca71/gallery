@@ -5,6 +5,7 @@ import type { TimeBucketDto } from 'src/dtos/time-bucket.dto.js';
 import {
   AlbumUserRole,
   AssetOrder,
+  AssetOrderBy,
   AssetType,
   AssetVisibility,
   SharedLinkType,
@@ -20,13 +21,14 @@ import { SharedSpaceRepository } from 'src/repositories/shared-space.repository.
 import { DB } from 'src/schema/index.js';
 import { AssetTable } from 'src/schema/tables/asset.table.js';
 import { TimelineService } from 'src/services/timeline.service.js';
-import { SPACE_BUCKET, SPACE_DATE, createTwoOwnerSpace } from 'test/medium/fixtures/two-owner-space.js';
 import { newMediumService } from 'test/medium.factory.js';
+import { SPACE_BUCKET, SPACE_DATE, createTwoOwnerSpace } from 'test/medium/fixtures/two-owner-space.js';
 import { factory } from 'test/small.factory.js';
 import { getKyselyDB } from 'test/utils.js';
 
 let defaultDatabase: Kysely<DB>;
 
+// eslint-disable-next-line unicorn/no-unnecessary-parameters
 const setup = (db?: Kysely<DB>) => {
   return newMediumService(TimelineService, {
     database: db || defaultDatabase,
@@ -72,19 +74,30 @@ const spaceBucketAssetIds = async (
 };
 
 /**
- * An album on the viewer's PERSONAL timeline, holding a mix of owners (D3 fixture — see the
- * '/photos: albumId ANDs with userId' describe for what each asset is there to prove).
- */
+An album on the viewer's PERSONAL timeline, holding a mix of owners (D3 fixture — see the
+'/photos: albumId ANDs with userId' describe for what each asset is there to prove).
+*/
 const createPhotosAlbumFixture = async (ctx: ReturnType<typeof setup>['ctx']) => {
   // viewer is a member of the two-owner space (timeline-enabled) and owns nothing in it.
   const { viewer, annaAsset } = await createTwoOwnerSpace(ctx);
   const { user: carol } = await ctx.newUser(); // in NO space of the viewer's
 
   const myAsset = await createTimelineAsset(ctx, viewer.id, SPACE_DATE);
-  const myFavoriteAsset = await createTimelineAsset(ctx, viewer.id, SPACE_DATE, { isFavorite: true });
+  const myFavoriteAsset = await createTimelineAsset(ctx, viewer.id, SPACE_DATE);
   // Album-only assets of another user: the co-member contributions the D3 bug leaked.
   const carolAsset = await createTimelineAsset(ctx, carol.id, SPACE_DATE);
-  const carolFavoriteAsset = await createTimelineAsset(ctx, carol.id, SPACE_DATE, { isFavorite: true });
+  const carolFavoriteAsset = await createTimelineAsset(ctx, carol.id, SPACE_DATE);
+
+  // #763: a favourite is an `asset_favorite` row per USER, not `asset.isFavorite` on the asset.
+  // Carol favourites hers, the viewer favourites theirs — which is exactly what the assertion
+  // below distinguishes.
+  await ctx.database
+    .insertInto('asset_favorite')
+    .values([
+      { userId: viewer.id, assetId: myFavoriteAsset.id },
+      { userId: carol.id, assetId: carolFavoriteAsset.id },
+    ])
+    .execute();
 
   const { album } = await ctx.newAlbum({ ownerId: viewer.id }, [
     myAsset.id,
@@ -210,12 +223,10 @@ describe(TimelineService.name, () => {
       const { user } = await ctx.newUser();
       const auth = factory.auth({ user });
 
-      await createTimelineAsset(ctx, user.id, new Date('2024-04-02T12:00:00.000Z'), {
-        isFavorite: true,
-      });
-      await createTimelineAsset(ctx, user.id, new Date('2024-04-03T12:00:00.000Z'), {
-        isFavorite: false,
-      });
+      const favorited = await createTimelineAsset(ctx, user.id, new Date('2024-04-02T12:00:00.000Z'));
+      await createTimelineAsset(ctx, user.id, new Date('2024-04-03T12:00:00.000Z'));
+      // #763: isFavorite filters against the caller's asset_favorite overlay, not the owner's column.
+      await ctx.database.insertInto('asset_favorite').values({ userId: user.id, assetId: favorited.id }).execute();
 
       await expect(sut.getTimeBuckets(auth, { bucketSize: TimeBucketSize.Month, isFavorite: true })).resolves.toEqual([
         expect.objectContaining({ count: 1 }),
@@ -258,7 +269,8 @@ describe(TimelineService.name, () => {
       const { user } = await ctx.newUser();
       const auth = factory.auth({ user });
 
-      await createTimelineAsset(ctx, user.id, new Date('2024-05-01T12:00:00.000Z'), { isFavorite: false });
+      // Not favorited: no asset_favorite overlay row seeded.
+      await createTimelineAsset(ctx, user.id, new Date('2024-05-01T12:00:00.000Z'));
 
       await expect(sut.getTimeBuckets(auth, { bucketSize: TimeBucketSize.Year, isFavorite: true })).resolves.toEqual(
         [],
@@ -292,31 +304,41 @@ describe(TimelineService.name, () => {
         });
         await expect(response1).rejects.toBeInstanceOf(BadRequestException);
         await expect(response1).rejects.toThrow(
-          'withPartners is only supported for non-archived, non-trashed, non-favorited, non-locked assets',
+          'Only non-archived, non-trashed, non-favorited, non-locked assets can be requested for other users',
         );
 
-        const response2 = sut.getTimeBuckets(auth, { bucketSize, withPartners: true });
+        const response2 = sut.getTimeBuckets(auth, {
+          bucketSize,
+          withPartners: true,
+          visibility: AssetVisibility.Hidden,
+        });
         await expect(response2).rejects.toBeInstanceOf(BadRequestException);
         await expect(response2).rejects.toThrow(
-          'withPartners is only supported for non-archived, non-trashed, non-favorited, non-locked assets',
+          'Only non-archived, non-trashed, non-favorited, non-locked assets can be requested for other users',
         );
       },
     );
 
-    it('should return error if time bucket is requested with partners asset and favorite', async () => {
+    it('should default to timeline visibility if time bucket is requested with partners assets', async () => {
       const { sut } = setup();
       const auth = factory.auth();
-      const response1 = sut.getTimeBuckets(auth, { withPartners: true, isFavorite: false });
-      await expect(response1).rejects.toBeInstanceOf(BadRequestException);
-      await expect(response1).rejects.toThrow(
-        'withPartners is only supported for non-archived, non-trashed, non-favorited, non-locked assets',
-      );
+      await expect(sut.getTimeBuckets(auth, { withPartners: true })).resolves.toEqual([]);
+    });
 
-      const response2 = sut.getTimeBuckets(auth, { withPartners: true, isFavorite: true });
-      await expect(response2).rejects.toBeInstanceOf(BadRequestException);
-      await expect(response2).rejects.toThrow(
-        'withPartners is only supported for non-archived, non-trashed, non-favorited, non-locked assets',
-      );
+    // #763 slice 4: isFavorite no longer trips this guard — it composes with withPartners (the
+    // caller-scoped asset_favorite overlay resolves independently of the cross-user union). An
+    // explicit non-archived visibility is required so the request doesn't fall into the separate
+    // undefined-visibility-defaults-to-archived rejection exercised above.
+    it('resolves time buckets when partners is combined with isFavorite (true or false) (#763 slice 4)', async () => {
+      const { sut } = setup();
+      const auth = factory.auth();
+
+      await expect(
+        sut.getTimeBuckets(auth, { withPartners: true, isFavorite: false, visibility: AssetVisibility.Timeline }),
+      ).resolves.toEqual([]);
+      await expect(
+        sut.getTimeBuckets(auth, { withPartners: true, isFavorite: true, visibility: AssetVisibility.Timeline }),
+      ).resolves.toEqual([]);
     });
 
     it.each([TimeBucketSize.Year, TimeBucketSize.Month, TimeBucketSize.Day])(
@@ -327,7 +349,7 @@ describe(TimelineService.name, () => {
         const response = sut.getTimeBuckets(auth, { bucketSize, withPartners: true, isTrashed: true });
         await expect(response).rejects.toBeInstanceOf(BadRequestException);
         await expect(response).rejects.toThrow(
-          'withPartners is only supported for non-archived, non-trashed, non-favorited, non-locked assets',
+          'Only non-archived, non-trashed, non-favorited, non-locked assets can be requested for other users',
         );
       },
     );
@@ -341,7 +363,9 @@ describe(TimelineService.name, () => {
       const auth = factory.auth({ user, session: { hasElevatedPermission: true } });
 
       const response = sut.getTimeBuckets(auth, { userId: partner.id, visibility: AssetVisibility.Locked });
-      await expect(response).rejects.toThrow("You may not access another user's locked timeline");
+      await expect(response).rejects.toThrow(
+        'Only non-archived, non-trashed, non-favorited, non-locked assets can be requested for other users',
+      );
     });
 
     it('should not allow access for unrelated shared links', async () => {
@@ -424,6 +448,34 @@ describe(TimelineService.name, () => {
       const rawResponse = await sut.getTimeBucket(factory.auth(), { timeBucket: '012345-01-01' });
       const response = JSON.parse(rawResponse);
       expect(response).toEqual(expect.objectContaining({ id: [] }));
+
+      const createdAtResponse = await sut.getTimeBucket(factory.auth(), {
+        timeBucket: '012345-01-01',
+        orderBy: AssetOrderBy.CreatedAt,
+      });
+      expect(JSON.parse(createdAtResponse)).toEqual(expect.objectContaining({ id: [] }));
+    });
+
+    it('should bucket by upload month when ordering by createdAt', async () => {
+      const { sut, ctx } = setup();
+      const { user } = await ctx.newUser();
+      const auth = factory.auth({ user: { id: user.id } });
+      const dates = [
+        '1970-01-31T23:59:59.999Z',
+        '1970-02-01T00:00:00.000Z',
+        '1970-02-28T23:59:59.999Z',
+        '1970-03-01T00:00:00.000Z',
+      ];
+      const ids: string[] = [];
+      for (const createdAt of dates) {
+        const { asset } = await ctx.newAsset({ ownerId: user.id, createdAt, localDateTime: new Date('2000-01-01') });
+        await ctx.newExif({ assetId: asset.id, make: 'Canon' });
+        ids.push(asset.id);
+      }
+
+      const rawResponse = await sut.getTimeBucket(auth, { timeBucket: '1970-02-01', orderBy: AssetOrderBy.CreatedAt });
+      const response = JSON.parse(rawResponse);
+      expect(response.id).toEqual([ids[2], ids[1]]);
     });
 
     // Upstream has no format validator at all, so its clients — and third parties mirroring them,
@@ -470,7 +522,6 @@ describe(TimelineService.name, () => {
             ownerId: user.id,
             fileCreatedAt: new Date('1970-02-12'),
             localDateTime: new Date('1970-02-12'),
-            isFavorite: true,
           });
           await ctx.newExif({ assetId: result.asset.id, make: 'Canon' });
           return result;
@@ -481,12 +532,21 @@ describe(TimelineService.name, () => {
             ownerId: user.id,
             fileCreatedAt: new Date('1970-02-13'),
             localDateTime: new Date('1970-02-13'),
-            isFavorite: true,
           });
           await ctx.newExif({ assetId: result.asset.id, make: 'Canon' });
           return result;
         }),
       ]);
+
+      // #763: each owner has favorited only their own asset in the asset_favorite overlay, the
+      // only table Gallery writes a favorite to.
+      await ctx.database
+        .insertInto('asset_favorite')
+        .values([
+          { userId: asset1.ownerId, assetId: asset1.id },
+          { userId: asset2.ownerId, assetId: asset2.id },
+        ])
+        .execute();
 
       await Promise.all([
         ctx.newPartner({ sharedById: asset1.ownerId, sharedWithId: asset2.ownerId }),
@@ -725,15 +785,15 @@ describe(TimelineService.name, () => {
     });
 
     /**
-     * THE ACTUAL WIDENING VECTOR. The userIds/timelineSpaceIds OR-group at
-     * asset.repository.ts:362-380 only fires when `timelineSpaceIds` is set, and that only
-     * happens under `withSharedSpaces: true` (timeline.service.ts:81-86).
-     *
-     * Every other test in this file leaves timelineSpaceIds undefined, so the `:359` clause
-     * already ANDs — meaning an implementer who WRONGLY merged ownerId into options.userIds
-     * would still pass all of them. These two tests are the only thing standing between that
-     * mistake and a data leak. Do not delete them.
-     */
+    THE ACTUAL WIDENING VECTOR. The userIds/timelineSpaceIds OR-group at
+    asset.repository.ts:362-380 only fires when `timelineSpaceIds` is set, and that only
+    happens under `withSharedSpaces: true` (timeline.service.ts:81-86).
+    
+    Every other test in this file leaves timelineSpaceIds undefined, so the `:359` clause
+    already ANDs — meaning an implementer who WRONGLY merged ownerId into options.userIds
+    would still pass all of them. These two tests are the only thing standing between that
+    mistake and a data leak. Do not delete them.
+    */
     it('E21b: ownerId of a stranger under withSharedSpaces returns EMPTY (the real leak vector)', async () => {
       const { sut, ctx } = setup();
       const { viewer } = await createTwoOwnerSpace(ctx);
@@ -808,25 +868,25 @@ describe(TimelineService.name, () => {
   });
 
   /**
-   * D3 — the album gate ANDs with the owner gate on the PERSONAL timeline.
-   *
-   * `timeBucketChecks` deliberately does NOT default `userId` under an `albumId` (that branch is
-   * what E22 above depends on: on the ALBUM page, album ACCESS is the entire scope, and a viewer
-   * must see the owner's assets). So the *caller* decides the scope, and /photos — which is my
-   * personal timeline — must send `userId` alongside the album chip
-   * (web/src/lib/utils/photos-filter-options.ts). The tests below pin what each shape means, so a
-   * "fix" that defaults userId server-side (breaking E22) or a web regression that drops it (the
-   * D3 bug: `?albumId=A&ownerId=<co-member>` listing a co-member's assets, and the Favorites chip
-   * the album OWNER's favourites, on MY timeline) both get caught.
-   *
-   * THE FIXTURE TRAP: /photos also sends `withPartners` + `withSharedSpaces`, so `userIds` is not a
-   * plain AND — asset.repository.ts makes the scope `ownerId IN userIds` **OR** "in one of my
-   * timeline spaces". A co-member asset that ALSO lives in one of my timeline spaces therefore
-   * stays visible, correctly. The asset that must drop out is the **album-only** one: owned by
-   * someone else, in the album, in NO shared space of mine (`carolAsset` / `carolFavoriteAsset`).
-   * `annaAsset` (in the album AND in my space) is asserted present in the same test to keep that
-   * distinction honest — a fixture without it would pass an over-narrow implementation too.
-   */
+  D3 — the album gate ANDs with the owner gate on the PERSONAL timeline.
+  
+  `timeBucketChecks` deliberately does NOT default `userId` under an `albumId` (that branch is
+  what E22 above depends on: on the ALBUM page, album ACCESS is the entire scope, and a viewer
+  must see the owner's assets). So the *caller* decides the scope, and /photos — which is my
+  personal timeline — must send `userId` alongside the album chip
+  (web/src/lib/utils/photos-filter-options.ts). The tests below pin what each shape means, so a
+  "fix" that defaults userId server-side (breaking E22) or a web regression that drops it (the
+  D3 bug: `?albumId=A&ownerId=<co-member>` listing a co-member's assets, and the Favorites chip
+  the album OWNER's favourites, on MY timeline) both get caught.
+  
+  THE FIXTURE TRAP: /photos also sends `withPartners` + `withSharedSpaces`, so `userIds` is not a
+  plain AND — asset.repository.ts makes the scope `ownerId IN userIds` **OR** "in one of my
+  timeline spaces". A co-member asset that ALSO lives in one of my timeline spaces therefore
+  stays visible, correctly. The asset that must drop out is the **album-only** one: owned by
+  someone else, in the album, in NO shared space of mine (`carolAsset` / `carolFavoriteAsset`).
+  `annaAsset` (in the album AND in my space) is asserted present in the same test to keep that
+  distinction honest — a fixture without it would pass an over-narrow implementation too.
+  */
   describe('/photos: albumId ANDs with userId (D3)', () => {
     it("an album chip does not put a co-member's album-only asset on my personal timeline", async () => {
       const { sut, ctx } = setup();
@@ -871,9 +931,9 @@ describe(TimelineService.name, () => {
       const { viewer, album, myFavoriteAsset, carolFavoriteAsset } = await createPhotosAlbumFixture(ctx);
       const auth = factory.auth({ user: viewer });
 
-      // `isFavorite` is the asset OWNER's flag, and /photos drops withPartners/withSharedSpaces for
-      // a favourites query (the server 400s that combination anyway) — so here `userId` is the ONLY
-      // thing standing between me and a co-member's favourites.
+      // #763: `isFavorite` resolves the per-user `asset_favorite` overlay for the CALLER, so a
+      // co-member's favourite on their own asset is not mine. `userId` still scopes the album
+      // query to my own timeline; the overlay is what makes the chip mean "mine".
       const ids = await photosBucketAssetIds(sut, auth, {
         userId: viewer.id,
         albumId: album.id,
@@ -886,15 +946,15 @@ describe(TimelineService.name, () => {
   });
 
   /**
-   * `spaceId` + `albumId` together: BOTH permissions must be checked.
-   *
-   * The check used to be an `else if` chain, so with both set only AlbumRead was verified while the
-   * space predicate still applied to the query — letting a caller with album access learn WHICH of
-   * that album's assets belong to a space they are not a member of (a membership oracle; no asset
-   * leaks, since every returned asset is in an album they can read). The filtered map endpoint
-   * refuses the same combination outright (shared-space.service.ts getFilteredMapMarkers), but the
-   * timeline answers it — so it must at least enforce the space boundary it is querying.
-   */
+  `spaceId` + `albumId` together: BOTH permissions must be checked.
+  
+  The check used to be an `else if` chain, so with both set only AlbumRead was verified while the
+  space predicate still applied to the query — letting a caller with album access learn WHICH of
+  that album's assets belong to a space they are not a member of (a membership oracle; no asset
+  leaks, since every returned asset is in an album they can read). The filtered map endpoint
+  refuses the same combination outright (shared-space.service.ts getFilteredMapMarkers), but the
+  timeline answers it — so it must at least enforce the space boundary it is querying.
+  */
   describe('spaceId + albumId requires access to BOTH', () => {
     it('rejects an album query that also scopes to a space the caller is not a member of', async () => {
       const { sut, ctx } = setup();

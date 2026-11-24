@@ -1,41 +1,29 @@
 <script lang="ts">
-  import ActionMenuItem from '$lib/components/ActionMenuItem.svelte';
-  import ButtonContextMenu from '$lib/components/shared-components/context-menu/ButtonContextMenu.svelte';
-  import type { SelectionBBox } from '$lib/components/shared-components/map/types';
-  import ArchiveAction from '$lib/components/timeline/actions/ArchiveAction.svelte';
-  import ChangeDate from '$lib/components/timeline/actions/ChangeDateAction.svelte';
-  import ChangeDescription from '$lib/components/timeline/actions/ChangeDescriptionAction.svelte';
-  import ChangeLocation from '$lib/components/timeline/actions/ChangeLocationAction.svelte';
-  import CreateSharedLink from '$lib/components/timeline/actions/CreateSharedLinkAction.svelte';
-  import DeleteAssets from '$lib/components/timeline/actions/DeleteAssetsAction.svelte';
-  import DownloadAction from '$lib/components/timeline/actions/DownloadAction.svelte';
-  import FavoriteAction from '$lib/components/timeline/actions/FavoriteAction.svelte';
-  import LinkLivePhotoAction from '$lib/components/timeline/actions/LinkLivePhotoAction.svelte';
-  import SelectAllAssets from '$lib/components/timeline/actions/SelectAllAction.svelte';
-  import SetVisibilityAction from '$lib/components/timeline/actions/SetVisibilityAction.svelte';
-  import StackAction from '$lib/components/timeline/actions/StackAction.svelte';
-  import TagAction from '$lib/components/timeline/actions/TagAction.svelte';
-  import AssetSelectControlBar from '$lib/components/timeline/AssetSelectControlBar.svelte';
-  import Timeline from '$lib/components/timeline/Timeline.svelte';
-  import TimelineRouteGroupingBar from '$lib/components/timeline/TimelineRouteGroupingBar.svelte';
-  import Portal from '$lib/elements/Portal.svelte';
-  import { assetMultiSelectManager } from '$lib/managers/asset-multi-select-manager.svelte';
-  import { authManager } from '$lib/managers/auth-manager.svelte';
-  import { TimelineManager } from '$lib/managers/timeline-manager/timeline-manager.svelte';
-  import type { TimelineGrouping, TimelineTemporalAnchor } from '$lib/managers/timeline-manager/types';
-  import { getAssetBulkActions } from '$lib/services/asset.service';
-  import { createFilterState, type FilterState } from '$lib/components/filter-panel/filter-panel';
-  import { clearTimelineTemporalFilter } from '$lib/utils/timeline-temporal-filters';
-  import {
-    updateStackedAssetInTimeline,
-    updateUnstackedAssetInTimeline,
-    type OnLink,
-    type OnUnlink,
-    type OnUnlinkAndDelete,
-  } from '$lib/utils/actions';
-  import { buildMapTimelineOptions } from '$lib/utils/map-filter-options';
-  import { type ActivatableTimelineBucket, getTimelineBucketZoomTarget } from '$lib/utils/timeline-zoom-navigation';
-  import { getTimelineTopVisibleAnchor } from '$lib/managers/timeline-manager/timeline-anchor';
+  import ActionMenuItem from '#lib/components/ActionMenuItem.svelte';
+  import { createFilterState, type FilterState } from '#lib/components/filter-panel/filter-panel.ts';
+  import ButtonContextMenu from '#lib/components/shared-components/context-menu/ButtonContextMenu.svelte';
+  import type { SelectionBBox } from '#lib/components/shared-components/map/types.ts';
+  import AssetSelectControlBar from '#lib/components/timeline/AssetSelectControlBar.svelte';
+  import Timeline from '#lib/components/timeline/Timeline.svelte';
+  import TimelineRouteGroupingBar from '#lib/components/timeline/TimelineRouteGroupingBar.svelte';
+  import ChangeDate from '#lib/components/timeline/actions/ChangeDateAction.svelte';
+  import ChangeDescription from '#lib/components/timeline/actions/ChangeDescriptionAction.svelte';
+  import ChangeLocation from '#lib/components/timeline/actions/ChangeLocationAction.svelte';
+  import DeleteAssets from '#lib/components/timeline/actions/DeleteAssetsAction.svelte';
+  import DownloadAction from '#lib/components/timeline/actions/DownloadAction.svelte';
+  import FavoriteAction from '#lib/components/timeline/actions/FavoriteAction.svelte';
+  import LinkLivePhotoAction from '#lib/components/timeline/actions/LinkLivePhotoAction.svelte';
+  import SelectAllAssets from '#lib/components/timeline/actions/SelectAllAction.svelte';
+  import SetVisibilityAction from '#lib/components/timeline/actions/SetVisibilityAction.svelte';
+  import Portal from '#lib/elements/Portal.svelte';
+  import { timelineGroupingProps } from '#lib/gallery/filtered-timeline/timeline-grouping.svelte.ts';
+  import { assetMultiSelectManager } from '#lib/managers/asset-multi-select-manager.svelte.ts';
+  import { TimelineManager } from '#lib/managers/timeline-manager/timeline-manager.svelte.ts';
+  import { getAssetBulkActions } from '#lib/services/asset.service.ts';
+  import { getStackBulkActions } from '#lib/services/stack.service.ts';
+  import { type OnLink, type OnUnlink } from '#lib/utils/actions.ts';
+  import { buildMapTimelineOptions } from '#lib/utils/map-filter-options.ts';
+  import { clearTimelineTemporalFilter } from '#lib/utils/timeline-temporal-filters.ts';
   import { ActionButton, CloseButton, CommandPaletteDefaultProvider, Icon } from '@immich/ui';
   import { mdiDotsVertical, mdiImageMultiple } from '@mdi/js';
   import { ceil, floor } from 'lodash-es';
@@ -67,10 +55,11 @@
   // is the count of what the panel actually lists: the server's bucket counts until a month loads,
   // and the loaded assets (client-side `assetFilter` exclusions already applied) after.
   const assetCount = $derived(timelineManager?.assetCount ?? 0);
-  let timelineGrouping = $state<TimelineGrouping>('day');
-  let temporalAnchor = $state<TimelineTemporalAnchor | undefined>();
+  const timelineGrouping = timelineGroupingProps(() => timelineManager, {
+    hideWhenEmpty: false,
+    lockWhileSelecting: true,
+  });
   let selectedAssets = $derived(assetMultiSelectManager.assets);
-  let isAssetStackSelected = $derived(selectedAssets.length === 1 && !!selectedAssets[0].stack);
   let isLinkActionAvailable = $derived.by(() => {
     const isLivePhoto = selectedAssets.length === 1 && !!selectedAssets[0].livePhotoVideoId;
     const isLivePhotoCandidate =
@@ -91,11 +80,6 @@
     timelineManager.upsertAssets([still]);
   };
 
-  const handleUnlinkAndDelete: OnUnlinkAndDelete = ({ still, motionId }) => {
-    timelineManager.removeAssets([motionId]);
-    timelineManager.upsertAssets([still]);
-  };
-
   const handleSetVisibility = (assetIds: string[]) => {
     timelineManager.removeAssets(assetIds);
     assetMultiSelectManager.clear();
@@ -105,29 +89,9 @@
     assetMultiSelectManager.clear();
   };
 
-  const handleTimelineGroupingChange = (grouping: TimelineGrouping) => {
-    const anchor = getTimelineTopVisibleAnchor(timelineManager);
-    timelineGrouping = grouping;
-    temporalAnchor = anchor;
-  };
-
-  const handleTimelineBucketActivate = (bucket: ActivatableTimelineBucket) => {
-    if (assetMultiSelectManager.selectionActive) {
-      return;
-    }
-
-    const result = getTimelineBucketZoomTarget(bucket);
-    if (!result) {
-      return;
-    }
-
-    timelineGrouping = result.grouping;
-    temporalAnchor = result.anchor;
-  };
-
   const clearTemporalFilter = () => {
     filters = clearTimelineTemporalFilter(filters);
-    temporalAnchor = undefined;
+    timelineGrouping.temporalAnchor = undefined;
     // #767 fresh instance: this used to only mutate the bound `filters`, leaving the map page's
     // URL-backed from/to params in place — a reload, Back, or shared link brought the "cleared"
     // filter right back. Mirror the page's other mutation sites (FilterPanel's onFiltersChange).
@@ -143,7 +107,8 @@
   const timelineOptions = $derived.by(() => {
     return {
       ...buildMapTimelineOptions(filters, timelineBoundingBox, selectedClusterIds, spaceId),
-      grouping: timelineGrouping,
+      withStacked: true,
+      grouping: timelineGrouping.grouping,
     };
   });
 
@@ -170,11 +135,9 @@
 
   <TimelineRouteGroupingBar
     class="px-2 py-1 md:flex"
-    grouping={timelineGrouping}
+    {...timelineGrouping.barProps}
     {filters}
     resultCount={assetCount}
-    hidden={assetMultiSelectManager.selectionActive}
-    onGroupingChange={handleTimelineGroupingChange}
     onClearTemporalFilter={clearTemporalFilter}
   />
 
@@ -186,40 +149,33 @@
       onEscape={handleEscape}
       assetInteraction={assetMultiSelectManager}
       showArchiveIcon
-      grouping={timelineGrouping}
-      onGroupingChange={assetMultiSelectManager.selectionActive ? undefined : handleTimelineGroupingChange}
-      onTimelineBucketActivate={handleTimelineBucketActivate}
-      {temporalAnchor}
-      onTemporalAnchorResolved={() => (temporalAnchor = undefined)}
+      withStacked
+      {...timelineGrouping.timelineProps}
     />
   </div>
 </aside>
 
 {#if assetMultiSelectManager.selectionActive}
-  {@const Actions = getAssetBulkActions($t)}
+  {const Actions = $derived(getAssetBulkActions($t))}
+  {const StackActions = $derived(getStackBulkActions($t))}
   <CommandPaletteDefaultProvider name={$t('assets')} actions={Object.values(Actions)} />
 
   <Portal target="body">
     <AssetSelectControlBar>
-      <CreateSharedLink />
+      <ActionButton action={Actions.CreateSharedLink} />
       <SelectAllAssets {timelineManager} assetInteraction={assetMultiSelectManager} />
       <ActionButton action={Actions.AddToAlbum} />
 
-      {#if assetMultiSelectManager.isAllUserOwned}
-        <FavoriteAction
-          removeFavorite={assetMultiSelectManager.isAllFavorite}
-          onFavorite={(ids, isFavorite) => timelineManager.update(ids, (asset) => (asset.isFavorite = isFavorite))}
-        />
+      <FavoriteAction
+        removeFavorite={assetMultiSelectManager.isAllFavorite}
+        onFavorite={(ids, isFavorite) => timelineManager.update(ids, (asset) => (asset.isFavorite = isFavorite))}
+      />
 
+      {#if assetMultiSelectManager.isAllUserOwned}
         <ButtonContextMenu icon={mdiDotsVertical} title={$t('menu')}>
           <DownloadAction menuItem />
-          {#if assetMultiSelectManager.assets.length > 1 || isAssetStackSelected}
-            <StackAction
-              unstack={isAssetStackSelected}
-              onStack={(result) => updateStackedAssetInTimeline(timelineManager, result)}
-              onUnstack={(assets) => updateUnstackedAssetInTimeline(timelineManager, assets)}
-            />
-          {/if}
+          <ActionMenuItem action={StackActions.Stack} />
+          <ActionMenuItem action={StackActions.Unstack} />
           {#if isLinkActionAvailable}
             <LinkLivePhotoAction
               menuItem
@@ -227,28 +183,13 @@
               onLink={handleLink}
               onUnlink={handleUnlink}
             />
-            {#if assetMultiSelectManager.assets.length === 1}
-              <LinkLivePhotoAction
-                menuItem
-                unlink
-                deleteVideo
-                onLink={handleLink}
-                onUnlink={handleUnlink}
-                onUnlinkAndDelete={handleUnlinkAndDelete}
-              />
-            {/if}
           {/if}
           <ChangeDate menuItem />
           <ChangeDescription menuItem />
           <ChangeLocation menuItem />
-          <ArchiveAction
-            menuItem
-            unarchive={assetMultiSelectManager.isAllArchived}
-            onArchive={(ids, visibility) => timelineManager.update(ids, (asset) => (asset.visibility = visibility))}
-          />
-          {#if authManager.preferences.tags.enabled}
-            <TagAction menuItem />
-          {/if}
+          <ActionMenuItem action={Actions.Archive} />
+          <ActionMenuItem action={Actions.Unarchive} />
+          <ActionMenuItem action={Actions.Tag} />
           <DeleteAssets
             menuItem
             onAssetDelete={(assetIds) => timelineManager.removeAssets(assetIds)}

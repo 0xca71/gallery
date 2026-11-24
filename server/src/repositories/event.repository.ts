@@ -2,7 +2,6 @@ import { Injectable } from '@nestjs/common';
 import { ModuleRef, Reflector } from '@nestjs/core';
 import { orderBy } from 'lodash-es';
 import { Socket } from 'socket.io';
-import type { JobItem, JobSource, UploadFile } from 'src/types.js';
 import { Asset } from 'src/database.js';
 import { EventConfig } from 'src/decorators.js';
 import { AuthDto } from 'src/dtos/auth.dto.js';
@@ -10,6 +9,7 @@ import { SystemConfig } from 'src/dtos/config.dto.js';
 import { ImmichWorker, JobStatus, MetadataKey, QueueName, UserAvatarColor, UserStatus } from 'src/enum.js';
 import { ConfigRepository } from 'src/repositories/config.repository.js';
 import { LoggingRepository } from 'src/repositories/logging.repository.js';
+import type { JobItem, JobSource, UploadFile } from 'src/types.js';
 
 type EmitHandlers = Partial<{ [T in EmitEvent]: Array<EventItem<T>> }>;
 
@@ -56,12 +56,13 @@ type EventMap = {
   AssetTrash: [{ assetId: string; userId: string }];
   AssetDelete: [{ assetId: string; userId: string; affectedSpacePersons?: { spaceId: string; personId: string }[] }];
   AssetMetadataExtracted: [{ assetId: string; userId: string; source?: JobSource }];
-  AssetEditSave: [{ id: string; result: JobStatus }];
+  AssetOcrExtracted: [{ assetId: string; userId: string }];
 
   // asset bulk events
   AssetTrashAll: [{ assetIds: string[]; userId: string }];
   AssetDeleteAll: [{ assetIds: string[]; userId: string }];
   AssetRestoreAll: [{ assetIds: string[]; userId: string }];
+  LibraryAssetsCreate: [{ libraryId: string; assetIds: string[] }];
 
   /** a worker receives a job and emits this event to run it */
   JobRun: [QueueName, JobItem];
@@ -73,6 +74,10 @@ type EventMap = {
   JobSuccess: [JobSuccessEvent];
   /** job finishes with error */
   JobError: [JobErrorEvent];
+
+  LibraryCreate: [];
+  LibraryUpdate: [];
+  LibraryDelete: [];
 
   // queue events
   QueueStart: [QueueStartEvent];
@@ -134,7 +139,7 @@ type UserEvent = {
   isAdmin: boolean;
   shouldChangePassword: boolean;
   avatarColor: UserAvatarColor | null;
-  oauthId: string;
+  oauthId: string | null;
   storageLabel: string | null;
   quotaSizeInBytes: number | null;
   quotaUsageInBytes: number;

@@ -1,9 +1,9 @@
+import { PEOPLE_PAGE_SIZE } from '#lib/constants.ts';
+import { featureFlagsManager } from '#lib/managers/feature-flags-manager.svelte.ts';
+import { authenticate } from '#lib/utils/auth.ts';
+import { getFormatter } from '#lib/utils/i18n.ts';
+import { getPersistedPeopleFilterBy, peopleFilterToTypeParam } from '#lib/utils/people-filter.ts';
 import { getAllPeople, getPeopleStatistics } from '@immich/sdk';
-import { PEOPLE_PAGE_SIZE } from '$lib/constants';
-import { featureFlagsManager } from '$lib/managers/feature-flags-manager.svelte';
-import { authenticate } from '$lib/utils/auth';
-import { getFormatter } from '$lib/utils/i18n';
-import { getPersistedPeopleFilterBy, peopleFilterToTypeParam } from '$lib/utils/people-filter';
 import type { PageLoad } from './$types';
 
 export const load = (async ({ parent, url }) => {

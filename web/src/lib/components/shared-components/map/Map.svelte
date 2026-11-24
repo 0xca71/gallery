@@ -1,25 +1,23 @@
 <script lang="ts" module>
-  import mapboxRtlUrl from '@mapbox/mapbox-gl-rtl-text?url';
-  import { addProtocol, setRTLTextPlugin, setWorkerUrl } from 'maplibre-gl';
+  import { addProtocol, setWorkerUrl } from 'maplibre-gl';
   import workerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url';
   import { Protocol } from 'pmtiles';
 
   let protocol = new Protocol();
   setWorkerUrl(workerUrl);
   void addProtocol('pmtiles', protocol.tile);
-  void setRTLTextPlugin(mapboxRtlUrl, true);
 </script>
 
 <script lang="ts">
-  import { afterNavigate } from '$app/navigation';
-  import OnEvents from '$lib/components/OnEvents.svelte';
-  import { assetViewerManager } from '$lib/managers/asset-viewer-manager.svelte';
-  import { serverConfigManager } from '$lib/managers/server-config-manager.svelte';
-  import MapSettingsModal from '$lib/modals/MapSettingsModal.svelte';
-  import { mapSettings } from '$lib/stores/preferences.store';
-  import { getAssetMediaUrl, handlePromiseError } from '$lib/utils';
+  import OnEvents from '#lib/components/OnEvents.svelte';
+  import { assetViewerManager } from '#lib/managers/asset-viewer-manager.svelte.ts';
+  import MapSettingsModal from '#lib/modals/MapSettingsModal.svelte';
+  import { createPreloadedQuery } from '#lib/queries/client.ts';
+  import { getPublicConfigQuery } from '#lib/queries/config-public.query.ts';
+  import { mapSettings } from '#lib/stores/preferences.store.ts';
+  import { getAssetMediaUrl, handlePromiseError } from '#lib/utils.ts';
   import { getMapMarkers, getSpaceMapMarkers, type MapMarkerResponseDto } from '@immich/sdk';
-  import { Alert, Container, Icon, modalManager, Text, Theme, themeManager } from '@immich/ui';
+  import { Alert, Container, Icon, Text, Theme, modalManager, themeManager } from '@immich/ui';
   import { mdiCog, mdiImageMultiple, mdiMap, mdiMapMarker, mdiThemeLightDark } from '@mdi/js';
   import type { Feature, GeoJsonProperties, Geometry, Point } from 'geojson';
   import { isEqual, omit } from 'lodash-es';
@@ -49,7 +47,11 @@
     Popup,
     ScaleControl,
   } from 'svelte-maplibre';
+  import { afterNavigate } from '$app/navigation';
   import type { SelectionBBox } from './types';
+
+  const query = createPreloadedQuery(getPublicConfigQuery);
+  const publicConfig = $derived(query.data);
 
   interface Props {
     mapMarkers?: MapMarkerResponseDto[];
@@ -115,9 +117,7 @@
   let abortController: AbortController;
 
   const mapTheme = $derived($mapSettings.allowDarkMode ? themeManager.value : Theme.Light);
-  const styleUrl = $derived(
-    mapTheme === Theme.Dark ? serverConfigManager.value.mapDarkStyleUrl : serverConfigManager.value.mapLightStyleUrl,
-  );
+  const styleUrl = $derived(mapTheme === Theme.Dark ? publicConfig.map.darkStyle : publicConfig.map.lightStyle);
 
   export function addClipMapMarker(lng: number, lat: number) {
     if (!map) {
@@ -188,10 +188,7 @@
     }
   }
 
-  type FeaturePoint = Feature<
-    Point,
-    { id: string; city: string | null; state: string | null; country: string | null; formattedAddress?: string | null }
-  >;
+  type FeaturePoint = Feature<Point, { id: string; city: string | null; state: string | null; country: string | null }>;
 
   const asFeature = (marker: MapMarkerResponseDto): FeaturePoint => {
     return {
@@ -202,7 +199,6 @@
         city: marker.city,
         state: marker.state,
         country: marker.country,
-        formattedAddress: marker.formattedAddress,
       },
     };
   };
@@ -217,7 +213,6 @@
       city: featurePoint.properties.city,
       state: featurePoint.properties.state,
       country: featurePoint.properties.country,
-      formattedAddress: featurePoint.properties.formattedAddress,
     };
   };
 
@@ -279,7 +274,9 @@
     }
   };
 
-  afterNavigate(() => {
+  afterNavigate(({ shallow, type }) => {
+    if (shallow && type === 'goto') return;
+
     if (!map) {
       return;
     }
@@ -503,13 +500,9 @@
                 data-testid="map-marker"
               />
             {/if}
-            {#if popup || feature.properties?.formattedAddress}
-              <Popup offset={[0, -30]} openOn={popup ? 'click' : 'hover'} closeOnClickOutside>
-                {#if popup}
-                  {@render popup({ marker: asMarker(feature) })}
-                {:else}
-                  <p class="max-w-64 text-center wrap-break-word">{feature.properties?.formattedAddress}</p>
-                {/if}
+            {#if popup}
+              <Popup offset={[0, -30]} openOn="click" closeOnClickOutside>
+                {@render popup({ marker: asMarker(feature) })}
               </Popup>
             {/if}
           {/snippet}

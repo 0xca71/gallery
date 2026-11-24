@@ -1,9 +1,10 @@
+import TestWrapper from '#lib/components/TestWrapper.svelte';
+import { QueryParameter } from '#lib/constants.ts';
 import { AssetVisibility, type AssetResponseDto } from '@immich/sdk';
-import '@testing-library/jest-dom';
-import { render, screen, waitFor } from '@testing-library/svelte';
 import type { Component } from 'svelte';
-import TestWrapper from '$lib/components/TestWrapper.svelte';
-import { QueryParameter } from '$lib/constants';
+import { expect } from 'vitest';
+import { render } from 'vitest-browser-svelte';
+import { page } from 'vitest/browser';
 import SearchPage from './+page.svelte';
 
 const {
@@ -50,135 +51,128 @@ const {
   mockSearchSmart: vi.fn(),
 }));
 
-vi.mock('$app/navigation', () => ({
+vi.mock('$app/navigation', async () => ({
+  ...(await import('#test/unit/mocks/app-navigation.ts')),
+
   afterNavigate: mockAfterNavigate,
   goto: vi.fn().mockResolvedValue(undefined),
 }));
 
-vi.mock('$app/state', () => ({ page: mockPage }));
+vi.mock('$app/state', async () => ({
+  ...(await import('#test/unit/mocks/app-state.svelte.ts')),
+  page: mockPage,
+}));
 
-vi.mock('$lib/components/ActionMenuItem.svelte', async () => {
-  const { default: MockComponent } = await import('@test-data/mocks/noop-component.svelte');
+vi.mock('#lib/components/ActionMenuItem.svelte', async () => {
+  const { default: MockComponent } = await import('#lib/gallery/__mocks__/noop-component.svelte');
   return { default: MockComponent };
 });
 
-vi.mock('$lib/components/OnEvents.svelte', async () => {
-  const { default: MockComponent } = await import('@test-data/mocks/noop-component.svelte');
+vi.mock('#lib/components/OnEvents.svelte', async () => {
+  const { default: MockComponent } = await import('#lib/gallery/__mocks__/noop-component.svelte');
   return { default: MockComponent };
 });
 
-vi.mock('$lib/components/shared-components/LoadingSpinner.svelte', async () => {
-  const { default: MockComponent } = await import('@test-data/mocks/noop-component.svelte');
+vi.mock('#lib/components/shared-components/LoadingSpinner.svelte', async () => {
+  const { default: MockComponent } = await import('#lib/gallery/__mocks__/noop-component.svelte');
   return { default: MockComponent };
 });
 
-vi.mock('$lib/components/shared-components/context-menu/ButtonContextMenu.svelte', async () => {
-  const { default: MockComponent } = await import('@test-data/mocks/noop-component.svelte');
+vi.mock('#lib/components/shared-components/context-menu/ButtonContextMenu.svelte', async () => {
+  const { default: MockComponent } = await import('#lib/gallery/__mocks__/noop-component.svelte');
   return { default: MockComponent };
 });
 
-vi.mock('$lib/components/shared-components/ControlAppBar.svelte', async () => {
-  const { default: MockComponent } = await import('@test-data/mocks/noop-component.svelte');
+vi.mock('#lib/components/shared-components/ControlAppBar.svelte', async () => {
+  const { default: MockComponent } = await import('#lib/gallery/__mocks__/noop-component.svelte');
   return { default: MockComponent };
 });
 
-vi.mock('$lib/components/shared-components/gallery-viewer/GalleryViewer.svelte', async () => {
+vi.mock('#lib/components/shared-components/gallery-viewer/GalleryViewer.svelte', async () => {
   const { default: MockComponent } = await import('./mock-gallery-viewer.test-wrapper.svelte');
   return { default: MockComponent };
 });
 
-vi.mock('$lib/components/timeline/AssetSelectControlBar.svelte', async () => {
-  const { default: MockComponent } = await import('@test-data/mocks/noop-component.svelte');
+vi.mock('#lib/components/timeline/AssetSelectControlBar.svelte', async () => {
+  const { default: MockComponent } = await import('#lib/gallery/__mocks__/noop-component.svelte');
   return { default: MockComponent };
 });
 
-vi.mock('$lib/components/timeline/actions/ArchiveAction.svelte', async () => {
-  const { default: MockComponent } = await import('@test-data/mocks/noop-component.svelte');
+vi.mock('#lib/gallery/actions/ArchiveAction.svelte', async () => {
+  const { default: MockComponent } = await import('#lib/gallery/__mocks__/noop-component.svelte');
   return { default: MockComponent };
 });
 
-vi.mock('$lib/components/timeline/actions/ChangeDateAction.svelte', async () => {
-  const { default: MockComponent } = await import('@test-data/mocks/noop-component.svelte');
+vi.mock('#lib/components/timeline/actions/ChangeDateAction.svelte', async () => {
+  const { default: MockComponent } = await import('#lib/gallery/__mocks__/noop-component.svelte');
   return { default: MockComponent };
 });
 
-vi.mock('$lib/components/timeline/actions/ChangeDescriptionAction.svelte', async () => {
-  const { default: MockComponent } = await import('@test-data/mocks/noop-component.svelte');
+vi.mock('#lib/components/timeline/actions/ChangeDescriptionAction.svelte', async () => {
+  const { default: MockComponent } = await import('#lib/gallery/__mocks__/noop-component.svelte');
   return { default: MockComponent };
 });
 
-vi.mock('$lib/components/timeline/actions/ChangeLocationAction.svelte', async () => {
-  const { default: MockComponent } = await import('@test-data/mocks/noop-component.svelte');
+vi.mock('#lib/components/timeline/actions/ChangeLocationAction.svelte', async () => {
+  const { default: MockComponent } = await import('#lib/gallery/__mocks__/noop-component.svelte');
   return { default: MockComponent };
 });
 
-vi.mock('$lib/components/timeline/actions/CreateSharedLinkAction.svelte', async () => {
-  const { default: MockComponent } = await import('@test-data/mocks/noop-component.svelte');
+vi.mock('#lib/components/timeline/actions/DeleteAssetsAction.svelte', async () => {
+  const { default: MockComponent } = await import('#lib/gallery/__mocks__/noop-component.svelte');
   return { default: MockComponent };
 });
 
-vi.mock('$lib/components/timeline/actions/DeleteAssetsAction.svelte', async () => {
-  const { default: MockComponent } = await import('@test-data/mocks/noop-component.svelte');
+vi.mock('#lib/components/timeline/actions/DownloadAction.svelte', async () => {
+  const { default: MockComponent } = await import('#lib/gallery/__mocks__/noop-component.svelte');
   return { default: MockComponent };
 });
 
-vi.mock('$lib/components/timeline/actions/DownloadAction.svelte', async () => {
-  const { default: MockComponent } = await import('@test-data/mocks/noop-component.svelte');
+vi.mock('#lib/components/timeline/actions/FavoriteAction.svelte', async () => {
+  const { default: MockComponent } = await import('#lib/gallery/__mocks__/noop-component.svelte');
   return { default: MockComponent };
 });
 
-vi.mock('$lib/components/timeline/actions/FavoriteAction.svelte', async () => {
-  const { default: MockComponent } = await import('@test-data/mocks/noop-component.svelte');
+vi.mock('#lib/components/timeline/actions/RotateAction.svelte', async () => {
+  const { default: MockComponent } = await import('#lib/gallery/__mocks__/noop-component.svelte');
   return { default: MockComponent };
 });
 
-vi.mock('$lib/components/timeline/actions/RotateAction.svelte', async () => {
-  const { default: MockComponent } = await import('@test-data/mocks/noop-component.svelte');
+vi.mock('#lib/components/timeline/actions/SetVisibilityAction.svelte', async () => {
+  const { default: MockComponent } = await import('#lib/gallery/__mocks__/noop-component.svelte');
   return { default: MockComponent };
 });
 
-vi.mock('$lib/components/timeline/actions/SetVisibilityAction.svelte', async () => {
-  const { default: MockComponent } = await import('@test-data/mocks/noop-component.svelte');
+vi.mock('#lib/components/timeline/actions/TagAction.svelte', async () => {
+  const { default: MockComponent } = await import('#lib/gallery/__mocks__/noop-component.svelte');
   return { default: MockComponent };
 });
 
-vi.mock('$lib/components/timeline/actions/TagAction.svelte', async () => {
-  const { default: MockComponent } = await import('@test-data/mocks/noop-component.svelte');
-  return { default: MockComponent };
-});
-
-vi.mock('$lib/managers/asset-multi-select-manager.svelte', () => ({
+vi.mock('#lib/managers/asset-multi-select-manager.svelte.js', () => ({
   assetMultiSelectManager: mockAssetMultiSelectManager,
 }));
 
-vi.mock('$lib/managers/auth-manager.svelte', () => ({ authManager: mockAuthManager }));
+vi.mock('#lib/managers/auth-manager.svelte.js', () => ({ authManager: mockAuthManager }));
 
-vi.mock('$lib/managers/command-context-manager.svelte', () => ({
+vi.mock('#lib/managers/command-context-manager.svelte.js', () => ({
   registerSelectionContext: mockRegisterSelectionContext,
 }));
 
-vi.mock('$lib/managers/feature-flags-manager.svelte', () => ({
+vi.mock('#lib/managers/feature-flags-manager.svelte.js', () => ({
   featureFlagsManager: mockFeatureFlagsManager,
 }));
 
-vi.mock('$lib/managers/global-search-manager.svelte', () => ({
+vi.mock('#lib/managers/global-search-manager.svelte.js', () => ({
   globalSearchManager: mockGlobalSearchManager,
 }));
 
-vi.mock('$lib/services/asset.service', () => ({
+vi.mock('#lib/services/asset.service.js', () => ({
   getAssetBulkActions: vi.fn(() => ({})),
 }));
 
-vi.mock('$lib/utils/navigation', () => ({
-  isAlbumsRoute: vi.fn(() => false),
-  isPeopleRoute: vi.fn(() => false),
-}));
+vi.mock('#lib/utils/navigation.js', { spy: true });
 
-vi.mock('$lib/utils/timeline-util', () => ({
-  isTimelineAsset: vi.fn(Boolean),
-  isTimelineAssets: vi.fn((assets) => Array.isArray(assets)),
-  toTimelineAsset: vi.fn((asset) => asset),
-}));
+vi.mock('#lib/utils/timeline-util.js', { spy: true });
 
 vi.mock('@immich/sdk', async () => {
   const actual = await vi.importActual<typeof import('@immich/sdk')>('@immich/sdk');
@@ -232,8 +226,8 @@ describe('Search page cmdk selection context', () => {
     });
   });
 
-  it('registers add-to-album and visible toolbar callbacks', () => {
-    renderPage();
+  it('registers add-to-album and visible toolbar callbacks', async () => {
+    await renderPage();
 
     expect(mockRegisterSelectionContext).toHaveBeenCalledOnce();
     const options = mockRegisterSelectionContext.mock.calls[0][0];
@@ -250,20 +244,20 @@ describe('Search page cmdk selection context', () => {
     const query = encodeURIComponent(JSON.stringify({ visibility: AssetVisibility.Timeline }));
     mockPage.url = new URL(`https://gallery.test/search?${QueryParameter.QUERY}=${query}`);
 
-    renderPage();
+    await renderPage();
 
-    await waitFor(() => expect(screen.getByTestId('asset-row-asset-1')).toBeInTheDocument());
+    await expect.element(page.getByTestId('asset-row-asset-1')).toBeInTheDocument();
     const options = mockRegisterSelectionContext.mock.calls[0][0];
 
     options.getOnArchive()(['asset-1'], AssetVisibility.Archive);
 
-    await waitFor(() => expect(screen.queryByTestId('asset-row-asset-1')).not.toBeInTheDocument());
+    await expect.element(page.getByTestId('asset-row-asset-1')).not.toBeInTheDocument();
   });
 
   it('enables GalleryViewer grouping for legacy search result grids', async () => {
-    renderPage();
+    await renderPage();
 
-    await waitFor(() => expect(screen.getByTestId('gallery-viewer')).toHaveAttribute('data-enable-grouping', 'true'));
+    await expect.element(page.getByTestId('gallery-viewer')).toHaveAttribute('data-enable-grouping', 'true');
   });
 
   // #830: "Show similar photos" on a photo shared through a Space returned nothing for a member
@@ -275,11 +269,39 @@ describe('Search page cmdk selection context', () => {
     const query = encodeURIComponent(JSON.stringify({ queryAssetId: 'asset-1' }));
     mockPage.url = new URL(`https://gallery.test/search?${QueryParameter.QUERY}=${query}`);
 
-    renderPage();
+    await renderPage();
 
-    await waitFor(() => {
+    await vi.waitFor(() => {
       expect(mockSearchSmart).toHaveBeenCalledWith({
         smartSearchDto: expect.objectContaining({ queryAssetId: 'asset-1', withSharedSpaces: true }),
+      });
+    });
+  });
+
+  // A hand-typed or shared `/search?query=beach` is plain text, not the JSON the page writes itself.
+  // JSON.parse used to throw on it and blank the whole page.
+  it('treats a plain-text query parameter as a smart search instead of crashing', async () => {
+    mockFeatureFlagsManager.value.smartSearch = true;
+    mockPage.url = new URL(`https://gallery.test/search?${QueryParameter.QUERY}=beach`);
+
+    await renderPage();
+
+    await vi.waitFor(() => {
+      expect(mockSearchSmart).toHaveBeenCalledWith({
+        smartSearchDto: expect.objectContaining({ query: 'beach' }),
+      });
+    });
+  });
+
+  it('treats non-object JSON in the query parameter as text', async () => {
+    mockFeatureFlagsManager.value.smartSearch = true;
+    mockPage.url = new URL(`https://gallery.test/search?${QueryParameter.QUERY}=42`);
+
+    await renderPage();
+
+    await vi.waitFor(() => {
+      expect(mockSearchSmart).toHaveBeenCalledWith({
+        smartSearchDto: expect.objectContaining({ query: '42' }),
       });
     });
   });
@@ -288,9 +310,9 @@ describe('Search page cmdk selection context', () => {
     const query = encodeURIComponent(JSON.stringify({ city: 'Berlin' }));
     mockPage.url = new URL(`https://gallery.test/search?${QueryParameter.QUERY}=${query}`);
 
-    renderPage();
+    await renderPage();
 
-    await waitFor(() => {
+    await vi.waitFor(() => {
       expect(mockSearchAssets).toHaveBeenCalledWith({
         metadataSearchDto: expect.objectContaining({ city: 'Berlin', withSharedSpaces: true }),
       });
@@ -304,9 +326,9 @@ describe('Search page cmdk selection context', () => {
     const query = encodeURIComponent(JSON.stringify({ query: 'beach', spaceId: 'space-1' }));
     mockPage.url = new URL(`https://gallery.test/search?${QueryParameter.QUERY}=${query}`);
 
-    renderPage();
+    await renderPage();
 
-    await waitFor(() => expect(mockSearchSmart).toHaveBeenCalled());
+    await vi.waitFor(() => expect(mockSearchSmart).toHaveBeenCalled());
     expect(mockSearchSmart.mock.calls[0][0].smartSearchDto).not.toHaveProperty('withSharedSpaces');
   });
 
@@ -314,9 +336,9 @@ describe('Search page cmdk selection context', () => {
     const query = encodeURIComponent(JSON.stringify({ city: 'Berlin', withSharedSpaces: false }));
     mockPage.url = new URL(`https://gallery.test/search?${QueryParameter.QUERY}=${query}`);
 
-    renderPage();
+    await renderPage();
 
-    await waitFor(() => {
+    await vi.waitFor(() => {
       expect(mockSearchAssets).toHaveBeenCalledWith({
         metadataSearchDto: expect.objectContaining({ withSharedSpaces: false }),
       });
@@ -337,9 +359,9 @@ describe('Search page cmdk selection context', () => {
       },
     ]);
 
-    renderPage();
+    await renderPage();
 
-    await waitFor(() => {
+    await vi.waitFor(() => {
       expect(mockSearchAssets).toHaveBeenCalledWith({
         metadataSearchDto: expect.objectContaining({
           personIds: ['space-person:space-person-1'],
@@ -347,8 +369,8 @@ describe('Search page cmdk selection context', () => {
         }),
       });
     });
-    await waitFor(() => expect(screen.getByText('Pierre')).toBeInTheDocument());
-    expect(screen.queryByText('withSharedSpaces')).not.toBeInTheDocument();
+    await expect.element(page.getByText('Pierre')).toBeInTheDocument();
+    await expect.element(page.getByText('withSharedSpaces')).not.toBeInTheDocument();
     expect(mockGetPerson).not.toHaveBeenCalledWith({ id: 'space-person:space-person-1' });
   });
 });

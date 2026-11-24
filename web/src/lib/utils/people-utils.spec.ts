@@ -1,20 +1,21 @@
-import { AssetTypeEnum } from '@immich/sdk';
-import { get } from 'svelte/store';
-import type { Faces } from '$lib/managers/asset-viewer-manager.svelte';
-import { PeopleSortBy, peopleViewSettings } from '$lib/stores/preferences.store';
-import type { Size } from '$lib/utils/container-utils';
+import { PeopleSortBy, peopleViewSettings } from '#lib/gallery/stores/preferences.store.ts';
+import type { Faces } from '#lib/managers/asset-viewer-manager.svelte.ts';
+import type { Size } from '#lib/utils/container-utils.ts';
 import {
   appendUniqueById,
   clampFaceBoxToImage,
-  type FaceBox,
   getAdminFacePreviewUrl,
   getBoundingBox,
   getFaceCropTransform,
   isUsableFaceBox,
+  orderPickerCandidates,
   sortPeople,
   sortPeopleForManagement,
   zoomImageToBase64,
-} from '$lib/utils/people-utils';
+  type FaceBox,
+} from '#lib/utils/people-utils.ts';
+import { AssetTypeEnum } from '@immich/sdk';
+import { get } from 'svelte/store';
 
 const makeFace = (overrides: Partial<Faces> = {}): Faces => ({
   id: 'face-1',
@@ -248,6 +249,7 @@ describe('getBoundingBox', () => {
       left: 800 * (1000 / 4000),
       width: 800 * (2000 / 4000) - 800 * (1000 / 4000),
       height: 600 * (1500 / 3000) - 600 * (750 / 3000),
+      labelWidth: 800 * (2000 / 4000) - 800 * (1000 / 4000),
     });
   });
 
@@ -270,6 +272,7 @@ describe('getBoundingBox', () => {
       left: 0,
       width: 600,
       height: 600,
+      labelWidth: 600,
     });
   });
 
@@ -330,9 +333,49 @@ describe('getFaceCropTransform', () => {
 });
 
 describe(zoomImageToBase64.name, () => {
+  beforeEach(() => {
+    // A server without the face crop route, so video faces fall back to cropping the poster thumbnail.
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(null, { status: 404 })));
+  });
+
   afterEach(() => {
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+  });
+
+  it("uses the server's crop of a video face, cut from its best frame, when the server has one", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(new Blob(['jpeg'], { type: 'image/jpeg' })));
+    vi.stubGlobal('fetch', fetchMock);
+    const imageSpy = vi.fn();
+    vi.stubGlobal('Image', imageSpy);
+
+    const crop = await zoomImageToBase64(makeFace(), 'asset-1', AssetTypeEnum.Video, undefined);
+
+    expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining('/faces/face-1/thumbnail'));
+    expect(crop).toMatch(/^data:image\/jpeg;base64,/);
+    expect(imageSpy).not.toHaveBeenCalled();
+  });
+
+  it('asks for a new crop when a refresh moved the face, so the browser never shows the old frame', async () => {
+    const fetchMock = vi.fn().mockImplementation(() => new Response(new Blob(['jpeg'], { type: 'image/jpeg' })));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await zoomImageToBase64(makeFace(), 'asset-1', AssetTypeEnum.Video, undefined);
+    await zoomImageToBase64(makeFace({ boundingBoxX1: 1010 }), 'asset-1', AssetTypeEnum.Video, undefined);
+    await zoomImageToBase64(makeFace(), 'asset-1', AssetTypeEnum.Video, undefined);
+
+    const [first, moved, again] = fetchMock.mock.calls.map(([url]) => url);
+    expect(moved).not.toBe(first);
+    expect(again).toBe(first);
+  });
+
+  it('never asks the server for a photo face, which is cropped from the full image on screen', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    await zoomImageToBase64(makeFace(), 'asset-1', AssetTypeEnum.Image, undefined);
+
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it('sets anonymous CORS before loading video thumbnails and face crop images', async () => {
@@ -560,5 +603,42 @@ describe('getFaceCropTransform (regression)', () => {
     });
 
     expect(transform).toEqual({ backgroundSize: 'cover', backgroundPosition: 'center' });
+  });
+});
+
+describe('orderPickerCandidates', () => {
+  it('puts named people ahead of unnamed clusters', () => {
+    const ordered = orderPickerCandidates([
+      { id: 'p-1', name: '' },
+      { id: 'p-2', name: 'Bob' },
+      { id: 'p-3', name: '' },
+      { id: 'p-4', name: 'Carol' },
+    ]);
+
+    expect(ordered.map((candidate) => candidate.id)).toEqual(['p-2', 'p-4', 'p-1', 'p-3']);
+  });
+
+  // The owner's picker asks for `closestAssetId`, so its incoming order is "looks most like this
+  // face" -- the single most useful signal it has. The partition must be STABLE so that signal
+  // survives inside each group: the likeliest named person stays first, and the wall of unnamed
+  // clusters simply moves below it rather than being re-sorted or dropped.
+  it('keeps the incoming order within each group', () => {
+    const ordered = orderPickerCandidates([
+      { id: 'p-1', name: 'Zoe' },
+      { id: 'p-2', name: 'Adam' },
+      { id: 'p-3', name: '' },
+      { id: 'p-4', name: '' },
+    ]);
+
+    expect(ordered.map((candidate) => candidate.id)).toEqual(['p-1', 'p-2', 'p-3', 'p-4']);
+  });
+
+  it('treats a whitespace-only name as unnamed', () => {
+    const ordered = orderPickerCandidates([
+      { id: 'p-1', name: ' '.repeat(3) },
+      { id: 'p-2', name: 'Bob' },
+    ]);
+
+    expect(ordered.map((candidate) => candidate.id)).toEqual(['p-2', 'p-1']);
   });
 });

@@ -1,19 +1,19 @@
 // collection.service.spec.ts
+import type { PickerCollection } from '#lib/components/shared-components/collection-selection/collection-selection-utils.ts';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { PickerCollection } from '$lib/components/shared-components/collection-selection/collection-selection-utils';
 import { addAssetsToCollections } from './collection.service';
 
 const addAssetsToAlbums = vi.fn();
 const addAssetsToSpace = vi.fn();
 const primary = vi.fn();
 
-vi.mock('$lib/services/album.service', () => ({ addAssetsToAlbums: (...a: unknown[]) => addAssetsToAlbums(...a) }));
-vi.mock('$lib/services/space.service', () => ({ addAssetsToSpace: (...a: unknown[]) => addAssetsToSpace(...a) }));
+vi.mock('#lib/gallery/album/album-add.js', () => ({ addAssetsToAlbums: (...a: unknown[]) => addAssetsToAlbums(...a) }));
+vi.mock('#lib/services/space.service.js', () => ({ addAssetsToSpace: (...a: unknown[]) => addAssetsToSpace(...a) }));
 // #1041: the service resolves the caller's own member row to decide hiddenFromMyTimeline. Literal
 // rather than MY_USER_ID — vi.mock factories are hoisted above const declarations.
-vi.mock('$lib/managers/auth-manager.svelte', () => ({ authManager: { user: { id: 'user-me' } } }));
+vi.mock('#lib/managers/auth-manager.svelte.js', () => ({ authManager: { user: { id: 'user-me' } } }));
 vi.mock('@immich/ui', () => ({ toastManager: { primary: (...a: unknown[]) => primary(...a) } }));
-vi.mock('$lib/utils/i18n', () => ({
+vi.mock('#lib/utils/i18n.js', () => ({
   getFormatter: () =>
     Promise.resolve((key: string, opts?: { values?: { count?: number } }) => `${key}:${opts?.values?.count ?? ''}`),
 }));
@@ -21,6 +21,7 @@ vi.mock('$lib/utils/i18n', () => ({
 const albumCol = (id: string): PickerCollection =>
   ({ kind: 'album', id, name: id, album: { id } }) as unknown as PickerCollection;
 const MY_USER_ID = 'user-me';
+// eslint-disable-next-line unicorn/no-unnecessary-parameters
 const spaceCol = (id: string): PickerCollection =>
   ({ kind: 'space', id, name: id, space: { id } }) as unknown as PickerCollection;
 /** A space the signed-in user has hidden from their own timeline (#1041). */
@@ -107,6 +108,51 @@ describe('addAssetsToCollections', () => {
     await expect(addAssetsToCollections([albumCol('a1'), spaceCol('s1')], assetIds)).resolves.toBe(true);
     expect(addAssetsToSpace).not.toHaveBeenCalled();
     expect(addAssetsToAlbums).toHaveBeenCalledWith(['a1'], assetIds, { notify: true }); // total becomes 1 → single path
+  });
+
+  it('applies the space cap to spaceAssetIds, not to the full selection', async () => {
+    const assetIds = Array.from({ length: 50_001 }, (_, i) => `x${i}`);
+    const spaceAssetIds = assetIds.slice(0, 50_000);
+    await expect(addAssetsToCollections([spaceCol('s1')], assetIds, { spaceAssetIds })).resolves.toBe(true);
+    expect(addAssetsToSpace).toHaveBeenCalledWith('s1', spaceAssetIds, { notify: true, hiddenFromMyTimeline: false });
+  });
+
+  it('drops spaces when spaceAssetIds itself is over the cap', async () => {
+    const spaceAssetIds = Array.from({ length: 50_001 }, (_, i) => `x${i}`);
+    await expect(addAssetsToCollections([albumCol('a1'), spaceCol('s1')], ['a'], { spaceAssetIds })).resolves.toBe(
+      true,
+    );
+    expect(addAssetsToSpace).not.toHaveBeenCalled();
+    expect(addAssetsToAlbums).toHaveBeenCalledWith(['a1'], ['a'], { notify: true });
+  });
+
+  it('spaceAssetIds narrows what spaces receive while albums keep the full selection', async () => {
+    await expect(
+      addAssetsToCollections([albumCol('a1'), spaceCol('s1')], ['mine', 'theirs'], { spaceAssetIds: ['mine'] }),
+    ).resolves.toBe(true);
+    expect(addAssetsToAlbums).toHaveBeenCalledWith(['a1'], ['mine', 'theirs'], { notify: false });
+    expect(addAssetsToSpace).toHaveBeenCalledWith('s1', ['mine'], { notify: false, hiddenFromMyTimeline: false });
+  });
+
+  it('single space with spaceAssetIds receives only those ids', async () => {
+    await expect(
+      addAssetsToCollections([spaceCol('s1')], ['mine', 'theirs'], { spaceAssetIds: ['mine'] }),
+    ).resolves.toBe(true);
+    expect(addAssetsToSpace).toHaveBeenCalledWith('s1', ['mine'], { notify: true, hiddenFromMyTimeline: false });
+  });
+
+  it('skips spaces when spaceAssetIds is empty, still adding to albums', async () => {
+    await expect(
+      addAssetsToCollections([albumCol('a1'), spaceCol('s1')], ['theirs'], { spaceAssetIds: [] }),
+    ).resolves.toBe(true);
+    expect(addAssetsToSpace).not.toHaveBeenCalled();
+    expect(addAssetsToAlbums).toHaveBeenCalledWith(['a1'], ['theirs'], { notify: true });
+  });
+
+  it('spaces-only selection with empty spaceAssetIds is a no-op and returns true', async () => {
+    await expect(addAssetsToCollections([spaceCol('s1')], ['theirs'], { spaceAssetIds: [] })).resolves.toBe(true);
+    expect(addAssetsToSpace).not.toHaveBeenCalled();
+    expect(primary).not.toHaveBeenCalled();
   });
 
   it('empty selection is a no-op and returns true', async () => {

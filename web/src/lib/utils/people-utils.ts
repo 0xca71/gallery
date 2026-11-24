@@ -1,10 +1,11 @@
+import { fetchVideoFaceCrop } from '#lib/gallery/people/video-face-crop.ts';
+import { PeopleSortBy } from '#lib/gallery/stores/preferences.store.ts';
+import type { Faces } from '#lib/managers/asset-viewer-manager.svelte.ts';
+import { createUrl, getAssetMediaUrl } from '#lib/utils.ts';
+import { mapNormalizedRectToContent, type ContentMetrics, type Rect, type Size } from '#lib/utils/container-utils.ts';
 import { AssetTypeEnum } from '@immich/sdk';
-import type { Faces } from '$lib/managers/asset-viewer-manager.svelte';
-import { PeopleSortBy } from '$lib/stores/preferences.store';
-import { createUrl, getAssetMediaUrl } from '$lib/utils';
-import { mapNormalizedRectToContent, type ContentMetrics, type Rect, type Size } from '$lib/utils/container-utils';
 
-export type BoundingBox = Rect & { id: string };
+export type BoundingBox = Rect & { id: string; labelWidth: number };
 export type SortablePerson = {
   id: string;
   name?: string | null;
@@ -64,15 +65,15 @@ export function sortPeople<T extends SortablePerson>(people: T[], sortBy: People
 }
 
 /**
- * Appends a freshly fetched page onto the already-loaded rows, skipping ids that are present.
- *
- * Paginated people lists render in a keyed `{#each}`, and a single repeated id throws
- * `each_key_duplicate` — which stops the block updating for the rest of the session, so the grid
- * freezes while requests keep firing. The server pages with OFFSET over an ordering that keys on
- * favourite status, name and visible asset count, so a rename or a background face job between two
- * page requests can shift the window and re-emit a row an earlier page already returned. Existing
- * rows win, because they may carry edits made since they were fetched.
- */
+Appends a freshly fetched page onto the already-loaded rows, skipping ids that are present.
+
+Paginated people lists render in a keyed `{#each}`, and a single repeated id throws
+`each_key_duplicate` — which stops the block updating for the rest of the session, so the grid
+freezes while requests keep firing. The server pages with OFFSET over an ordering that keys on
+favourite status, name and visible asset count, so a rename or a background face job between two
+page requests can shift the window and re-emit a row an earlier page already returned. Existing
+rows win, because they may carry edits made since they were fetched.
+*/
 export function appendUniqueById<T extends { id: string }>(existing: T[], incoming: T[]): T[] {
   const seen = new Set(existing.map((item) => item.id));
   const additions: T[] = [];
@@ -105,6 +106,33 @@ export const getPersonFaceThumbnailUrl = (personId: string, faceId: string, upda
 export const getSpacePersonFaceThumbnailUrl = (spaceId: string, personId: string, faceId: string, updatedAt?: string) =>
   createUrl(`/shared-spaces/${spaceId}/people/${personId}/faces/${faceId}/thumbnail`, { updatedAt });
 
+/**
+Order face-picker candidates so the people who have a name come first.
+
+Both pickers behind `PersonPickerPanel` list unnamed clusters alongside named people, because
+attaching a face to an existing unnamed cluster is a real move (it merges two sightings of the
+same stranger). But a library holds far more unnamed clusters than named people, so leaving them
+interleaved buries every name — reported on #992 as "an unstructured list of unlabeled faces
+instead of the named people list".
+
+A BACKSTOP rather than the mechanism: all three sources now arrive named-first on their own — the
+owner's list (`getAllForUser`, alphabetical), the space list (`getPersonsBySpaceId`) and a name
+search (every result has a name by construction). This keeps the invariant the picker rests on
+true at the point of rendering rather than depending on three separate queries continuing to
+agree about it.
+
+The partition is STABLE, so whatever order the caller arrived with survives inside each group —
+alphabetical stays alphabetical.
+*/
+export function orderPickerCandidates<T extends { name: string }>(candidates: T[]): T[] {
+  const named: T[] = [];
+  const unnamed: T[] = [];
+  for (const candidate of candidates) {
+    (candidate.name.trim() ? named : unnamed).push(candidate);
+  }
+  return [...named, ...unnamed];
+}
+
 // Admin cleanup + resolutions surfaces render clusters the admin does not own — the person-scoped
 // thumbnail routes above 404/403 for those. Face-keyed, admin-gated, no person join required.
 export const getAdminFaceThumbnailUrl = (assetFaceId: string, updatedAt?: string) =>
@@ -125,7 +153,7 @@ export const getBoundingBox = (faces: Faces[], imageSize: Size | ContentMetrics)
       imageSize,
     );
 
-    boxes.push({ id: face.id, ...rect });
+    boxes.push({ id: face.id, ...rect, labelWidth: rect.width });
   }
 
   return boxes;
@@ -141,17 +169,17 @@ export type FaceBox = {
 };
 
 /**
- * Whether a face box can be mapped onto its image at all. `getBoundingBox` divides by imageWidth/imageHeight
- * without validating, so a legacy row with 0 dimensions yields NaN and an inverted box yields a negative
- * rect — both render as garbage rather than failing loudly.
- *
- * `Number.isFinite` rather than `bw <= 0`: imageWidth/imageHeight can be 0, and 0/0 is NaN. `!(NaN > 0)` is
- * true but `NaN <= 0` is false, so the obvious rewrite the linter suggests would silently drop the NaN
- * guard. This form also catches ±Infinity explicitly.
- *
- * Deliberately has NO upper bound: a box covering the whole frame is a perfectly renderable overlay.
- * `getFaceCropTransform` adds its own `>= 1` rejection on top, because a full-frame CSS crop is degenerate.
- */
+Whether a face box can be mapped onto its image at all. `getBoundingBox` divides by imageWidth/imageHeight
+without validating, so a legacy row with 0 dimensions yields NaN and an inverted box yields a negative
+rect — both render as garbage rather than failing loudly.
+
+`Number.isFinite` rather than `bw <= 0`: imageWidth/imageHeight can be 0, and 0/0 is NaN. `!(NaN > 0)` is
+true but `NaN <= 0` is false, so the obvious rewrite the linter suggests would silently drop the NaN
+guard. This form also catches ±Infinity explicitly.
+
+Deliberately has NO upper bound: a box covering the whole frame is a perfectly renderable overlay.
+`getFaceCropTransform` adds its own `>= 1` rejection on top, because a full-frame CSS crop is degenerate.
+*/
 export const isUsableFaceBox = (face: FaceBox): boolean => {
   const bw = (face.boundingBoxX2 - face.boundingBoxX1) / face.imageWidth;
   const bh = (face.boundingBoxY2 - face.boundingBoxY1) / face.imageHeight;
@@ -170,10 +198,10 @@ export const clampFaceBoxToImage = (face: FaceBox): FaceBox => ({
 export type FaceCropTransform = { backgroundSize: string; backgroundPosition: string };
 
 /**
- * CSS background size/position that reveals exactly the face sub-rectangle of an image
- * inside a square container. Non-uniform scale is intentional for compact preview crops;
- * the review modal shows the undistorted full photo separately.
- */
+CSS background size/position that reveals exactly the face sub-rectangle of an image
+inside a square container. Non-uniform scale is intentional for compact preview crops;
+the review modal shows the undistorted full photo separately.
+*/
 export const getFaceCropTransform = (face: FaceBox): FaceCropTransform => {
   const bw = (face.boundingBoxX2 - face.boundingBoxX1) / face.imageWidth;
   const bh = (face.boundingBoxY2 - face.boundingBoxY1) / face.imageHeight;
@@ -203,6 +231,10 @@ export const zoomImageToBase64 = async (
   if (assetType === AssetTypeEnum.Image) {
     image = photoViewer;
   } else if (assetType === AssetTypeEnum.Video) {
+    const serverCrop = await fetchVideoFaceCrop(face);
+    if (serverCrop) {
+      return serverCrop;
+    }
     const data = getAssetMediaUrl({ id: assetId });
     const img: HTMLImageElement = new Image();
     img.crossOrigin = 'anonymous';

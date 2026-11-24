@@ -1,9 +1,11 @@
 // album.service.spec.ts
-import { BulkIdErrorReason, type AlbumResponseDto } from '@immich/sdk';
-import type { BulkIdResponseDto } from '@immich/sdk';
+import { addAssetsToAlbumWithOutcome } from '#lib/gallery/album/album-add.ts';
+import { handleLinkAlbumToSpace } from '#lib/gallery/album/link-album-to-space.ts';
+import { notifyAddToAlbum } from '#lib/gallery/album/notify-add-to-album.ts';
+import SpacePickerModal from '#lib/modals/SpacePickerModal.svelte';
+import { AlbumUserRole, BulkIdErrorReason, type AlbumResponseDto, type BulkIdResponseDto } from '@immich/sdk';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import SpacePickerModal from '$lib/modals/SpacePickerModal.svelte';
-import { addAssetsToAlbumWithOutcome, handleLinkAlbumToSpace, notifyAddToAlbum } from './album.service';
+import { getAlbumActions } from './album.service';
 
 const linkAlbum = vi.fn();
 const showModal = vi.fn();
@@ -21,10 +23,10 @@ vi.mock('@immich/sdk', async (orig) => ({
   addAssetsToAlbum: (...a: unknown[]) => addAssetToAlbum(...a),
 }));
 
-vi.mock('$lib/managers/event-manager.svelte', () => ({
+vi.mock('#lib/managers/event-manager.svelte.js', () => ({
   eventManager: { emit: (...a: unknown[]) => emit(...a), on: () => () => {} },
 }));
-vi.mock('$lib/managers/auth-manager.svelte', () => ({ authManager: { params: {} } }));
+vi.mock('#lib/managers/auth-manager.svelte.js', () => ({ authManager: { params: {}, user: { id: 'me' } } }));
 
 vi.mock('@immich/ui', async (orig) => ({
   ...(await orig<typeof import('@immich/ui')>()),
@@ -36,10 +38,10 @@ vi.mock('@immich/ui', async (orig) => ({
   },
 }));
 
-vi.mock('$lib/utils/handle-error', () => ({ handleError: (...a: unknown[]) => handleError(...a) }));
+vi.mock('#lib/utils/handle-error.js', () => ({ handleError: (...a: unknown[]) => handleError(...a) }));
 
-vi.mock('$lib/utils/i18n', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('$lib/utils/i18n')>()),
+vi.mock('#lib/utils/i18n.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('#lib/utils/i18n.ts')>()),
   getFormatter: () =>
     Promise.resolve(
       (key: string, opts?: { values?: Record<string, unknown> }) => `${key}:${JSON.stringify(opts?.values ?? {})}`,
@@ -189,5 +191,38 @@ describe('addAssetsToAlbumWithOutcome', () => {
     expect(outcome).toEqual({ ok: false, addedIds: [], deniedIds: [] });
     expect(emit).not.toHaveBeenCalled();
     expect(handleError).toHaveBeenCalled();
+  });
+});
+
+describe('getAlbumActions Leave', () => {
+  const $t = ((key: string) => key) as unknown as Parameters<typeof getAlbumActions>[0];
+  const album = (albumUsers: Array<{ id: string; role: AlbumUserRole }>) =>
+    ({ id: 'album-1', albumUsers: albumUsers.map(({ id, role }) => ({ user: { id }, role })) }) as AlbumResponseDto;
+  const canLeave = (a: AlbumResponseDto) => getAlbumActions($t, a).Leave.$if?.() ?? true;
+
+  it('is offered to an album user the album was shared with', () => {
+    expect(
+      canLeave(
+        album([
+          { id: 'owner', role: AlbumUserRole.Owner },
+          { id: 'me', role: AlbumUserRole.Viewer },
+        ]),
+      ),
+    ).toBe(true);
+  });
+
+  it('is not offered to the owner', () => {
+    expect(canLeave(album([{ id: 'me', role: AlbumUserRole.Owner }]))).toBe(false);
+  });
+
+  it('is not offered to a reader who reaches the album only through a Space link', () => {
+    expect(
+      canLeave(
+        album([
+          { id: 'owner', role: AlbumUserRole.Owner },
+          { id: 'someone-else', role: AlbumUserRole.Editor },
+        ]),
+      ),
+    ).toBe(false);
   });
 });

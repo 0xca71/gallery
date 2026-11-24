@@ -1,9 +1,18 @@
 import { WorkflowTrigger } from '@immich/plugin-sdk';
 import z from 'zod';
+import { asIntegerEnum } from 'src/utils/helpers.js';
+
+export * from 'src/gallery/enum.js';
 
 export enum AuthType {
   Password = 'password',
   OAuth = 'oauth',
+  Passkey = 'passkey',
+}
+
+export enum AuthChallengeType {
+  PasskeyRegistration = 'PasskeyRegistration',
+  PasskeyAuthentication = 'PasskeyAuthentication',
 }
 
 export enum ImmichCookie {
@@ -52,9 +61,7 @@ export enum ChecksumAlgorithm {
 }
 
 export enum AssetFileType {
-  /**
-   * An full/large-size image extracted/converted from RAW photos
-   */
+  /** An full/large-size image extracted/converted from RAW photos */
   FullSize = 'fullsize',
   Preview = 'preview',
   Thumbnail = 'thumbnail',
@@ -72,29 +79,6 @@ export enum AlbumUserRole {
 
 export const AlbumUserRoleSchema = z.enum(AlbumUserRole).describe('Album user role').meta({ id: 'AlbumUserRole' });
 
-export enum SharedSpaceRole {
-  Owner = 'owner',
-  Editor = 'editor',
-  Viewer = 'viewer',
-}
-
-export enum SharedSpaceActivityType {
-  AssetAdd = 'asset_add',
-  AssetRemove = 'asset_remove',
-  MemberJoin = 'member_join',
-  MemberLeave = 'member_leave',
-  MemberRemove = 'member_remove',
-  MemberRoleChange = 'member_role_change',
-  CoverChange = 'cover_change',
-  SpaceRename = 'space_rename',
-  SpaceColorChange = 'space_color_change',
-  PersonUpdate = 'person_update',
-  PersonDelete = 'person_delete',
-  PersonMerge = 'person_merge',
-  AlbumLink = 'album_link',
-  AlbumUnlink = 'album_unlink',
-}
-
 export enum AssetOrder {
   Asc = 'asc',
   Desc = 'desc',
@@ -109,25 +93,33 @@ export enum AssetOrderBy {
 
 export const AssetOrderBySchema = z.enum(AssetOrderBy).describe('Asset sorting property').meta({ id: 'AssetOrderBy' });
 
-export enum TimeBucketSize {
-  Year = 'year',
-  Month = 'month',
-  Day = 'day',
-}
-
-export const TimeBucketSizeSchema = z
-  .enum(TimeBucketSize)
-  .describe('Timeline bucket granularity')
-  .meta({ id: 'TimeBucketSize' });
-
 export enum MemoryType {
   /** pictures taken on this day X years ago */
   OnThisDay = 'on_this_day',
+
+  /** pictures of a person, shown leading up to their birthday */
+  Birthday = 'birthday',
   /** server-defined rule memory */
   Rule = 'rule',
 }
 
 export const MemoryTypeSchema = z.enum(MemoryType).describe('Memory type').meta({ id: 'MemoryType' });
+
+export enum SharingDirection {
+  SharedBy = 'shared-by',
+  SharedWith = 'shared-with',
+}
+
+export const SharingDirectionSchema = z
+  .enum(SharingDirection)
+  .describe('Sharing direction')
+  .meta({ id: 'SharingDirection' });
+
+// TODO(v4) replace with SharingDirection
+export const PartnerDirectionSchema = z
+  .enum(SharingDirection)
+  .describe('Partner direction')
+  .meta({ id: 'PartnerDirection' });
 
 export enum AssetOrderWithRandom {
   // Include existing values
@@ -205,6 +197,7 @@ export enum Permission {
 
   ClusterGroupRead = 'clusterGroup.read',
   ClusterGroupLeave = 'clusterGroup.leave',
+  ClusterGroupAdmin = 'clusterGroup.admin',
   ClusterGroupRequestCreate = 'clusterGroupRequest.create',
   ClusterGroupRequestRead = 'clusterGroupRequest.read',
   ClusterGroupRequestDelete = 'clusterGroupRequest.delete',
@@ -216,6 +209,9 @@ export enum Permission {
 
   DuplicateRead = 'duplicate.read',
   DuplicateDelete = 'duplicate.delete',
+
+  CleanupRead = 'cleanup.read',
+  CleanupUpdate = 'cleanup.update',
 
   FaceCreate = 'face.create',
   FaceRead = 'face.read',
@@ -260,33 +256,9 @@ export enum Permission {
   PartnerUpdate = 'partner.update',
   PartnerDelete = 'partner.delete',
 
-  SharedSpaceCreate = 'sharedSpace.create',
-  SharedSpaceRead = 'sharedSpace.read',
-  SharedSpaceUpdate = 'sharedSpace.update',
-  SharedSpaceDelete = 'sharedSpace.delete',
-
-  SharedSpaceMemberCreate = 'sharedSpaceMember.create',
-  SharedSpaceMemberUpdate = 'sharedSpaceMember.update',
-  SharedSpaceMemberDelete = 'sharedSpaceMember.delete',
-
-  SharedSpaceAssetCreate = 'sharedSpaceAsset.create',
-  SharedSpaceAssetRead = 'sharedSpaceAsset.read',
-  SharedSpaceAssetDelete = 'sharedSpaceAsset.delete',
-
-  SharedSpaceLibraryCreate = 'sharedSpaceLibrary.create',
-  SharedSpaceLibraryDelete = 'sharedSpaceLibrary.delete',
-
-  SharedSpaceAlbumCreate = 'sharedSpaceAlbum.create',
-  SharedSpaceAlbumUpdate = 'sharedSpaceAlbum.update',
-  SharedSpaceAlbumDelete = 'sharedSpaceAlbum.delete',
-  SharedSpaceAlbumFolderCreate = 'sharedSpaceAlbumFolder.create',
-  SharedSpaceAlbumFolderUpdate = 'sharedSpaceAlbumFolder.update',
-  SharedSpaceAlbumFolderDelete = 'sharedSpaceAlbumFolder.delete',
-
-  UserGroupCreate = 'userGroup.create',
-  UserGroupRead = 'userGroup.read',
-  UserGroupUpdate = 'userGroup.update',
-  UserGroupDelete = 'userGroup.delete',
+  PasskeyRead = 'passkey.read',
+  PasskeyUpdate = 'passkey.update',
+  PasskeyDelete = 'passkey.delete',
 
   PersonCreate = 'person.create',
   PersonRead = 'person.read',
@@ -390,15 +362,44 @@ export enum Permission {
   AdminSessionRead = 'adminSession.read',
 
   AdminAuthUnlinkAll = 'adminAuth.unlinkAll',
+
+  // Gallery fork permissions, kept last so upstream additions above never collide with them
+  SharedSpaceCreate = 'sharedSpace.create',
+  SharedSpaceRead = 'sharedSpace.read',
+  SharedSpaceUpdate = 'sharedSpace.update',
+  SharedSpaceDelete = 'sharedSpace.delete',
+
+  SharedSpaceMemberCreate = 'sharedSpaceMember.create',
+  SharedSpaceMemberUpdate = 'sharedSpaceMember.update',
+  SharedSpaceMemberDelete = 'sharedSpaceMember.delete',
+
+  SharedSpaceAssetCreate = 'sharedSpaceAsset.create',
+  SharedSpaceAssetRead = 'sharedSpaceAsset.read',
+  SharedSpaceAssetDelete = 'sharedSpaceAsset.delete',
+
+  SharedSpaceLibraryCreate = 'sharedSpaceLibrary.create',
+  SharedSpaceLibraryDelete = 'sharedSpaceLibrary.delete',
+
+  SharedSpaceAlbumCreate = 'sharedSpaceAlbum.create',
+  SharedSpaceAlbumUpdate = 'sharedSpaceAlbum.update',
+  SharedSpaceAlbumDelete = 'sharedSpaceAlbum.delete',
+  SharedSpaceAlbumFolderCreate = 'sharedSpaceAlbumFolder.create',
+  SharedSpaceAlbumFolderUpdate = 'sharedSpaceAlbumFolder.update',
+  SharedSpaceAlbumFolderDelete = 'sharedSpaceAlbumFolder.delete',
+
+  UserGroupCreate = 'userGroup.create',
+  UserGroupRead = 'userGroup.read',
+  UserGroupUpdate = 'userGroup.update',
+  UserGroupDelete = 'userGroup.delete',
 }
 
 export enum SharedLinkType {
   Album = 'ALBUM',
 
   /**
-   * Individual asset
-   * or group of assets that are not in an album
-   */
+  Individual asset
+  or group of assets that are not in an album
+  */
   Individual = 'INDIVIDUAL',
 }
 
@@ -419,7 +420,6 @@ export enum SystemMetadataKey {
   MediaLocation = 'MediaLocation',
   ReverseGeocodingState = 'reverse-geocoding-state',
   FacialRecognitionState = 'facial-recognition-state',
-  PetRecognitionState = 'pet-recognition-state',
   MemoriesState = 'memories-state',
   AdminOnboarding = 'admin-onboarding',
   MaintenanceMode = 'maintenance-mode',
@@ -428,10 +428,12 @@ export enum SystemMetadataKey {
   VersionCheckState = 'version-check-state',
   License = 'license',
   IntegrityChecksumCheckpoint = 'integrity-checksum-checkpoint',
+  PetRecognitionState = 'pet-recognition-state',
   ClassificationConfigState = 'classification-config-state',
   SharedSpaceFaceJobCleanupState = 'shared-space-face-job-cleanup-state',
   FaceSuggestionDefaultOnState = 'face-suggestion-default-on-state',
   PersonSuggestionScanJobCleanupState = 'person-suggestion-scan-job-cleanup-state',
+  StorageTemplateS3State = 'storage-template-s3-state',
 }
 
 export enum UserMetadataKey {
@@ -466,6 +468,16 @@ export const UserAvatarColorSchema = z
   .enum(UserAvatarColor)
   .describe('User avatar color')
   .meta({ id: 'UserAvatarColor' });
+
+export enum PersonUpdateStrategy {
+  Self = 'self',
+  Everyone = 'everyone',
+}
+
+export const PersonUpdateStrategySchema = z
+  .enum(PersonUpdateStrategy)
+  .describe('Which person records to update when editing a person')
+  .meta({ id: 'PersonUpdateStrategy' });
 
 export enum UserStatus {
   Active = 'active',
@@ -642,6 +654,7 @@ export const ColorspaceSchema = z.enum(Colorspace).describe('Colorspace').meta({
 
 export enum ImageFormat {
   Jpeg = 'jpeg',
+  Jxl = 'jxl',
   Webp = 'webp',
 }
 
@@ -717,10 +730,10 @@ export enum ImmichWorker {
 export enum ImmichTelemetry {
   Host = 'host',
   Api = 'api',
-  App = 'app',
   Io = 'io',
   Repo = 'repo',
   Job = 'job',
+  App = 'app',
 }
 
 export enum ExifOrientation {
@@ -850,9 +863,9 @@ export enum DvProfile {
 }
 
 /**
- * Dolby Vision base-layer signal-compatibility ID from the DOVI configuration record.
- * Identifies what the base HEVC/AVC layer renders as on a non-DV decoder.
- */
+Dolby Vision base-layer signal-compatibility ID from the DOVI configuration record.
+Identifies what the base HEVC/AVC layer renders as on a non-DV decoder.
+*/
 export enum DvSignalCompatibility {
   None = 0,
   Hdr10 = 1,
@@ -907,6 +920,8 @@ export enum QueueName {
   Editor = 'editor',
   StorageBackendMigration = 'storageBackendMigration',
   Classification = 'classification',
+  QualityAnalysis = 'qualityAnalysis',
+  SpatialScene = 'spatialScene',
 }
 
 export const QueueNameSchema = z.enum(QueueName).describe('Queue name').meta({ id: 'QueueName' });
@@ -917,6 +932,7 @@ export enum QueueJobStatus {
   Complete = 'completed',
   Delayed = 'delayed',
   Waiting = 'waiting',
+  /** @deprecated use `waiting` instead */
   Paused = 'paused',
 }
 
@@ -940,6 +956,8 @@ export enum JobName {
   AssetGenerateThumbnails = 'AssetGenerateThumbnails',
 
   AuditTableCleanup = 'AuditTableCleanup',
+
+  AuthChallengeCleanup = 'AuthChallengeCleanup',
 
   DatabaseBackup = 'DatabaseBackup',
 
@@ -1015,6 +1033,14 @@ export enum JobName {
   PetRecognitionQueueAll = 'PetRecognitionQueueAll',
   PetRecognition = 'PetRecognition',
 
+  // Spatial Scene
+  SpatialSceneQueueAll = 'SpatialSceneQueueAll',
+  SpatialScene = 'SpatialScene',
+
+  // Data Saver video
+  AssetEncodeDataSaverVideoQueueAll = 'AssetEncodeDataSaverVideoQueueAll',
+  AssetEncodeDataSaverVideo = 'AssetEncodeDataSaverVideo',
+
   // Workflow
   WorkflowAssetTrigger = 'WorkflowAssetTrigger',
 
@@ -1062,6 +1088,16 @@ export enum JobName {
   // Classification
   AssetClassifyQueueAll = 'AssetClassifyQueueAll',
   AssetClassify = 'AssetClassify',
+
+  // Library Cleanup
+  AssetAnalyzeQualityQueueAll = 'AssetAnalyzeQualityQueueAll',
+  AssetAnalyzeQuality = 'AssetAnalyzeQuality',
+
+  // Rule memories, queued by MemoryGenerate
+  MemoryRuleGenerate = 'MemoryRuleGenerate',
+
+  // Video trim encode, poster and thumbnails (or their removal), queued by trim writes
+  AssetVideoTrimGenerate = 'AssetVideoTrimGenerate',
 }
 
 export const JobNameSchema = z.enum(JobName).describe('Job name').meta({ id: 'JobName' });
@@ -1118,6 +1154,9 @@ export enum DatabaseLock {
   VersionCheck = 800,
   HlsSessionCleanup = 850,
   PetRecognitionModelSwitch = 860,
+  CleanupQualityRerun = 870,
+  FacialRecognition = 900,
+  DuplicateDetection = 1000,
 }
 
 export enum MaintenanceAction {
@@ -1125,6 +1164,7 @@ export enum MaintenanceAction {
   End = 'end',
   SelectDatabaseRestore = 'select_database_restore',
   RestoreDatabase = 'restore_database',
+  Rollback = 'rollback',
 }
 
 export const MaintenanceActionSchema = z
@@ -1152,9 +1192,16 @@ export enum SyncRequestType {
   AssetEditsV1 = 'AssetEditsV1',
   AssetMetadataV1 = 'AssetMetadataV1',
   AssetOcrV1 = 'AssetOcrV1',
+  // #763: asset_favorite is its own synced entity (design doc §4.3) — a favorite write must
+  // never bump asset.updateId (that would amplify a personal write into a cross-user re-sync),
+  // so favorites need their own request/entity types rather than riding the asset payload.
+  AssetFavoritesV1 = 'AssetFavoritesV1',
   AuthUsersV1 = 'AuthUsersV1',
+  AuthUsersV2 = 'AuthUsersV2',
   MemoriesV1 = 'MemoriesV1',
+  MemoriesV2 = 'MemoriesV2',
   MemoryToAssetsV1 = 'MemoryToAssetsV1',
+  MemoryToAssetsV2 = 'MemoryToAssetsV2',
   PartnersV1 = 'PartnersV1',
   /** @deprecated */
   PartnerAssetsV1 = 'PartnerAssetsV1',
@@ -1166,7 +1213,9 @@ export enum SyncRequestType {
   PeopleV1 = 'PeopleV1',
   /** @deprecated */
   AssetFacesV1 = 'AssetFacesV1',
+  /** @deprecated */
   AssetFacesV2 = 'AssetFacesV2',
+  AssetFacesV3 = 'AssetFacesV3',
   UserMetadataV1 = 'UserMetadataV1',
 
   // --- gallery-fork additions ---
@@ -1176,6 +1225,7 @@ export enum SyncRequestType {
   SharedSpaceAssetsV1 = 'SharedSpaceAssetsV1',
   SharedSpaceAssetExifsV1 = 'SharedSpaceAssetExifsV1',
   SharedSpaceToAssetsV1 = 'SharedSpaceToAssetsV1',
+  SharedSpaceStacksV1 = 'SharedSpaceStacksV1',
 
   LibrariesV1 = 'LibrariesV1',
   LibraryAssetsV1 = 'LibraryAssetsV1',
@@ -1201,6 +1251,7 @@ export const SyncRequestTypeSchema = z
 
 export enum SyncEntityType {
   AuthUserV1 = 'AuthUserV1',
+  AuthUserV2 = 'AuthUserV2',
 
   UserV1 = 'UserV1',
   UserDeleteV1 = 'UserDeleteV1',
@@ -1216,6 +1267,10 @@ export enum SyncEntityType {
   AssetMetadataDeleteV1 = 'AssetMetadataDeleteV1',
   AssetOcrV1 = 'AssetOcrV1',
   AssetOcrDeleteV1 = 'AssetOcrDeleteV1',
+
+  // #763: per-user favorites overlay — see AssetFavoritesV1 above.
+  AssetFavoriteV1 = 'AssetFavoriteV1',
+  AssetFavoriteDeleteV1 = 'AssetFavoriteDeleteV1',
 
   PartnerV1 = 'PartnerV1',
   PartnerDeleteV1 = 'PartnerDeleteV1',
@@ -1259,9 +1314,11 @@ export enum SyncEntityType {
   AlbumToAssetBackfillV1 = 'AlbumToAssetBackfillV1',
 
   MemoryV1 = 'MemoryV1',
+  MemoryV2 = 'MemoryV2',
   MemoryDeleteV1 = 'MemoryDeleteV1',
 
   MemoryToAssetV1 = 'MemoryToAssetV1',
+  MemoryToAssetV2 = 'MemoryToAssetV2',
   MemoryToAssetDeleteV1 = 'MemoryToAssetDeleteV1',
 
   StackV1 = 'StackV1',
@@ -1270,8 +1327,11 @@ export enum SyncEntityType {
   PersonV1 = 'PersonV1',
   PersonDeleteV1 = 'PersonDeleteV1',
 
+  /** @deprecated */
   AssetFaceV1 = 'AssetFaceV1',
+  /** @deprecated */
   AssetFaceV2 = 'AssetFaceV2',
+  AssetFaceV3 = 'AssetFaceV3',
   AssetFaceDeleteV1 = 'AssetFaceDeleteV1',
 
   UserMetadataV1 = 'UserMetadataV1',
@@ -1297,6 +1357,12 @@ export enum SyncEntityType {
   SharedSpaceToAssetV1 = 'SharedSpaceToAssetV1',
   SharedSpaceToAssetDeleteV1 = 'SharedSpaceToAssetDeleteV1',
   SharedSpaceToAssetBackfillV1 = 'SharedSpaceToAssetBackfillV1',
+
+  SharedSpaceStackV1 = 'SharedSpaceStackV1',
+  SharedSpaceStackBackfillV1 = 'SharedSpaceStackBackfillV1',
+  SharedSpaceStackAlbumBackfillV1 = 'SharedSpaceStackAlbumBackfillV1',
+  SharedSpaceStackLibraryBackfillV1 = 'SharedSpaceStackLibraryBackfillV1',
+  SharedSpaceStackDeleteV1 = 'SharedSpaceStackDeleteV1',
 
   LibraryV1 = 'LibraryV1',
   LibraryDeleteV1 = 'LibraryDeleteV1',
@@ -1401,9 +1467,7 @@ export enum AssetVisibility {
   Archive = 'archive',
   Timeline = 'timeline',
 
-  /**
-   * Video part of the LivePhotos and MotionPhotos
-   */
+  /** Video part of the LivePhotos and MotionPhotos */
   Hidden = 'hidden',
   Locked = 'locked',
 }
@@ -1440,7 +1504,6 @@ export enum ApiTag {
   AuthenticationAdmin = 'Authentication (admin)',
   Assets = 'Assets',
   AssetFiles = 'Asset files',
-  Classification = 'Classification',
   ConfigUser = 'Config (user)',
   ConfigAdmin = 'Config (admin)',
   ConfigPublic = 'Config (public)',
@@ -1459,6 +1522,7 @@ export enum ApiTag {
   NotificationsAdmin = 'Notifications (admin)',
   ClusterGroups = 'Cluster groups',
   Partners = 'Partners',
+  Passkeys = 'Passkeys',
   People = 'People',
   Plugins = 'Plugins',
   Queues = 'Queues',
@@ -1466,9 +1530,7 @@ export enum ApiTag {
   Server = 'Server',
   Sessions = 'Sessions',
   SharedLinks = 'Shared links',
-  SharedSpaces = 'Shared Spaces',
   Stacks = 'Stacks',
-  StorageMigration = 'Storage Migration (admin)',
   Sync = 'Sync',
   SystemConfig = 'System config',
   SystemMetadata = 'System metadata',
@@ -1477,9 +1539,15 @@ export enum ApiTag {
   Trash = 'Trash',
   UsersAdmin = 'Users (admin)',
   Users = 'Users',
-  UserGroups = 'User Groups',
   Views = 'Views',
   Workflows = 'Workflows',
+
+  // Gallery fork tags
+  Classification = 'Classification',
+  Cleanup = 'Cleanup',
+  SharedSpaces = 'Shared Spaces',
+  StorageMigration = 'Storage Migration (admin)',
+  UserGroups = 'User Groups',
 }
 
 export const WorkflowTriggerSchema = z
@@ -1518,3 +1586,16 @@ export enum SearchOrderField {
 }
 
 export const SearchOrderFieldSchema = z.enum(SearchOrderField).meta({ id: 'SearchOrderField' });
+
+export enum ServerFeatureLevel {
+  FeatureLevel = 1,
+  Passkeys = 2,
+}
+
+export const ServerFeatureLevelSchema = z
+  .enum(ServerFeatureLevel)
+  .describe('Server feature level')
+  .meta({
+    id: 'ServerFeatureLevel',
+    ...asIntegerEnum(ServerFeatureLevel),
+  });

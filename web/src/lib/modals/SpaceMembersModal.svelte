@@ -1,16 +1,16 @@
 <script lang="ts">
-  import UserAvatar from '$lib/components/shared-components/UserAvatar.svelte';
-  import RoleBadge from '$lib/components/spaces/role-badge.svelte';
-  import SpaceAddMemberModal from '$lib/modals/SpaceAddMemberModal.svelte';
-  import { handleError } from '$lib/utils/handle-error';
+  import UserAvatar from '#lib/components/shared-components/UserAvatar.svelte';
+  import RoleBadge from '#lib/components/spaces/role-badge.svelte';
+  import { showAddSpaceMembersModal } from '#lib/gallery/spaces/add-space-members.ts';
+  import { handleError } from '#lib/utils/handle-error.ts';
   import {
-    removeMember,
     SharedSpaceRole,
-    updateMember,
     UserAvatarColor,
+    removeMember,
+    updateMember,
     type SharedSpaceMemberResponseDto,
   } from '@immich/sdk';
-  import { BasicModal, Button, Field, modalManager, Select, Text, type SelectOption } from '@immich/ui';
+  import { BasicModal, Button, Field, Select, Text, modalManager, type SelectOption } from '@immich/ui';
   import { mdiAccountPlus } from '@mdi/js';
   import { t } from 'svelte-i18n';
 
@@ -18,11 +18,23 @@
     spaceId: string;
     members: SharedSpaceMemberResponseDto[];
     isOwner: boolean;
+    /** Whether the viewer may switch members between viewer and editor; owners always may. */
+    canChangeRoles?: boolean;
+    /** The viewer's own user id: their row never gets a role control. */
+    currentUserId?: string;
     spaceColor?: string | null;
     onClose: (updatedMembers?: SharedSpaceMemberResponseDto[]) => void;
   }
 
-  let { spaceId, members: initialMembers, isOwner, spaceColor = 'primary', onClose }: Props = $props();
+  let {
+    spaceId,
+    members: initialMembers,
+    isOwner,
+    canChangeRoles = isOwner,
+    currentUserId,
+    spaceColor = 'primary',
+    onClose,
+  }: Props = $props();
   let members = $state([...initialMembers]);
 
   const toAvatarUser = (member: SharedSpaceMemberResponseDto) => ({
@@ -49,12 +61,12 @@
   };
 
   const handleAddMember = async () => {
-    const added = await modalManager.show(SpaceAddMemberModal, {
+    const added = await showAddSpaceMembersModal(
       spaceId,
-      existingMemberIds: members.map((m) => m.userId),
-    });
+      members.map((m) => m.userId),
+    );
 
-    if (added && added.length > 0) {
+    if (added.length > 0) {
       members = [...members, ...added];
     }
   };
@@ -101,16 +113,16 @@
           <Text fontWeight="medium">{member.name}</Text>
           <Text size="tiny" color="muted">{member.email}</Text>
         </div>
-        {#if isOwner && member.role === 'owner'}
+        {#if member.role === 'owner'}
           <RoleBadge role="owner" {spaceColor} />
-        {:else if isOwner}
+        {:else if canChangeRoles && member.userId !== currentUserId}
           <Field class="w-32 shrink-0">
             <Select
               value={member.role as string as SharedSpaceRole}
               options={[
                 { label: $t('role_editor'), value: SharedSpaceRole.Editor },
                 { label: $t('role_viewer'), value: SharedSpaceRole.Viewer },
-                { label: $t('remove'), value: 'remove' },
+                ...(isOwner ? [{ label: $t('remove'), value: 'remove' }] : []),
               ] as SelectOption<SharedSpaceRole | 'remove'>[]}
               onChange={(value) => handleRoleChange(member, value)}
             />

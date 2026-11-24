@@ -1,7 +1,8 @@
+import type { EditActions } from '#lib/managers/edit/edit-manager.svelte.ts';
 import type { MirrorParameters, RotateParameters } from '@immich/sdk';
 import { compose, flipX, flipY, identity, rotate } from 'transformation-matrix';
-import type { EditActions } from '$lib/managers/edit/edit-manager.svelte';
 
+// eslint-disable-next-line unicorn/no-unnecessary-parameters
 const isCloseToZero = (x: number, epsilon: number = 1e-15) => Math.abs(x) < epsilon;
 
 export const normalizeTransformEdits = (
@@ -12,14 +13,12 @@ export const normalizeTransformEdits = (
   mirrorVertical: boolean;
 } => {
   const { a, b, c, d } = buildAffineFromEdits(edits);
-  const rawAngle = (Math.atan2(c, a) * 180) / Math.PI;
-  const normalizedAngle = rawAngle < 0 ? 360 + rawAngle : rawAngle;
-  const roundedAngle = Math.round(normalizedAngle * 100) / 100;
+  const rotation = ((isCloseToZero(a) ? Math.asin(c) : Math.acos(a)) * 180) / Math.PI;
 
   return {
-    rotation: isCloseToZero(roundedAngle) || isCloseToZero(roundedAngle - 360) ? 0 : roundedAngle,
+    rotation: rotation < 0 ? 360 + rotation : rotation,
     mirrorHorizontal: false,
-    mirrorVertical: a * d < b * c,
+    mirrorVertical: isCloseToZero(a) ? b === c : a === -d,
   };
 };
 

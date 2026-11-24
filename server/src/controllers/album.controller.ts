@@ -1,8 +1,6 @@
 import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Param, Patch, Post, Put, Query } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
-import type { AuthDto } from 'src/dtos/auth.dto.js';
 import { Endpoint, HistoryBuilder } from 'src/decorators.js';
-import { AlbumNameDto } from 'src/dtos/album-name.dto.js';
 import {
   AddUsersDto,
   AlbumResponseDto,
@@ -16,6 +14,7 @@ import {
   UpdateAlbumUserDto,
 } from 'src/dtos/album.dto.js';
 import { BulkIdResponseDto, BulkIdsDto } from 'src/dtos/asset-ids.response.dto.js';
+import type { AuthDto } from 'src/dtos/auth.dto.js';
 import { MapMarkerResponseDto } from 'src/dtos/map.dto.js';
 import { ApiTag, Permission } from 'src/enum.js';
 import { Auth, Authenticated } from 'src/middleware/auth.guard.js';
@@ -58,17 +57,6 @@ export class AlbumController {
   })
   getAlbumStatistics(@Auth() auth: AuthDto): Promise<AlbumStatisticsResponseDto> {
     return this.service.getStatistics(auth);
-  }
-
-  @Get('names')
-  @Authenticated()
-  @Endpoint({
-    summary: 'Retrieve album names',
-    description: 'Returns a lightweight list of albums available to the authenticated user for quick palette lookups.',
-    history: new HistoryBuilder().added('v2'),
-  })
-  getAlbumNames(@Auth() auth: AuthDto): Promise<AlbumNameDto[]> {
-    return this.service.getNames(auth);
   }
 
   @Authenticated({ permission: Permission.AlbumRead, sharedLink: true })

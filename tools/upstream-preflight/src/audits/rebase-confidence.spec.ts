@@ -202,22 +202,22 @@ describe('renderRequiredConfidenceChecks', () => {
     expect(details).not.toContain(
       'planned Slice 3 check: make gallery-branding-check (target missing; required by docker: server/Dockerfile, machine-learning/Dockerfile)',
     );
-    expect(details).not.toContain(
+    expect(details).toContain(
       'gh workflow run gallery-mobile-smoke.yml --ref rebase/upstream-batch-176 (required by mobile: mobile/lib/routing/router.dart)',
     );
     expect(details).toContain(
       'make gallery-ml-smoke (required by docker: server/Dockerfile, machine-learning/Dockerfile; ml: machine-learning/Dockerfile)',
     );
-    expect(details).not.toContain(
+    expect(details).toContain(
       'gh workflow run gallery-ml-smoke.yml --ref rebase/upstream-batch-176 (required by docker: server/Dockerfile, machine-learning/Dockerfile; ml: machine-learning/Dockerfile)',
     );
     expect(details).not.toContain(
       'planned Slice 5 check: make gallery-ml-smoke (target missing; required by docker: server/Dockerfile, machine-learning/Dockerfile; ml: machine-learning/Dockerfile)',
     );
-    expect(details).toContain(
+    expect(details).not.toContain(
       'planned Slice 4 workflow: gallery-mobile-smoke.yml (workflow missing; required by mobile: mobile/lib/routing/router.dart)',
     );
-    expect(details).toContain(
+    expect(details).not.toContain(
       'planned Slice 5 workflow: gallery-ml-smoke.yml (workflow missing; required by docker: server/Dockerfile, machine-learning/Dockerfile; ml: machine-learning/Dockerfile)',
     );
   });
@@ -614,37 +614,39 @@ describe('validateGalleryWorkflowText', () => {
     );
   });
 
-  it('allows retired build and smoke workflows to be absent', () => {
+  it('requires the Gallery mobile smoke workflow in release workflow assertions', () => {
     const result = runGalleryWorkflowAssertions(
       '/tmp/gallery-missing-workflows',
       {
         '.github/workflows/gallery-rc-build.yml': minimalWorkflow,
         '.github/workflows/gallery-release-server-only.yml': minimalWorkflow,
         '.github/workflows/gallery-release-mobile.yml': minimalWorkflow,
-      },
-    );
-
-    expect(result.ok).toBe(true);
-  });
-
-  it.each([
-    '.github/workflows/gallery-build-mobile.yml',
-    '.github/workflows/gallery-mobile-smoke.yml',
-    '.github/workflows/gallery-ml-smoke.yml',
-  ])('validates retired workflow %s when present', (workflowPath) => {
-    const result = runGalleryWorkflowAssertions(
-      '/tmp/gallery-missing-workflows',
-      {
-        '.github/workflows/gallery-rc-build.yml': minimalWorkflow,
-        '.github/workflows/gallery-release-server-only.yml': minimalWorkflow,
-        '.github/workflows/gallery-release-mobile.yml': minimalWorkflow,
-        [workflowPath]: '',
+        '.github/workflows/gallery-build-mobile.yml': minimalWorkflow,
+        '.github/workflows/gallery-mobile-smoke.yml': '',
       },
     );
 
     expect(result.ok).toBe(false);
     expect(result.details).toContain(
-      `${workflowPath} is missing workflow_dispatch`,
+      '.github/workflows/gallery-mobile-smoke.yml is missing workflow_dispatch',
+    );
+  });
+
+  it('requires the Gallery ML smoke workflow in release workflow assertions', () => {
+    const result = runGalleryWorkflowAssertions(
+      '/tmp/gallery-missing-workflows',
+      {
+        '.github/workflows/gallery-rc-build.yml': minimalWorkflow,
+        '.github/workflows/gallery-release-server-only.yml': minimalWorkflow,
+        '.github/workflows/gallery-release-mobile.yml': minimalWorkflow,
+        '.github/workflows/gallery-build-mobile.yml': minimalWorkflow,
+        '.github/workflows/gallery-mobile-smoke.yml': mobileSmokeWorkflow,
+      },
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.details).toContain(
+      '.github/workflows/gallery-ml-smoke.yml is missing workflow_dispatch',
     );
   });
 

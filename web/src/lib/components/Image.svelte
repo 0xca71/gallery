@@ -1,28 +1,18 @@
 <script lang="ts">
-  import { isFirefox } from '$lib/utils/asset-utils';
-  import { cancelImageUrl } from '$lib/utils/sw-messaging';
+  import { isFirefox } from '#lib/utils/asset-utils.ts';
+  import { cancelImageUrl } from '#lib/utils/sw-messaging.ts';
   import { onDestroy, untrack } from 'svelte';
   import type { HTMLImgAttributes } from 'svelte/elements';
 
   type Props = Omit<HTMLImgAttributes, 'onload' | 'onerror'> & {
     src: string | undefined;
-    decodeBeforeLoad?: boolean;
     onStart?: () => void;
     onLoad?: () => void;
     onError?: (error: Error) => void;
     ref?: HTMLImageElement;
   };
 
-  let {
-    src,
-    decodeBeforeLoad = false,
-    onStart,
-    onLoad,
-    onError,
-    ref = $bindable(),
-    crossorigin = 'anonymous',
-    ...rest
-  }: Props = $props();
+  let { src, onStart, onLoad, onError, ref = $bindable(), crossorigin = 'anonymous', ...rest }: Props = $props();
 
   let capturedSource: string | undefined = $state();
   let loaded = $state(false);
@@ -37,7 +27,6 @@
 
     const oldSource = capturedSource;
     capturedSource = src;
-    loaded = false;
     untrack(() => {
       if (oldSource !== undefined) {
         cancelImageUrl(oldSource);
@@ -61,31 +50,17 @@
     onLoad?.();
   };
 
-  const handleLoad = async () => {
+  const handleLoad = () => {
     if (destroyed || !src) {
       return;
     }
 
-    if (!decodeBeforeLoad && !isFirefox) {
-      completeLoad();
+    if (isFirefox && ref) {
+      ref.decode().then(completeLoad).catch(completeLoad);
       return;
     }
-    const source = capturedSource;
-    const image = ref;
-    try {
-      await image?.decode();
-      if (!destroyed && source === capturedSource && image === ref) {
-        completeLoad();
-      }
-    } catch {
-      if (!destroyed && source === capturedSource && image === ref) {
-        if (decodeBeforeLoad) {
-          handleError();
-        } else {
-          completeLoad();
-        }
-      }
-    }
+
+    completeLoad();
   };
 
   const handleError = () => {

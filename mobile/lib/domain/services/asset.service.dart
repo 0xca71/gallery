@@ -3,6 +3,7 @@ import 'package:immich_mobile/domain/models/asset/base_asset.model.dart';
 import 'package:immich_mobile/domain/models/asset_edit.model.dart';
 import 'package:immich_mobile/domain/models/exif.model.dart';
 import 'package:immich_mobile/domain/models/store.model.dart';
+import 'package:immich_mobile/domain/models/tag.model.dart';
 import 'package:immich_mobile/entities/store.entity.dart';
 import 'package:immich_mobile/extensions/platform_extensions.dart';
 import 'package:immich_mobile/infrastructure/repositories/local_asset.repository.dart';
@@ -59,17 +60,16 @@ class AssetService {
     }
 
     final stack = await _remoteRepository.getStackChildren(asset);
-    // Include the primary asset in the stack as the first item
     return [asset, ...stack];
   }
 
-  Future<ExifInfo?> getExif(BaseAsset asset) async {
+  Stream<ExifInfo?> watchExif(BaseAsset asset) {
     if (!asset.hasRemote) {
-      return null;
+      return Stream.value(null);
     }
 
     final id = asset is LocalAsset ? asset.remoteId! : (asset as RemoteAsset).id;
-    return _remoteRepository.getExif(id);
+    return _remoteRepository.watchExif(id);
   }
 
   Future<List<(String, String)>> getPlaces(String userId) {
@@ -115,6 +115,26 @@ class AssetService {
     await _apiRepository.unStack(stackIds);
   }
 
+  // #763: favorites are a per-user overlay (`asset_favorite`) that a read-only space Viewer may set
+  // on another member's asset, so they must NOT go through the consolidated `update` below — that
+  // forwards to the OWNER-ONLY `PUT /assets`. This routes to `PUT /assets/favorites` instead and
+  // mirrors the change into the local Drift mirror. See
+  // test/policy/favorite_overlay_policy_test.dart, which fails if a favorite is routed the other way.
+  Future<void> updateFavorite(List<String> remoteIds, bool isFavorite) async {
+    if (remoteIds.isEmpty) {
+      return;
+    }
+
+    await _apiRepository.updateFavorite(remoteIds, isFavorite);
+    await _remoteRepository.updateAssets(remoteIds, isFavorite: .some(isFavorite));
+  }
+
+  // #763: DO NOT pass `isFavorite` here. It forwards to the OWNER-ONLY bulk-update endpoint
+  // (`AssetApiRepository.update` -> `PUT /assets`), but favorites are now a per-user overlay
+  // (`asset_favorite`) that a read-only space Viewer may set on another member's asset — use
+  // `updateFavorite` above, which routes to `PUT /assets/favorites`. The parameter survives only
+  // because it is the upstream Immich shape; nothing passes it, and
+  // test/policy/favorite_overlay_policy_test.dart fails if anything starts to.
   Future<void> update(
     List<String> remoteIds, {
     Option<bool> isFavorite = const .none(),
@@ -196,5 +216,24 @@ class AssetService {
 
   Future<LocalAsset?> getLocalAsset(String id) {
     return _localRepository.get(id);
+  }
+
+  Future<List<Tag>> getTags(String assetId) {
+    return _apiRepository.getAssetTags(assetId);
+  }
+
+  Future<void> stackEditedUpload(String localId, String remoteId, String? checksum) async {
+    // a manual upload of an asset that was never hashed has no checksum yet, so we need to fetch it from the server
+    final uploadedChecksum = checksum ?? await _apiRepository.getChecksum(remoteId);
+    try {
+      // previous_checksum still points at the version the server had before this upload
+      final previousId = await _localRepository.getPreviousRemoteId(localId);
+      if (previousId != null && previousId != remoteId) {
+        await _apiRepository.stack([remoteId, previousId]);
+      }
+    } finally {
+      // the upload went through even when the stack call did not, so this version is the new base
+      await _localRepository.updatePreviousChecksum(localId, uploadedChecksum);
+    }
   }
 }

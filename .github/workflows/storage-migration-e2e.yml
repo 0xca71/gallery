@@ -1,7 +1,14 @@
 name: Storage Migration E2E
 on:
+  schedule:
+    - cron: '0 6 * * *' # Daily at 06:00 UTC
   workflow_dispatch:
-    # Disabled for personal-use CI; keep the file for easy re-enable.
+    inputs:
+      branch:
+        description: 'Branch to run against'
+        required: true
+        default: 'main'
+        type: string
 
 permissions: {}
 

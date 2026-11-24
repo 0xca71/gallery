@@ -50,7 +50,9 @@ for file in "${check_files[@]}"; do
   if [[ -f "$filepath" ]]; then
     # Exclude known code-internal patterns (function names, class names, CSS classes)
     matches=$(grep -c "$UPSTREAM_NAME" "$filepath" 2>/dev/null || true)
-    allowed=$(grep -cE "(Immich(App|Service|Link)|immich-|bg-immich|getMyImmich|// .*[Ii]mmich)" "$filepath" 2>/dev/null || true)
+    # [A-Za-z0-9_]Immich / Immich[A-Z]: the name inside an identifier (ImmichStateDto,
+    # futoBackupsGetImmichBackupStatus), which branding deliberately leaves as in source.
+    allowed=$(grep -cE "(Immich(App|Service|Link)|immich-|bg-immich|getMyImmich|// .*[Ii]mmich|[A-Za-z0-9_]Immich|Immich[A-Z])" "$filepath" 2>/dev/null || true)
     if [[ "$matches" -gt 0 && "$matches" -gt "$allowed" ]]; then
       echo "  WARN: '$UPSTREAM_NAME' still found in $file ($matches hits, $allowed allowed)"
       EXIT_CODE=1
@@ -59,6 +61,22 @@ for file in "${check_files[@]}"; do
     fi
   fi
 done
+
+# Branding must not turn an OpenAPI identifier into one the client generators reject.
+# Upstream v3.4.0-rc.0 added schema names containing the upstream name (ImmichStateDto);
+# a blanket rewrite made them "Noodle GalleryStateDto" and broke the Dart client build.
+openapi_spec="$REPO_ROOT/open-api/immich-openapi-specs.json"
+if [[ -f "$openapi_spec" ]]; then
+  bad_ids=$(jq -r '(.components.schemas // {} | keys[]), ([.paths[][]? | objects | .operationId // empty][])' "$openapi_spec" \
+    | grep -vE '^[A-Za-z0-9._-]+$' || true)
+  if [[ -n "$bad_ids" ]]; then
+    echo "  WARN: OpenAPI identifiers are no longer valid after branding:"
+    printf '    %s\n' "$bad_ids"
+    EXIT_CODE=1
+  else
+    echo "  OK: OpenAPI schema names and operationIds"
+  fi
+fi
 
 # Check i18n — verify overrides were applied
 i18n_file="$REPO_ROOT/i18n/en.json"
@@ -223,8 +241,10 @@ if [[ -f "$help_modal" ]]; then
     # these hrefs the Immich pattern vanishes and this passes vacuously. Require the
     # patched-in Noodle URLs to be present too.
     missing=""
-    grep -qF "$REPO_DOCS_URL" "$help_modal" || missing="$missing docs"
+    # The docs link is ExternalRoute.docs() in route.ts since immich-32976.
+    grep -qF "$REPO_DOCS_URL" "$REPO_ROOT/web/src/lib/route.ts" || missing="$missing docs"
     grep -qF "$REPO_ISSUES_URL" "$help_modal" || missing="$missing issues"
+    grep -qF "$REPO_RELEASES_URL" "$help_modal" || missing="$missing releases"
     if [[ -n "$missing" ]]; then
       echo "  WARN: HelpAndFeedbackModal.svelte is missing Noodle URL(s):$missing"
       echo "        (no upstream URL either — the hrefs likely moved and apply-branding no-opped)"
@@ -263,13 +283,16 @@ if [[ -f "$app_download_modal" ]]; then
   fi
 fi
 
-# Check Dockerfiles for upstream repo references
+# Check Dockerfiles and the dev compose file for upstream repo references
 echo "--- Checking Dockerfiles ---"
-for dockerfile in "server/Dockerfile" "machine-learning/Dockerfile"; do
+for dockerfile in "server/Dockerfile" "machine-learning/Dockerfile" "docker/docker-compose.dev.yml"; do
   filepath="$REPO_ROOT/$dockerfile"
   if [[ -f "$filepath" ]]; then
     if grep -q "immich-app/immich" "$filepath"; then
       echo "  WARN: Upstream repo reference found in $dockerfile"
+      EXIT_CODE=1
+    elif grep -q "pkgs/container/immich-" "$filepath"; then
+      echo "  WARN: Upstream package page found in $dockerfile"
       EXIT_CODE=1
     else
       echo "  OK: $dockerfile"
@@ -322,14 +345,12 @@ fi
 
 info_plist="$REPO_ROOT/mobile/ios/Runner/Info.plist"
 if [[ -f "$info_plist" ]]; then
-  # CFBundleURLSchemes entries sit at 4-tab indent; anchor to that to avoid matching
-  # CFBundleName (<string>${NAME_SLUG}</string>) at 1-tab indent.
-  # Use $'\t' ANSI-C quoting for literal tabs — BSD grep (macOS) lacks -P.
-  indent=$'\t\t\t\t'
-  if ! grep -q "^${indent}<string>immich</string>" "$info_plist"; then
+  # The branded scheme must sit on the line after the legacy one: CFBundleName also reads
+  # <string>${NAME_SLUG}</string>, which can equal the scheme. Indentation is not checked.
+  if ! grep -qE '^[[:space:]]*<string>immich</string>$' "$info_plist"; then
     echo "  FAIL: Info.plist missing <string>immich</string> in CFBundleURLSchemes (legacy scheme must remain)"
     EXIT_CODE=1
-  elif ! grep -q "^${indent}<string>${DEEP_LINK_SCHEME}</string>" "$info_plist"; then
+  elif ! grep -A1 -E '^[[:space:]]*<string>immich</string>$' "$info_plist" | grep -qE "^[[:space:]]*<string>${DEEP_LINK_SCHEME}</string>\$"; then
     echo "  FAIL: Info.plist missing <string>${DEEP_LINK_SCHEME}</string> in CFBundleURLSchemes"
     EXIT_CODE=1
   else
@@ -339,6 +360,19 @@ fi
 
 if [[ $EXIT_CODE -eq 0 ]]; then
   echo "Open-in-app scheme registration verified"
+fi
+
+# The iOS permission prompts are upstream's text in source; patch_ios writes the branded ones.
+echo "--- Checking iOS permission prompts ---"
+if [[ -f "$info_plist" ]]; then
+  while IFS=$'\t' read -r usage_key usage_text; do
+    if grep -A1 "<key>${usage_key}</key>" "$info_plist" | grep -qF "<string>${usage_text}</string>"; then
+      echo "  OK: Info.plist ${usage_key} is branded"
+    else
+      echo "  FAIL: Info.plist ${usage_key} does not read config.json mobile.ios_usage_descriptions"
+      EXIT_CODE=1
+    fi
+  done < <(jq -r '.mobile.ios_usage_descriptions | to_entries[] | "\(.key)\t\(.value)"' "$CONFIG")
 fi
 
 # OAuth mobile callback: the scheme the app SENDS, the scheme Android REGISTERS and the
@@ -456,6 +490,17 @@ for notification_svc in \
     fi
   fi
 done
+
+# Stock Immich clients are told the upstream base version (server/src/gallery/utils/client-version.ts reads
+# immichVersion, falling back to version on an unstamped build); it must match the base the fork is on.
+base_version=$(jq -r '.immichVersion // .version' "$REPO_ROOT/server/package.json")
+expected_base=$(jq -r '.upstream.version' "$CONFIG")
+if [[ "$base_version" == "$expected_base" ]]; then
+  echo "  OK: server/package.json reports base version $base_version to stock clients"
+else
+  echo "  WARN: server/package.json base version '$base_version' != config.json upstream.version '$expected_base'"
+  EXIT_CODE=1
+fi
 
 echo "--- Checking mobile image assets ---"
 if ! bash "$SCRIPT_DIR/verify-mobile-assets.sh"; then

@@ -1,7 +1,7 @@
 <script lang="ts">
-  import SpacePickerModal from '$lib/modals/SpacePickerModal.svelte';
+  import SpacePickerModal from '#lib/modals/SpacePickerModal.svelte';
   import { getAllSpaces, type SharedSpaceResponseDto } from '@immich/sdk';
-  import { Button, Label, modalManager, Text } from '@immich/ui';
+  import { Button, Label, Text, modalManager } from '@immich/ui';
   import { t } from 'svelte-i18n';
 
   type Props = {
@@ -32,7 +32,7 @@
   const nameFor = (id: string) => spaces.find((space) => space.id === id)?.name;
 
   const onChoose = async () => {
-    const space = await modalManager.show(SpacePickerModal);
+    const space = await modalManager.show(SpacePickerModal, {});
     if (!space) {
       return;
     }

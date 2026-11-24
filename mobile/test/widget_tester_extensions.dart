@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:immich_mobile/constants/locales.dart';
 import 'package:immich_mobile/generated/codegen_loader.g.dart';
+import 'package:immich_mobile/utils/fallback_localizations.dart';
 
 extension PumpConsumerWidget on WidgetTester {
   /// Wraps the provided [widget] with a localized Material app such that it
@@ -20,6 +21,7 @@ extension PumpConsumerWidget on WidgetTester {
     Duration? duration,
     EnginePhase phase = EnginePhase.sendSemanticsUpdate,
     List<Override> overrides = const [],
+    Locale? locale,
   }) async {
     await pumpWidget(
       _localized(
@@ -27,6 +29,7 @@ extension PumpConsumerWidget on WidgetTester {
           overrides: overrides,
           child: _MaterialHost(child: widget),
         ),
+        locale: locale,
       ),
       duration: duration,
       phase: phase,
@@ -94,10 +97,10 @@ extension PumpConsumerWidgetDark on WidgetTester {
 /// `EasyLocalization.of(context)!`.
 Widget localizedForTest(Widget child) => _localized(child);
 
-Widget _localized(Widget child) => EasyLocalization(
+Widget _localized(Widget child, {Locale? locale}) => EasyLocalization(
   supportedLocales: locales.values.toList(),
   path: translationsPath,
-  startLocale: locales.values.first,
+  startLocale: locale ?? locales.values.first,
   fallbackLocale: locales.values.first,
   saveLocale: false,
   useFallbackTranslations: true,
@@ -140,7 +143,7 @@ class _MaterialHost extends StatelessWidget {
   Widget build(BuildContext context) => MaterialApp(
     debugShowCheckedModeBanner: false,
     theme: theme,
-    localizationsDelegates: context.localizationDelegates,
+    localizationsDelegates: [...context.localizationDelegates, ...fallbackLocalizationDelegates],
     supportedLocales: context.supportedLocales,
     locale: context.locale,
     home: Material(child: withStubRouter(child)),

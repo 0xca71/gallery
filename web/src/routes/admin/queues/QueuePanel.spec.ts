@@ -1,9 +1,8 @@
+import { renderWithTooltips } from '#test/unit/helpers.ts';
 import { QueueName, type QueueResponseDto } from '@immich/sdk';
-import '@testing-library/jest-dom';
-import { fireEvent, screen, waitFor } from '@testing-library/svelte';
 import { init, register, waitLocale } from 'svelte-i18n';
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { renderWithTooltips } from '$tests/helpers';
+import { page, userEvent } from 'vitest/browser';
 import QueuePanel from './QueuePanel.svelte';
 
 const mocks = vi.hoisted(() => ({
@@ -16,11 +15,11 @@ vi.mock(import('@immich/sdk'), async (importOriginal) => {
   return { ...actual, runQueueCommandLegacy: vi.fn() };
 });
 
-vi.mock(import('$lib/managers/queue-manager.svelte'), () => ({
+vi.mock(import('#lib/managers/queue-manager.svelte.js'), () => ({
   queueManager: { refresh: mocks.refresh } as never,
 }));
 
-vi.mock(import('$lib/managers/feature-flags-manager.svelte'), () => ({
+vi.mock(import('#lib/managers/feature-flags-manager.svelte.js'), () => ({
   featureFlagsManager: {
     get value() {
       return { sidecar: true, smartSearch: true, duplicateDetection: true, facialRecognition: true, ocr: true };
@@ -51,7 +50,7 @@ describe('QueuePanel', () => {
     // Load the real en bundle: this test PINS the exact updated copy of
     // admin.confirm_reprocess_all_pet_recognition (R8.6), which only means something against real
     // translated text, not the raw dev-fallback key.
-    register('en-US', () => import('$i18n/en.json'));
+    register('en-US', () => import('#i18n/en.json'));
     await init({ fallbackLocale: 'en-US' });
     await waitLocale('en-US');
   });
@@ -65,11 +64,11 @@ describe('QueuePanel', () => {
   // always happens and that reprocessing runs only while pet detection is enabled — the old copy
   // only mentioned the purge.
   it('shows the updated force-reset warning for pet recognition', async () => {
-    renderWithTooltips(QueuePanel, { queues: [makeQueue()] });
+    await renderWithTooltips(QueuePanel, { queues: [makeQueue()] });
 
-    await fireEvent.click(screen.getByText('Reset'));
+    await userEvent.click(page.getByText('Reset'));
 
-    await waitFor(() => {
+    await vi.waitFor(() => {
       expect(mocks.showDialog).toHaveBeenCalledWith({
         prompt:
           'Are you sure you want to reprocess all pet recognition? This always deletes all named pets and their embeddings. Reprocessing only runs while pet detection is enabled.',

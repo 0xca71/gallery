@@ -1,52 +1,17 @@
+// TODO: Dedupe against lib/presentation/widgets/map/map_utils.dart
 import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:immich_mobile/gallery/location_disclosure.dart';
 import 'package:immich_mobile/generated/translations.g.dart';
 import 'package:immich_mobile/widgets/common/confirm_dialog.dart';
 import 'package:logging/logging.dart';
-import 'package:maplibre_gl/maplibre_gl.dart';
 
 class MapUtils {
   const MapUtils._();
 
   static final Logger _log = Logger("MapUtils");
-  static const defaultSourceId = 'asset-map-markers';
-  static const defaultHeatMapLayerId = 'asset-heatmap-layer';
-
-  static const defaultHeatMapLayerProperties = HeatmapLayerProperties(
-    heatmapColor: [
-      Expressions.interpolate,
-      ["linear"],
-      ["heatmap-density"],
-      0.0,
-      "rgba(103,58,183,0.0)",
-      0.3,
-      "rgb(103,58,183)",
-      0.5,
-      "rgb(33,149,243)",
-      0.7,
-      "rgb(76,175,79)",
-      0.95,
-      "rgb(255,235,59)",
-      1.0,
-      "rgb(255,86,34)",
-    ],
-    heatmapIntensity: [
-      Expressions.interpolate, ["linear"], //
-      [Expressions.zoom],
-      0, 0.5,
-      9, 2,
-    ],
-    heatmapRadius: [
-      Expressions.interpolate, ["linear"], //
-      [Expressions.zoom],
-      0, 4,
-      4, 8,
-      9, 16,
-    ],
-    heatmapOpacity: 0.7,
-  );
 
   static Future<(Position?, LocationPermission?)> checkPermAndGetLocation({
     required BuildContext context,
@@ -64,24 +29,32 @@ class MapUtils {
       }
 
       LocationPermission permission = await Geolocator.checkPermission();
-      bool shouldContinueFromDisclosure = false;
+      if (permission == LocationPermission.deniedForever && !silent) {
+        return (
+          null,
+          context.mounted
+              ? await discloseBeforeAppSettings(context, (_) => _LocationPermissionDisabledDialog())
+              : LocationPermission.unableToDetermine,
+        );
+      }
+      bool shouldRequestPermission = false;
 
-      if ((permission == LocationPermission.denied || permission == LocationPermission.deniedForever) && !silent) {
+      if (permission == LocationPermission.denied && !silent) {
         if (!context.mounted) {
           return (null, LocationPermission.unableToDetermine);
         }
 
-        shouldContinueFromDisclosure =
-            await showDialog<bool>(context: context, builder: (context) => _LocationPermissionDisabledDialog()) ??
-            false;
-        if (shouldContinueFromDisclosure && permission == LocationPermission.denied) {
+        shouldRequestPermission = await confirmLocationDisclosure(context, (_) => _LocationPermissionDisabledDialog());
+        if (shouldRequestPermission) {
           permission = await Geolocator.requestPermission();
-        } else if (shouldContinueFromDisclosure && permission == LocationPermission.deniedForever) {
-          await Geolocator.openAppSettings();
         }
       }
 
       if (permission == LocationPermission.denied || permission == LocationPermission.deniedForever) {
+        // Open app settings only if you did not request for permission before
+        if (permission == LocationPermission.deniedForever && !shouldRequestPermission && !silent) {
+          await Geolocator.openAppSettings();
+        }
         return (null, LocationPermission.deniedForever);
       }
 

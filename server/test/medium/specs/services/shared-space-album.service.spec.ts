@@ -1,6 +1,10 @@
 import { Kysely } from 'kysely';
 import { StorageCore } from 'src/cores/storage.core.js';
 import { AlbumUserRole, AssetVisibility, JobName, JobStatus, TimeBucketSize } from 'src/enum.js';
+import { FaceSearchRepository } from 'src/gallery/repositories/face-search.repository.js';
+import { GalleryAssetRepository } from 'src/gallery/repositories/gallery-asset.repository.js';
+import { QueueMaintenanceRepository } from 'src/gallery/repositories/queue-maintenance.repository.js';
+import { SpaceAlbumRepository } from 'src/gallery/repositories/space-album.repository.js';
 import { AccessRepository } from 'src/repositories/access.repository.js';
 import { AlbumUserRepository } from 'src/repositories/album-user.repository.js';
 import { AlbumRepository } from 'src/repositories/album.repository.js';
@@ -39,6 +43,7 @@ const setup = () => {
       AlbumRepository,
       AlbumUserRepository,
       AssetRepository,
+      GalleryAssetRepository,
       // L7: removeMember wraps the membership delete + owned-album unlink in
       // this.databaseRepository.transaction() — needs a real connection to the test DB.
       DatabaseRepository,
@@ -61,6 +66,7 @@ const setupWithFaceMatch = () => {
       AlbumRepository,
       AlbumUserRepository,
       AssetRepository,
+      GalleryAssetRepository,
       SharedSpaceRepository,
       StackRepository,
       UserRepository,
@@ -69,13 +75,14 @@ const setupWithFaceMatch = () => {
       ConfigRepository,
       SystemMetadataRepository,
       SearchRepository,
+      FaceSearchRepository,
     ],
-    mock: [EventRepository, LoggingRepository, JobRepository, StorageRepository],
+    mock: [EventRepository, LoggingRepository, JobRepository, QueueMaintenanceRepository, StorageRepository],
   });
   const jobs = result.ctx.getMock(JobRepository);
   jobs.queue.mockResolvedValue();
   jobs.queueAll.mockResolvedValue();
-  jobs.hasInFlightDedupChain.mockResolvedValue(false);
+  result.ctx.getMock(QueueMaintenanceRepository).hasInFlightDedupChain.mockResolvedValue(false);
   return { ...result, jobs, faceIdentityRepository: result.ctx.get(FaceIdentityRepository) };
 };
 
@@ -492,7 +499,7 @@ describe('SharedSpaceService — handleSharedSpaceAlbumFaceSync', () => {
 const setupTimeline = () =>
   newMediumService(TimelineService, {
     database: defaultDatabase,
-    real: [AccessRepository, AssetRepository, PartnerRepository, SharedSpaceRepository],
+    real: [AccessRepository, AssetRepository, GalleryAssetRepository, PartnerRepository, SharedSpaceRepository],
     mock: [LoggingRepository],
   });
 
@@ -655,14 +662,14 @@ describe('SharedSpaceService — space access lifecycle via album branch', () =>
     const accessRepo = ctx.get(AccessRepository);
 
     // Before removal: a1 is accessible
-    const before = await accessRepo.asset.checkSpaceAccess(viewer.id, new Set([a1.id]));
+    const before = await accessRepo.spaceAsset.checkSpaceAccess(viewer.id, new Set([a1.id]));
     expect(before).toContain(a1.id);
 
     // Remove a1 from the album
     await ctx.get(AlbumRepository).removeAssetIds(album.id, [a1.id]);
 
     // After removal: a1 is no longer accessible
-    const after = await accessRepo.asset.checkSpaceAccess(viewer.id, new Set([a1.id]));
+    const after = await accessRepo.spaceAsset.checkSpaceAccess(viewer.id, new Set([a1.id]));
     expect(after).not.toContain(a1.id);
   });
 
@@ -685,13 +692,13 @@ describe('SharedSpaceService — space access lifecycle via album branch', () =>
     const accessRepo = ctx.get(AccessRepository);
 
     // Confirm accessible before removal
-    const before = await accessRepo.asset.checkSpaceAccess(viewer.id, new Set([a2.id]));
+    const before = await accessRepo.spaceAsset.checkSpaceAccess(viewer.id, new Set([a2.id]));
     expect(before).toContain(a2.id);
 
     // Remove from album — direct path should preserve access
     await ctx.get(AlbumRepository).removeAssetIds(album.id, [a2.id]);
 
-    const after = await accessRepo.asset.checkSpaceAccess(viewer.id, new Set([a2.id]));
+    const after = await accessRepo.spaceAsset.checkSpaceAccess(viewer.id, new Set([a2.id]));
     expect(after).toContain(a2.id);
   });
 
@@ -713,7 +720,7 @@ describe('SharedSpaceService — space access lifecycle via album branch', () =>
     // Confirm link and access exist before deletion
     const linkBefore = await ctx.get(SharedSpaceRepository).hasAlbumLink(space.id, album.id);
     expect(linkBefore).toBe(true);
-    const accessBefore = await accessRepo.asset.checkSpaceAccess(viewer.id, new Set([assetInA.id]));
+    const accessBefore = await accessRepo.spaceAsset.checkSpaceAccess(viewer.id, new Set([assetInA.id]));
     expect(accessBefore).toContain(assetInA.id);
 
     // Hard-delete the album (FK ON DELETE CASCADE removes shared_space_album row)
@@ -724,7 +731,7 @@ describe('SharedSpaceService — space access lifecycle via album branch', () =>
     expect(linkAfter).toBe(false);
 
     // Access should be revoked
-    const accessAfter = await accessRepo.asset.checkSpaceAccess(viewer.id, new Set([assetInA.id]));
+    const accessAfter = await accessRepo.spaceAsset.checkSpaceAccess(viewer.id, new Set([assetInA.id]));
     expect(accessAfter).not.toContain(assetInA.id);
   });
 
@@ -750,7 +757,7 @@ describe('SharedSpaceService — space access lifecycle via album branch', () =>
     const viewerAuth = factory.auth({ user: { id: viewer.id, email: viewer.email } });
 
     // Access and timeline should include the asset before soft-delete
-    const accessBefore = await ctx.get(AccessRepository).asset.checkSpaceAccess(viewer.id, new Set([assetInA.id]));
+    const accessBefore = await ctx.get(AccessRepository).spaceAsset.checkSpaceAccess(viewer.id, new Set([assetInA.id]));
     expect(accessBefore).toContain(assetInA.id);
 
     const bucketsBefore = await timelineSut.getTimeBuckets(viewerAuth, {
@@ -765,7 +772,7 @@ describe('SharedSpaceService — space access lifecycle via album branch', () =>
     await ctx.softDeleteAsset(assetInA.id);
 
     // Access should be revoked
-    const accessAfter = await ctx.get(AccessRepository).asset.checkSpaceAccess(viewer.id, new Set([assetInA.id]));
+    const accessAfter = await ctx.get(AccessRepository).spaceAsset.checkSpaceAccess(viewer.id, new Set([assetInA.id]));
     expect(accessAfter).not.toContain(assetInA.id);
 
     // Asset should no longer appear in timeline
@@ -799,7 +806,7 @@ describe('SharedSpaceService — space access lifecycle via album branch', () =>
     const accessRepo = ctx.get(AccessRepository);
 
     // The motion video should be accessible via the still's livePhotoVideoId
-    const accessedIds = await accessRepo.asset.checkSpaceAccess(viewer.id, new Set([motion.id]));
+    const accessedIds = await accessRepo.spaceAsset.checkSpaceAccess(viewer.id, new Set([motion.id]));
     expect(accessedIds).toContain(motion.id);
   });
 
@@ -828,7 +835,7 @@ describe('SharedSpaceService — space access lifecycle via album branch', () =>
     await ctx.newSharedSpaceAsset({ spaceId: space.id, assetId: directLockedAsset.id });
 
     const accessRepo = ctx.get(AccessRepository);
-    const accessedIds = await accessRepo.asset.checkSpaceAccess(
+    const accessedIds = await accessRepo.spaceAsset.checkSpaceAccess(
       viewer.id,
       new Set([albumLockedAsset.id, directLockedAsset.id]),
     );
@@ -1165,10 +1172,10 @@ describe('removeAssets (medium) — stack expansion bounded to direct members (S
 });
 
 /**
- * Wire SharedSpaceService + AlbumService sharing a real EventRepository so that
- * AlbumService.delete emits AlbumDelete and the SharedSpaceService.onAlbumDelete
- * handler fires synchronously (mirrors production: emit runs handlers before returning).
- */
+Wire SharedSpaceService + AlbumService sharing a real EventRepository so that
+AlbumService.delete emits AlbumDelete and the SharedSpaceService.onAlbumDelete
+handler fires synchronously (mirrors production: emit runs handlers before returning).
+*/
 const setupWithAlbumDelete = () => {
   // SharedSpaceService context — supplies all real face/space repos and the sut
   const spaceResult = newMediumService(SharedSpaceService, {
@@ -1178,6 +1185,7 @@ const setupWithAlbumDelete = () => {
       AlbumRepository,
       AlbumUserRepository,
       AssetRepository,
+      GalleryAssetRepository,
       SharedSpaceRepository,
       UserRepository,
     ],
@@ -1202,7 +1210,7 @@ const setupWithAlbumDelete = () => {
   // AlbumService context — only needs AccessRepository + AlbumRepository to be real.
   const albumResult = newMediumService(AlbumService, {
     database: defaultDatabase,
-    real: [AccessRepository, AlbumRepository, UserRepository],
+    real: [SpaceAlbumRepository, AccessRepository, AlbumRepository, UserRepository],
     mock: [EventRepository, LoggingRepository],
   });
 
@@ -1423,15 +1431,15 @@ describe('SharedSpaceService — removeMember atomicity (L7)', () => {
 });
 
 /**
- * Wire SharedSpaceService + UserService sharing a real EventRepository so that
- * UserService.handleUserDelete emits AlbumDelete and SharedSpaceService.onAlbumDelete
- * fires BEFORE albums are hard-deleted (same emit-then-delete ordering that the GREEN
- * implementation must guarantee). Mirrors the setupWithAlbumDelete pattern above.
- *
- * Assets are owned by Bob (not Alice) so that when Alice's user row is hard-deleted
- * the asset rows — and their associated asset_face / shared_space_person_face rows —
- * are NOT cascade-deleted.  This gives us clean, inspectable state after the call.
- */
+Wire SharedSpaceService + UserService sharing a real EventRepository so that
+UserService.handleUserDelete emits AlbumDelete and SharedSpaceService.onAlbumDelete
+fires BEFORE albums are hard-deleted (same emit-then-delete ordering that the GREEN
+implementation must guarantee). Mirrors the setupWithAlbumDelete pattern above.
+
+Assets are owned by Bob (not Alice) so that when Alice's user row is hard-deleted
+the asset rows — and their associated asset_face / shared_space_person_face rows —
+are NOT cascade-deleted.  This gives us clean, inspectable state after the call.
+*/
 const setupWithUserDelete = () => {
   // SharedSpaceService context — supplies all real face/space repos and the sut
   const spaceResult = newMediumService(SharedSpaceService, {
@@ -1441,6 +1449,7 @@ const setupWithUserDelete = () => {
       AlbumRepository,
       AlbumUserRepository,
       AssetRepository,
+      GalleryAssetRepository,
       SharedSpaceRepository,
       UserRepository,
     ],
@@ -1606,15 +1615,15 @@ describe('UserService — handleUserDelete: space face cleanup (faces F2)', () =
 });
 
 /**
- * Wire SharedSpaceService + UserAdminService sharing a real EventRepository so that
- * UserAdminService.delete() emits AlbumDelete and SharedSpaceService.onAlbumDelete fires
- * synchronously while the album_asset / shared_space_album rows still exist (mirrors the
- * setupWithUserDelete pattern above). The UserAdminService JobRepository is mocked so the
- * restore() re-projection queue calls can be asserted.
- *
- * Assets are owned by Bob (not Alice) so soft-deleting/restoring Alice's account leaves the
- * asset_face / shared_space_person_face rows intact for inspection.
- */
+Wire SharedSpaceService + UserAdminService sharing a real EventRepository so that
+UserAdminService.delete() emits AlbumDelete and SharedSpaceService.onAlbumDelete fires
+synchronously while the album_asset / shared_space_album rows still exist (mirrors the
+setupWithUserDelete pattern above). The UserAdminService JobRepository is mocked so the
+restore() re-projection queue calls can be asserted.
+
+Assets are owned by Bob (not Alice) so soft-deleting/restoring Alice's account leaves the
+asset_face / shared_space_person_face rows intact for inspection.
+*/
 const setupWithUserAdminDelete = () => {
   // SharedSpaceService context — supplies all real face/space repos and the onAlbumDelete handler
   const spaceResult = newMediumService(SharedSpaceService, {
@@ -1624,6 +1633,7 @@ const setupWithUserAdminDelete = () => {
       AlbumRepository,
       AlbumUserRepository,
       AssetRepository,
+      GalleryAssetRepository,
       SharedSpaceRepository,
       UserRepository,
     ],
@@ -1786,12 +1796,12 @@ describe('UserAdminService — restore: space face re-projection (faces F3b)', (
 });
 
 /**
- * Emit-timing note: AssetDelete fires AFTER the asset row (and cascaded asset_face →
- * shared_space_person_face rows) are already deleted.  The onAssetDelete handler therefore
- * receives the affected (spaceId, personId) pairs pre-captured at the emit site in
- * asset.service.ts BEFORE deletion.  These tests exercise the handler directly with
- * the pre-captured payload and verify it correctly recounts surviving persons and removes orphans.
- */
+Emit-timing note: AssetDelete fires AFTER the asset row (and cascaded asset_face →
+shared_space_person_face rows) are already deleted.  The onAssetDelete handler therefore
+receives the affected (spaceId, personId) pairs pre-captured at the emit site in
+asset.service.ts BEFORE deletion.  These tests exercise the handler directly with
+the pre-captured payload and verify it correctly recounts surviving persons and removes orphans.
+*/
 describe('SharedSpaceService — onAssetDelete face cleanup', () => {
   it('getSpacePersonsForAsset returns (spaceId, personId) pairs for faces on the asset', async () => {
     const { ctx } = setup();

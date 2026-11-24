@@ -1,5 +1,5 @@
+import type { TimelineDate, TimelineDateTime, TimelineYearMonth } from '#lib/utils/timeline-util.ts';
 import type { AssetStackResponseDto, AssetVisibility } from '@immich/sdk';
-import type { TimelineDate, TimelineDateTime, TimelineYearMonth } from '$lib/utils/timeline-util';
 
 export type ViewportTopMonth = TimelineYearMonth | undefined | 'lead-in' | 'lead-out';
 
@@ -30,7 +30,6 @@ export type TimelineAsset = {
   tags?: string[];
   ratio: number;
   thumbhash: string | null;
-  fileModifiedAt?: string;
   localDateTime: TimelineDateTime;
   createdAt: TimelineDateTime;
   fileCreatedAt: TimelineDateTime;

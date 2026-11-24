@@ -1,9 +1,6 @@
-import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { dirname, join, relative, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { createFilterState } from '$lib/components/filter-panel/filter-panel';
-import { OpenQueryParam } from '$lib/constants';
-import { Route } from '$lib/route';
+import { createFilterState } from '#lib/components/filter-panel/filter-panel.ts';
+import { OpenQueryParam } from '#lib/constants.ts';
+import { Route } from '#lib/route.ts';
 
 describe('Route', () => {
   describe(Route.login.name, () => {
@@ -15,11 +12,11 @@ describe('Route', () => {
   });
 
   describe(Route.search.name, () => {
-    it('should work', () => {
+    it('omits the query when the search terms are empty', () => {
       expect(Route.search({})).toBe('/search');
     });
 
-    it('should work', () => {
+    it('drops undefined terms from the query', () => {
       expect(Route.search({ make: undefined, model: 'Immich' })).toBe('/search?query=%7B%22model%22%3A%22Immich%22%7D');
     });
 
@@ -49,7 +46,7 @@ describe('Route', () => {
   });
 
   describe(Route.tags.name, () => {
-    it('should work', () => {
+    it('links to the tag root', () => {
       expect(Route.tags()).toBe('/tags');
     });
 
@@ -63,7 +60,7 @@ describe('Route', () => {
   });
 
   describe(Route.systemSettings.name, () => {
-    it('should work', () => {
+    it('links to the settings page', () => {
       expect(Route.systemSettings()).toBe('/admin/system-settings');
     });
 
@@ -73,21 +70,14 @@ describe('Route', () => {
   });
 
   describe(Route.continue.name, () => {
-    beforeEach(() => {
-      // @ts-expect-error - override location for testing
-      // eslint-disable-next-line unicorn/no-global-object-property-assignment
-      globalThis.location = new URL('https://my.immich.server');
-      vi.spyOn(document, 'baseURI', 'get').mockReturnValue('https://my.immich.server/');
-    });
-
     it('should resolve relative URLs', () => {
-      expect(Route.continue('/some/path', '/fallback')).property('href', 'https://my.immich.server/some/path');
+      expect(Route.continue('/some/path', '/fallback')).property('href', `${location.origin}/some/path`);
     });
 
     it('should resolve absolute URLs on the same origin', () => {
-      expect(Route.continue('https://my.immich.server/some/path', '/fallback')).property(
+      expect(Route.continue(`${location.origin}/some/path`, '/fallback')).property(
         'href',
-        'https://my.immich.server/some/path',
+        `${location.origin}/some/path`,
       );
     });
 
@@ -96,7 +86,7 @@ describe('Route', () => {
     });
 
     it('should return fallback for null URLs', () => {
-      expect(Route.continue(null, '/fallback')).property('href', 'https://my.immich.server/fallback');
+      expect(Route.continue(null, '/fallback')).property('href', `${location.origin}/fallback`);
     });
 
     it('should block javascript: URLs', () => {
@@ -219,63 +209,5 @@ describe('Route', () => {
         '/map?spaceId=space-1',
       );
     });
-  });
-});
-
-describe('Route.search call sites', () => {
-  // web/src/lib/ -> up 1 -> web/src
-  const SRC_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-
-  // Every in-app link to the deprecated /search page. The page itself is kept as a landing page
-  // for old bookmarks, but nothing new may point at it: a palette/search-bar result belongs on
-  // the surface it has context of (#922). This is a SUBSET assertion, so PRs that remove a call
-  // site (#778 for the info panel, #884 for the Explore/Places tiles) do not have to edit it.
-  // If this fails, the fix is almost never to add the new file here — it's to route the result
-  // contextually (filter the surface the user is already on), the way Tasks 2-5 did for the
-  // palette. Only extend the allowlist for a genuinely new, deliberate landing-page-style link.
-  // The check is a literal substring match on `Route.search`, not an AST or type-aware scan: it
-  // does not catch computed access (`Route['search'](...)`) or an aliased import
-  // (`import { Route as R } from '$lib/route'; R.search(...)`). Neither shape exists in web/src
-  // today; if one appears, this guard will not see it.
-  const ALLOWED = new Set([
-    'lib/components/asset-viewer/DetailPanel.svelte',
-    'lib/services/asset.service.ts',
-    'routes/(user)/explore/+page.svelte',
-    'routes/(user)/places/PlacesCardGroup.svelte',
-    'routes/(user)/search/[[photos=photos]]/[[assetId=id]]/+page.svelte',
-  ]);
-
-  function walk(dir: string, found: string[] = []): string[] {
-    for (const name of readdirSync(dir)) {
-      const full = join(dir, name);
-      if (statSync(full).isDirectory()) {
-        walk(full, found);
-        continue;
-      }
-      if (!/\.(ts|svelte)$/.test(name) || /\.spec\.ts$/.test(name)) {
-        continue;
-      }
-      // Anchored so a local like `previousRoute.search` cannot masquerade as `Route.search`
-      // — a plain substring match reads the tail of any identifier ending in `Route`.
-      if (/(?<![A-Za-z0-9_$])Route\.search\b/.test(readFileSync(full, 'utf8'))) {
-        found.push(relative(SRC_ROOT, full));
-      }
-    }
-    return found;
-  }
-
-  // Upstream's own search UI is carried dormant — present, byte-identical to upstream, and never
-  // mounted — so that upstream's search commits auto-merge instead of conflicting. See
-  // lib/components/shared-components/search-bar/DORMANT.md. Its `Route.search` calls are not
-  // in-app links, because nothing in the fork imports those files. They are excluded rather than
-  // allowlisted, so that a real new call site in live code still fails this guard.
-  const DORMANT = ['lib/components/shared-components/search-bar/', 'lib/managers/search-manager.svelte.ts'];
-
-  it('are a subset of the allowlist', () => {
-    const unexpected = walk(SRC_ROOT)
-      .filter((file) => DORMANT.every((prefix) => !file.startsWith(prefix)))
-      .filter((file) => !ALLOWED.has(file));
-
-    expect(unexpected).toEqual([]);
   });
 });

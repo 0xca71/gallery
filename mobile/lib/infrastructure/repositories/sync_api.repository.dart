@@ -5,6 +5,7 @@ import 'package:http/http.dart' as http;
 import 'package:immich_mobile/constants/constants.dart';
 import 'package:immich_mobile/domain/models/server_capability.model.dart';
 import 'package:immich_mobile/domain/models/sync_event.model.dart';
+import 'package:immich_mobile/infrastructure/repositories/gallery_sync_stream.repository.dart';
 import 'package:immich_mobile/infrastructure/repositories/network.repository.dart';
 import 'package:immich_mobile/services/api.service.dart';
 import 'package:immich_mobile/utils/semver.dart';
@@ -23,6 +24,20 @@ class SyncApiRepository {
   Future<void> deleteSyncAck(List<SyncEntityType> types) {
     return _api.syncApi.deleteSyncAck(SyncAckDeleteDto(types: Optional.present(types)));
   }
+
+  /// The fork's original shared-space and library request types. Every fork server accepts them;
+  /// a stock Immich server does not.
+  static const _forkSyncTypes = [
+    SyncRequestType.sharedSpacesV1,
+    SyncRequestType.sharedSpaceMembersV1,
+    SyncRequestType.sharedSpaceAssetsV1,
+    SyncRequestType.sharedSpaceAssetExifsV1,
+    SyncRequestType.sharedSpaceToAssetsV1,
+    SyncRequestType.librariesV1,
+    SyncRequestType.libraryAssetsV1,
+    SyncRequestType.libraryAssetExifsV1,
+    SyncRequestType.sharedSpaceLibrariesV1,
+  ];
 
   /// The Phase-2B space-album request types that are safe to send from the `serverVersion >
   /// 5.0.0` fallback below: the original five that every fork server shipping version-gated
@@ -45,6 +60,12 @@ class SyncApiRepository {
   /// list, never `_legacySpaceAlbumSyncTypes`.
   static const _spaceAlbumSyncTypes = [..._legacySpaceAlbumSyncTypes, SyncRequestType.sharedSpaceAlbumFoldersV1];
 
+  /// The #763 per-user favorites request type. Introduced after M14 capability signalling
+  /// shipped, so — like SharedSpaceAlbumFoldersV1 in [_spaceAlbumSyncTypes] — it is only ever
+  /// requested behind an explicit server declaration (`supportedSyncTypes`), never on a
+  /// version-gate fallback.
+  static const _assetFavoriteSyncTypes = [SyncRequestType.assetFavoritesV1];
+
   Future<void> streamChanges(
     Future<void> Function(List<SyncEvent>, Function() abort, Function() reset) onData, {
     required SemVer serverVersion,
@@ -62,14 +83,23 @@ class SyncApiRepository {
 
     final request = http.AbortableRequest('POST', Uri.parse(endpoint), abortTrigger: abortSignal);
     request.headers.addAll(headers);
+
+    // Gallery: upstream gates its 3.3-era request types (AuthUsersV2, MemoriesV2,
+    // MemoryToAssetsV2, AssetFacesV3) on serverVersion >= 3.3.0. A Gallery server reports its own
+    // version (5.x), which clears that gate on every release, including the 5.7.x line that does
+    // not know these types, and an unknown request type 400s the WHOLE /sync/stream request. Like
+    // the fork's own post-signalling types below, they are requested only when the server declares
+    // them; with no declaration the client stays on the earlier version of each stream.
+    bool declares(SyncRequestType type) => supportedSyncTypes?.contains(type.toJson()) ?? false;
+
     request.body = jsonEncode(
       SyncStreamDto(
         types: [
-          SyncRequestType.authUsersV1,
+          declares(SyncRequestType.authUsersV2) ? SyncRequestType.authUsersV2 : SyncRequestType.authUsersV1,
           SyncRequestType.usersV1,
           serverVersion.supports(.syncV2) ? SyncRequestType.assetsV2 : SyncRequestType.assetsV1,
           SyncRequestType.assetExifsV1,
-          if (serverVersion.supports(.assetEdits)) SyncRequestType.assetEditsV1,
+          if (serverVersion.supports(.syncAssetEditsV1)) SyncRequestType.assetEditsV1,
           SyncRequestType.assetMetadataV1,
           SyncRequestType.partnersV1,
           serverVersion.supports(.syncV2) ? SyncRequestType.partnerAssetsV2 : SyncRequestType.partnerAssetsV1,
@@ -79,35 +109,28 @@ class SyncApiRepository {
           serverVersion.supports(.syncV2) ? SyncRequestType.albumAssetsV2 : SyncRequestType.albumAssetsV1,
           SyncRequestType.albumAssetExifsV1,
           SyncRequestType.albumToAssetsV1,
-          SyncRequestType.memoriesV1,
-          SyncRequestType.memoryToAssetsV1,
+          declares(SyncRequestType.memoriesV2) ? SyncRequestType.memoriesV2 : SyncRequestType.memoriesV1,
+          declares(SyncRequestType.memoryToAssetsV2)
+              ? SyncRequestType.memoryToAssetsV2
+              : SyncRequestType.memoryToAssetsV1,
           SyncRequestType.stacksV1,
           SyncRequestType.partnerStacksV1,
           SyncRequestType.userMetadataV1,
           SyncRequestType.peopleV1,
-          serverVersion.supports(.assetFacesV2) ? SyncRequestType.assetFacesV2 : SyncRequestType.assetFacesV1,
-          if (serverVersion.supports(.assetOcr)) SyncRequestType.assetOcrV1,
+          declares(SyncRequestType.assetFacesV3)
+              ? SyncRequestType.assetFacesV3
+              : serverVersion.supports(.syncAssetFacesV2)
+              ? SyncRequestType.assetFacesV2
+              : SyncRequestType.assetFacesV1,
+          if (serverVersion.supports(.syncAssetOcrV1)) SyncRequestType.assetOcrV1,
           // --- gallery-fork: shared-space + library sync types ---
           //
-          // PR 1 added the server emitters and the mobile dispatch handlers but
-          // never added these types to the mobile's request list, so the sync
-          // stream silently skipped them. PR 2's SpaceDetailPage UI switchover
-          // surfaced the bug because the new Drift-backed timeline depends on
-          // these tables being populated. Without these entries the
-          // shared_space_*, library_* tables stay empty forever.
-          //
-          // These are gallery-fork-only types — a stock Immich server will
-          // reject the request. The mobile build is intended to talk only to
-          // gallery-fork servers.
-          SyncRequestType.sharedSpacesV1,
-          SyncRequestType.sharedSpaceMembersV1,
-          SyncRequestType.sharedSpaceAssetsV1,
-          SyncRequestType.sharedSpaceAssetExifsV1,
-          SyncRequestType.sharedSpaceToAssetsV1,
-          SyncRequestType.librariesV1,
-          SyncRequestType.libraryAssetsV1,
-          SyncRequestType.libraryAssetExifsV1,
-          SyncRequestType.sharedSpaceLibrariesV1,
+          // A stock Immich server 400s the WHOLE /sync/stream request on any of these, so they ride
+          // the same declaration-or-version gate as the legacy space-album types below.
+          if (supportedSyncTypes != null)
+            ...(_forkSyncTypes.where((type) => supportedSyncTypes.contains(type.toJson())))
+          else if (serverVersion > const SemVer(major: 5, minor: 0, patch: 0))
+            ..._forkSyncTypes,
           // --- gallery-fork: shared-space album sync types (Phase 2B) ---
           //
           // mobile-1: gate the legacy 5 request types behind the fork-server version that
@@ -121,12 +144,12 @@ class SyncApiRepository {
           // is the last release WITHOUT space-albums; the feature (and its original five
           // enum values) ship in the next release, so gate on strictly-after-5.0.0, which
           // also admits the feature's release-candidates. See slice-5 plan §0.1 for the
-          // full evidence and the release-time reconciliation note. There is no
-          // complementary server-side defense: a slice-5 filter that dropped unknown
-          // request types was later reverted, so an older/skewed server's
-          // SyncRequestTypeSchema still 400s the WHOLE /sync/stream request on any
-          // unrecognized type. This client-side version gate is therefore the ONLY
-          // protection — every future gallery-fork-only request type MUST be gated the
+          // full evidence and the release-time reconciliation note.
+          // Servers from the unknown-type filter in server/src/dtos/sync.dto.ts onward DROP request
+          // types they do not know instead of rejecting the request, but every deployed server older
+          // than that still 400s the WHOLE /sync/stream request on any unrecognized type, so this
+          // client-side version gate remains the protection for those servers. Every future
+          // gallery-fork-only request type MUST be gated the
           // same way. CAVEAT: that was true only until capability signalling shipped — see
           // the M14 paragraph immediately below, which supersedes this instruction for any
           // request type introduced afterward. Do NOT add a new type to
@@ -150,6 +173,17 @@ class SyncApiRepository {
             ...(_spaceAlbumSyncTypes.where((type) => supportedSyncTypes.contains(type.toJson())))
           else if (serverVersion > const SemVer(major: 5, minor: 0, patch: 0))
             ..._legacySpaceAlbumSyncTypes,
+          // #763 per-user favorites stream. AssetFavoritesV1 was introduced AFTER capability
+          // signalling shipped (v5.7.0), so — exactly like SharedSpaceAlbumFoldersV1 above — it
+          // is sent ONLY behind an explicit server declaration, never on a version fallback: no
+          // pre-declaration server (fork 5.2.1–5.6.x) can accept it, and a pre-filter server 400s
+          // the WHOLE /sync/stream request on an unknown value. A null declaration therefore sends
+          // nothing here.
+          // Membership is tested with `toJson()`, matching the space-album filter above — the
+          // generated enum has no `.value`.
+          if (supportedSyncTypes != null)
+            ...(_assetFavoriteSyncTypes.where((type) => supportedSyncTypes.contains(type.toJson()))),
+          if (declares(SyncRequestType.sharedSpaceStacksV1)) SyncRequestType.sharedSpaceStacksV1,
         ],
       ).toJson(),
     );
@@ -216,7 +250,20 @@ class SyncApiRepository {
         continue;
       }
 
-      data.add(SyncEvent(type: type, data: converter(dataJson), ack: ack));
+      // A Gallery server older than the trim endpoint sends trims as `AssetEditV1` rows whose action this client's
+      // enum no longer has; skipping that line keeps the rest of the stream syncing. Any other line fails as upstream.
+      final Object event;
+      try {
+        event = converter(dataJson);
+      } catch (error) {
+        if (type != SyncEntityType.assetEditV1) {
+          rethrow;
+        }
+        final id = dataJson is Map ? dataJson['id'] : null;
+        _logger.warning("Skipping undecodable $type line (id: $id): $error");
+        continue;
+      }
+      data.add(SyncEvent(type: type, data: event, ack: ack));
     }
 
     return data;
@@ -225,6 +272,7 @@ class SyncApiRepository {
 
 const _kResponseMap = <SyncEntityType, Function(Object)>{
   SyncEntityType.authUserV1: SyncAuthUserV1.fromJson,
+  SyncEntityType.authUserV2: SyncAuthUserV2.fromJson,
   SyncEntityType.userV1: SyncUserV1.fromJson,
   SyncEntityType.userDeleteV1: SyncUserDeleteV1.fromJson,
   SyncEntityType.partnerV1: SyncPartnerV1.fromJson,
@@ -264,9 +312,11 @@ const _kResponseMap = <SyncEntityType, Function(Object)>{
   SyncEntityType.albumToAssetDeleteV1: SyncAlbumToAssetDeleteV1.fromJson,
   SyncEntityType.syncAckV1: _SyncEmptyDto.fromJson,
   SyncEntityType.syncResetV1: _SyncEmptyDto.fromJson,
-  SyncEntityType.memoryV1: SyncMemoryV1.fromJson,
+  SyncEntityType.memoryV1: SyncMemoryV2.fromJson,
+  SyncEntityType.memoryV2: SyncMemoryV2.fromJson,
   SyncEntityType.memoryDeleteV1: SyncMemoryDeleteV1.fromJson,
   SyncEntityType.memoryToAssetV1: SyncMemoryAssetV1.fromJson,
+  SyncEntityType.memoryToAssetV2: SyncMemoryAssetV1.fromJson,
   SyncEntityType.memoryToAssetDeleteV1: SyncMemoryAssetDeleteV1.fromJson,
   SyncEntityType.stackV1: SyncStackV1.fromJson,
   SyncEntityType.stackDeleteV1: SyncStackDeleteV1.fromJson,
@@ -278,60 +328,13 @@ const _kResponseMap = <SyncEntityType, Function(Object)>{
   SyncEntityType.personV1: SyncPersonV1.fromJson,
   SyncEntityType.personDeleteV1: SyncPersonDeleteV1.fromJson,
   SyncEntityType.assetFaceV1: SyncAssetFaceV1.fromJson,
-  SyncEntityType.assetFaceV2: SyncAssetFaceV2.fromJson,
+  SyncEntityType.assetFaceV2: SyncAssetFaceV3.fromJson,
+  SyncEntityType.assetFaceV3: SyncAssetFaceV3.fromJson,
   SyncEntityType.assetFaceDeleteV1: SyncAssetFaceDeleteV1.fromJson,
   SyncEntityType.assetOcrV1: SyncAssetOcrV1.fromJson,
   SyncEntityType.assetOcrDeleteV1: SyncAssetOcrDeleteV1.fromJson,
   SyncEntityType.syncCompleteV1: _SyncEmptyDto.fromJson,
-  // --- gallery-fork: shared-space sync types ---
-  SyncEntityType.sharedSpaceV1: SyncSharedSpaceV1.fromJson,
-  SyncEntityType.sharedSpaceDeleteV1: SyncSharedSpaceDeleteV1.fromJson,
-  SyncEntityType.sharedSpaceMemberV1: SyncSharedSpaceMemberV1.fromJson,
-  SyncEntityType.sharedSpaceMemberBackfillV1: SyncSharedSpaceMemberV1.fromJson,
-  SyncEntityType.sharedSpaceMemberDeleteV1: SyncSharedSpaceMemberDeleteV1.fromJson,
-  SyncEntityType.sharedSpaceAssetCreateV1: SyncAssetV1.fromJson,
-  SyncEntityType.sharedSpaceAssetUpdateV1: SyncAssetV1.fromJson,
-  SyncEntityType.sharedSpaceAssetBackfillV1: SyncAssetV1.fromJson,
-  SyncEntityType.sharedSpaceAssetExifCreateV1: SyncAssetExifV1.fromJson,
-  SyncEntityType.sharedSpaceAssetExifUpdateV1: SyncAssetExifV1.fromJson,
-  SyncEntityType.sharedSpaceAssetExifBackfillV1: SyncAssetExifV1.fromJson,
-  SyncEntityType.sharedSpaceToAssetV1: SyncSharedSpaceToAssetV1.fromJson,
-  SyncEntityType.sharedSpaceToAssetBackfillV1: SyncSharedSpaceToAssetV1.fromJson,
-  SyncEntityType.sharedSpaceToAssetDeleteV1: SyncSharedSpaceToAssetDeleteV1.fromJson,
-  // --- gallery-fork: library sync types ---
-  SyncEntityType.libraryV1: SyncLibraryV1.fromJson,
-  SyncEntityType.libraryDeleteV1: SyncLibraryDeleteV1.fromJson,
-  SyncEntityType.libraryAssetCreateV1: SyncAssetV1.fromJson,
-  SyncEntityType.libraryAssetBackfillV1: SyncAssetV1.fromJson,
-  SyncEntityType.libraryAssetDeleteV1: SyncLibraryAssetDeleteV1.fromJson,
-  SyncEntityType.libraryAssetExifCreateV1: SyncAssetExifV1.fromJson,
-  SyncEntityType.libraryAssetExifBackfillV1: SyncAssetExifV1.fromJson,
-  SyncEntityType.sharedSpaceLibraryV1: SyncSharedSpaceLibraryV1.fromJson,
-  SyncEntityType.sharedSpaceLibraryBackfillV1: SyncSharedSpaceLibraryV1.fromJson,
-  SyncEntityType.sharedSpaceLibraryDeleteV1: SyncSharedSpaceLibraryDeleteV1.fromJson,
-  // --- gallery-fork: shared-space album sync types (Phase 2B) ---
-  SyncEntityType.sharedSpaceAlbumV1: SyncAlbumV2.fromJson,
-  SyncEntityType.sharedSpaceAlbumBackfillV1: SyncAlbumV2.fromJson,
-  SyncEntityType.sharedSpaceAlbumDeleteV1: SyncAlbumDeleteV1.fromJson,
-  SyncEntityType.sharedSpaceAlbumLinkV1: SyncSharedSpaceAlbumLinkV1.fromJson,
-  SyncEntityType.sharedSpaceAlbumLinkBackfillV1: SyncSharedSpaceAlbumLinkV1.fromJson,
-  SyncEntityType.sharedSpaceAlbumLinkDeleteV1: SyncSharedSpaceAlbumLinkDeleteV1.fromJson,
-  SyncEntityType.sharedSpaceAlbumFolderV1: SyncSharedSpaceAlbumFolderV1.fromJson,
-  SyncEntityType.sharedSpaceAlbumFolderBackfillV1: SyncSharedSpaceAlbumFolderV1.fromJson,
-  SyncEntityType.sharedSpaceAlbumFolderDeleteV1: SyncSharedSpaceAlbumFolderDeleteV1.fromJson,
-  SyncEntityType.sharedSpaceAlbumToAssetV1: SyncAlbumToAssetV1.fromJson,
-  SyncEntityType.sharedSpaceAlbumToAssetBackfillV1: SyncAlbumToAssetV1.fromJson,
-  SyncEntityType.sharedSpaceAlbumToAssetDeleteV1: SyncAlbumToAssetDeleteV1.fromJson,
-  SyncEntityType.sharedSpaceAlbumAssetCreateV1: SyncAssetV2.fromJson,
-  SyncEntityType.sharedSpaceAlbumAssetUpdateV1: SyncAssetV2.fromJson,
-  SyncEntityType.sharedSpaceAlbumAssetBackfillV1: SyncAssetV2.fromJson,
-  SyncEntityType.sharedSpaceAlbumAssetExifCreateV1: SyncAssetExifV1.fromJson,
-  SyncEntityType.sharedSpaceAlbumAssetExifUpdateV1: SyncAssetExifV1.fromJson,
-  SyncEntityType.sharedSpaceAlbumAssetExifBackfillV1: SyncAssetExifV1.fromJson,
-  // gallery-fork (#1041): per-member "hidden from my timeline" album rows.
-  SyncEntityType.sharedSpaceAlbumHiddenV1: SyncSharedSpaceAlbumHiddenV1.fromJson,
-  SyncEntityType.sharedSpaceAlbumHiddenBackfillV1: SyncSharedSpaceAlbumHiddenV1.fromJson,
-  SyncEntityType.sharedSpaceAlbumHiddenDeleteV1: SyncSharedSpaceAlbumHiddenDeleteV1.fromJson,
+  ...gallerySyncResponseMap,
 };
 
 class _SyncEmptyDto {

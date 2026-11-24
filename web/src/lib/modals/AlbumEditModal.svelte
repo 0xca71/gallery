@@ -1,7 +1,8 @@
 <script lang="ts">
-  import AlbumCover from '$lib/components/album-page/AlbumCover.svelte';
-  import DateInput from '$lib/elements/DateInput.svelte';
-  import { handleUpdateAlbum } from '$lib/services/album.service';
+  import AlbumCover from '#lib/components/album-page/AlbumCover.svelte';
+  import DateInput from '#lib/elements/DateInput.svelte';
+  import { updateAlbumInfoMutation } from '#lib/queries/album.query.ts';
+  import { executeMutation } from '#lib/queries/client.ts';
   import { type AlbumResponseDto, type UpdateAlbumDto } from '@immich/sdk';
   import { Field, FormModal, Input, Label, Textarea } from '@immich/ui';
   import { mdiRenameOutline } from '@mdi/js';
@@ -35,10 +36,7 @@
       dto.createdAt = iso;
     }
 
-    const success = await handleUpdateAlbum(album, dto);
-    if (success) {
-      onClose();
-    }
+    await executeMutation(updateAlbumInfoMutation, [{ id: album.id, updateAlbumDto: dto }], { onSuccess: onClose });
   };
 </script>
 

@@ -1,12 +1,12 @@
 import {
   Column,
   ForeignKeyColumn,
-  type Generated,
   Index,
   Int8,
   Table,
   Timestamp,
   UpdateDateColumn,
+  type Generated,
 } from '@immich/sql-tools';
 import { LockableProperty } from 'src/database.js';
 import { UpdateIdColumn, UpdatedAtTrigger } from 'src/decorators.js';
@@ -23,6 +23,8 @@ import { AssetTable } from 'src/schema/tables/asset.table.js';
   using: 'gin',
   expression: 'f_unaccent("description") gin_trgm_ops',
 })
+// gallery-fork: Library Cleanup space hogs (a plain btree also serves ORDER BY ... DESC)
+@Index({ name: 'asset_exif_fileSizeInByte_idx', columns: ['fileSizeInByte'] })
 @UpdatedAtTrigger('asset_exif_updatedAt')
 export class AssetExifTable {
   @ForeignKeyColumn(() => AssetTable, { onDelete: 'CASCADE', primary: true })
@@ -78,9 +80,6 @@ export class AssetExifTable {
 
   @Column({ type: 'character varying', nullable: true })
   country!: string | null;
-
-  @Column({ type: 'text', nullable: true })
-  formattedAddress!: string | null;
 
   @Column({ type: 'text', default: '' })
   description!: Generated<string>; // or caption

@@ -1,85 +1,54 @@
 <script lang="ts">
-  import { afterNavigate, goto, invalidateAll } from '$app/navigation';
-  import { page } from '$app/stores';
-  import { clickOutside } from '$lib/actions/click-outside';
-  import { listNavigation } from '$lib/actions/list-navigation';
-  import { scrollMemoryClearer } from '$lib/actions/scroll-memory';
-  import ImageThumbnail from '$lib/components/assets/thumbnail/ImageThumbnail.svelte';
-  import PeopleMergeSelector from '$lib/components/people/people-merge-selector.svelte';
-  import OnEvents from '$lib/components/OnEvents.svelte';
-  import ButtonContextMenu from '$lib/components/shared-components/context-menu/ButtonContextMenu.svelte';
-  import MenuOption from '$lib/components/shared-components/context-menu/MenuOption.svelte';
-  import ControlAppBar from '$lib/components/shared-components/ControlAppBar.svelte';
-  import ArchiveAction from '$lib/components/timeline/actions/ArchiveAction.svelte';
-  import ChangeDate from '$lib/components/timeline/actions/ChangeDateAction.svelte';
-  import ChangeDescription from '$lib/components/timeline/actions/ChangeDescriptionAction.svelte';
-  import ChangeLocation from '$lib/components/timeline/actions/ChangeLocationAction.svelte';
-  import CreateSharedLink from '$lib/components/timeline/actions/CreateSharedLinkAction.svelte';
-  import DeleteAssets from '$lib/components/timeline/actions/DeleteAssetsAction.svelte';
-  import DownloadAction from '$lib/components/timeline/actions/DownloadAction.svelte';
-  import FavoriteAction from '$lib/components/timeline/actions/FavoriteAction.svelte';
-  import SelectAllAssets from '$lib/components/timeline/actions/SelectAllAction.svelte';
-  import SetVisibilityAction from '$lib/components/timeline/actions/SetVisibilityAction.svelte';
-  import TagAction from '$lib/components/timeline/actions/TagAction.svelte';
-  import AssetSelectControlBar from '$lib/components/timeline/AssetSelectControlBar.svelte';
-  import Timeline from '$lib/components/timeline/Timeline.svelte';
-  import TimelineRouteGroupingBar from '$lib/components/timeline/TimelineRouteGroupingBar.svelte';
-  import SearchAddAllToCollectionModal from '$lib/modals/SearchAddAllToCollectionModal.svelte';
-  import { PersonPageViewMode, QueryParameter, SessionStorageKey } from '$lib/constants';
-  import { assetMultiSelectManager } from '$lib/managers/asset-multi-select-manager.svelte';
-  import { authManager } from '$lib/managers/auth-manager.svelte';
-  import { featureFlagsManager } from '$lib/managers/feature-flags-manager.svelte';
-  import { TimelineManager } from '$lib/managers/timeline-manager/timeline-manager.svelte';
-  import type { TimelineAsset, TimelineGrouping, TimelineTemporalAnchor } from '$lib/managers/timeline-manager/types';
-  import PersonMergeSuggestionModal from '$lib/modals/PersonMergeSuggestionModal.svelte';
-  import PersonSuggestionBanner from '$lib/components/faces-page/person-suggestion-banner.svelte';
-  import PersonSuggestionReviewModal from '$lib/modals/PersonSuggestionReviewModal.svelte';
-  import RepresentativeFacePickerModal from '$lib/modals/RepresentativeFacePickerModal.svelte';
-  import { Route } from '$lib/route';
-  import { getAssetBulkActions } from '$lib/services/asset.service';
+  import { clickOutside } from '#lib/actions/click-outside.ts';
+  import { listNavigation } from '#lib/actions/list-navigation.ts';
+  import { scrollMemoryClearer } from '#lib/actions/scroll-memory.svelte.ts';
+  import ActionMenuItem from '#lib/components/ActionMenuItem.svelte';
+  import OnEvents from '#lib/components/OnEvents.svelte';
+  import ImageThumbnail from '#lib/components/assets/thumbnail/ImageThumbnail.svelte';
+  import PersonIndicator from '#lib/components/faces-page/PersonIndicator.svelte';
+  import ControlAppBar from '#lib/components/shared-components/ControlAppBar.svelte';
+  import ButtonContextMenu from '#lib/components/shared-components/context-menu/ButtonContextMenu.svelte';
+  import MenuOption from '#lib/components/shared-components/context-menu/MenuOption.svelte';
+  import AssetSelectControlBar from '#lib/components/timeline/AssetSelectControlBar.svelte';
+  import Timeline from '#lib/components/timeline/Timeline.svelte';
+  import TimelineRouteGroupingBar from '#lib/components/timeline/TimelineRouteGroupingBar.svelte';
+  import ChangeDate from '#lib/components/timeline/actions/ChangeDateAction.svelte';
+  import ChangeDescription from '#lib/components/timeline/actions/ChangeDescriptionAction.svelte';
+  import ChangeLocation from '#lib/components/timeline/actions/ChangeLocationAction.svelte';
+  import DeleteAssets from '#lib/components/timeline/actions/DeleteAssetsAction.svelte';
+  import DownloadAction from '#lib/components/timeline/actions/DownloadAction.svelte';
+  import FavoriteAction from '#lib/components/timeline/actions/FavoriteAction.svelte';
+  import SelectAllAssets from '#lib/components/timeline/actions/SelectAllAction.svelte';
+  import SetVisibilityAction from '#lib/components/timeline/actions/SetVisibilityAction.svelte';
+  import { PersonPageViewMode, QueryParameter, SessionStorageKey } from '#lib/constants.ts';
+  import { timelineGroupingProps } from '#lib/gallery/filtered-timeline/timeline-grouping.svelte.ts';
+  import MergeFaceSelector from '#lib/gallery/people/MergeFaceSelector.svelte';
+  import PersonSuggestions from '#lib/gallery/people/PersonSuggestions.svelte';
   import {
-    getPersonActions,
-    getPersonFacesPage,
-    getPersonFaceThumbnail,
+    getPersonPageActions,
+    getPersonTypeAction,
     isSpaceEditor,
     updatePersonName,
-    updatePersonRepresentativeFace,
-  } from '$lib/services/person.service';
-  import { lang, locale } from '$lib/stores/preferences.store';
-  import { websocketEvents } from '$lib/stores/websocket';
-  import { createUrl, getPeopleThumbnailUrl } from '$lib/utils';
-  import {
-    createCrossOwnerMergeHandlers,
-    runMergeWithCrossOwnerConfirmation,
-    runScopedMergeWithCrossOwnerConfirmation,
-  } from '$lib/utils/cross-owner-merge';
-  import { handleError } from '$lib/utils/handle-error';
-  import { isSpaceScopedPerson, toScopedPersonRef } from '$lib/utils/scoped-person-ref';
-  import { normalizeSearchString } from '$lib/utils/string-utils';
-  import { getTimelineBucketZoomTarget, type ActivatableTimelineBucket } from '$lib/utils/timeline-zoom-navigation';
-  import { getTimelineTopVisibleAnchor } from '$lib/managers/timeline-manager/timeline-anchor';
-
-  import {
-    AssetVisibility,
-    confirmPersonFaceSuggestion,
-    confirmSpacePersonFaceSuggestion,
-    detachScopedPerson,
-    dismissPersonFaceSuggestion,
-    dismissSpacePersonFaceSuggestion,
-    getAllPeople,
-    getPersonFaceSuggestions,
-    getPerson,
-    getSpacePersonFaceSuggestions,
-    ignorePersonFaceSuggestion,
-    ignoreSpacePersonFaceSuggestion,
-    mergePersonLegacy,
-    searchPerson,
-    Type2 as ScopedPersonProfileType,
-    type BulkIdResponseDto,
-    type PersonFaceResponseDto,
-    type PersonFaceSuggestionResponseDto,
-    type PersonResponseDto,
-  } from '@immich/sdk';
+  } from '#lib/gallery/people/person.service.ts';
+  import { getAllSpacesQuery } from '#lib/gallery/spaces/space.query.ts';
+  import { assetMultiSelectManager } from '#lib/managers/asset-multi-select-manager.svelte.ts';
+  import { assetViewerManager } from '#lib/managers/asset-viewer-manager.svelte.ts';
+  import { authManager } from '#lib/managers/auth-manager.svelte.ts';
+  import { featureFlagsManager } from '#lib/managers/feature-flags-manager.svelte.ts';
+  import { TimelineManager } from '#lib/managers/timeline-manager/timeline-manager.svelte.ts';
+  import type { TimelineAsset } from '#lib/managers/timeline-manager/types.ts';
+  import PersonMergeSuggestionModal from '#lib/modals/PersonMergeSuggestionModal.svelte';
+  import SearchAddAllToCollectionModal from '#lib/modals/SearchAddAllToCollectionModal.svelte';
+  import { queryClient } from '#lib/queries/client.ts';
+  import { Route } from '#lib/route.ts';
+  import { getAssetBulkActions } from '#lib/services/asset.service.ts';
+  import { getPersonActions } from '#lib/services/person.service.ts';
+  import { lang, locale } from '#lib/stores/preferences.store.ts';
+  import { websocketEvents } from '#lib/stores/websocket.ts';
+  import { getGlobalPersonThumbnailUrl } from '#lib/utils/global-person-route.ts';
+  import { handleError } from '#lib/utils/handle-error.ts';
+  import { normalizeSearchString } from '#lib/utils/string-utils.ts';
+  import { AssetVisibility, searchPerson, type PersonResponseDto } from '@immich/sdk';
   import {
     ActionButton,
     CommandPaletteDefaultProvider,
@@ -89,10 +58,13 @@
     toastManager,
     type ActionItem,
   } from '@immich/ui';
-  import { mdiAccountBoxOutline, mdiAccountMultipleCheckOutline, mdiArrowLeft, mdiDotsVertical } from '@mdi/js';
+  import { mdiAccountMultipleCheckOutline, mdiArrowLeft, mdiDotsVertical } from '@mdi/js';
+  import { createQuery } from '@tanstack/svelte-query';
   import { DateTime } from 'luxon';
   import { onMount } from 'svelte';
   import { t } from 'svelte-i18n';
+  import { afterNavigate, goto, refreshAll } from '$app/navigation';
+  import { page } from '$app/state';
   import type { PageData } from './$types';
   import EditNameInput from './EditNameInput.svelte';
   import UnmergeFaceSelector from './UnmergeFaceSelector.svelte';
@@ -107,8 +79,7 @@
   let thumbnailData = $derived(getScopedThumbnailUrl(person));
 
   let timelineManager = $state<TimelineManager>() as TimelineManager;
-  let timelineGrouping = $state<TimelineGrouping>('day');
-  let temporalAnchor = $state<TimelineTemporalAnchor | undefined>();
+  const timelineGrouping = timelineGroupingProps(() => timelineManager);
   let numberOfAssets = $derived(timelineManager?.isInitialized ? timelineManager.assetCount : data.statistics.assets);
 
   const handleAddAllToCollection = () => {
@@ -131,7 +102,7 @@
   });
   const options = $derived({
     ...baseTimelineOptions,
-    grouping: timelineGrouping,
+    grouping: timelineGrouping.grouping,
   });
 
   let viewMode: PersonPageViewMode = $state(PersonPageViewMode.VIEW_ASSETS);
@@ -146,30 +117,24 @@
   let suggestedPeople: PersonResponseDto[] = $state([]);
 
   /**
-   * Save the word used to search people name: for example,
-   * if searching 'r' and the server returns 15 people with names starting with 'r',
-   * there's no need to search again people with name starting with 'ri'.
-   * However, it needs to make a new api request if searching 'r' returns 20 names (arbitrary value, the limit sent back by the server).
-   * or if the new search word starts with another word / letter
-   **/
+  Save the word used to search people name: for example,
+  if searching 'r' and the server returns 15 people with names starting with 'r',
+  there's no need to search again people with name starting with 'ri'.
+  However, it needs to make a new api request if searching 'r' returns 20 names (arbitrary value, the limit sent back by the server).
+  or if the new search word starts with another word / letter
+  */
   let isSearchingPeople = $state(false);
   let suggestionContainer: HTMLElement | undefined = $state();
 
   function getScopedThumbnailUrl(person: PersonResponseDto, updatedAt?: string): string {
-    const profile = person.primaryProfile;
-    if (profile?.type === 'space-person' && profile.spaceId) {
-      return createUrl(`/shared-spaces/${profile.spaceId}/people/${profile.id}/thumbnail`, {
-        updatedAt: updatedAt ?? person.updatedAt,
-      });
-    }
-    return getPeopleThumbnailUrl(person, updatedAt);
+    return getGlobalPersonThumbnailUrl(person, { updatedAt });
   }
 
   onMount(() => {
-    const action = $page.url.searchParams.get(QueryParameter.ACTION);
+    const action = page.url.searchParams.get(QueryParameter.ACTION);
+    const fallbackRoute = page.params.assetId ? Route.viewPerson(data.person) : Route.explore();
 
-    const fallbackRoute = $page.params.assetId ? Route.viewPerson(data.person) : Route.explore();
-    previousRoute = Route.continue($page.url.searchParams.get(QueryParameter.PREVIOUS_ROUTE), fallbackRoute).toString();
+    previousRoute = Route.continue(page.url.searchParams.get(QueryParameter.PREVIOUS_ROUTE), fallbackRoute).toString();
 
     if (action === 'merge') {
       viewMode = PersonPageViewMode.MERGE_PEOPLE;
@@ -193,12 +158,14 @@
   };
 
   const updateAssetCount = async () => {
-    await invalidateAll();
+    await refreshAll();
   };
 
-  afterNavigate(({ from }) => {
+  afterNavigate(({ from, shallow, type }) => {
+    if (shallow && type === 'goto') return;
+
     // Prevent setting previousRoute to the current page.
-    if (from?.url && from.route.id !== $page.route.id) {
+    if (from?.url && from.route.id !== page.route.id) {
       previousRoute = from.url.href;
     }
   });
@@ -218,90 +185,6 @@
     await handleGoBack();
 
     data = { ...data, person };
-  };
-
-  const getMergeDisplayName = (person: PersonResponseDto) => person.name;
-
-  const loadMergePeople = async (sortFaces: boolean, person: PersonResponseDto) => {
-    const data = await getAllPeople({
-      withHidden: false,
-      withSharedSpaces: true,
-      closestPersonId: sortFaces ? person.id : undefined,
-    });
-    return data.people;
-  };
-
-  // Runs a scoped merge, transparently handling the cross-owner boundary (issue #733):
-  // - a descriptive `blocked` error is shown as a clean toast (never the raw server string);
-  // - a `confirmationRequired` response prompts a strong confirmation, then re-runs with the
-  //   acknowledgement so the server commits the cross-owner merge.
-  // Returns the number of merged people, or `undefined` when nothing was merged (blocked/declined).
-  const mergeScopedPeopleWithCrossOwnerConfirmation = async (
-    targetPerson: PersonResponseDto,
-    sourcePeople: PersonResponseDto[],
-  ): Promise<number | undefined> => {
-    const committed = await runScopedMergeWithCrossOwnerConfirmation(
-      {
-        target: toScopedPersonRef(targetPerson),
-        sources: sourcePeople.map((sourcePerson) => toScopedPersonRef(sourcePerson)),
-      },
-      createCrossOwnerMergeHandlers(),
-    );
-    return committed ? sourcePeople.length : undefined;
-  };
-
-  // Same as above, for the classic `POST /people/:id/merge` endpoint, which can now also 403/409
-  // across an owner boundary. Returns the number of *successfully* merged sources (mirroring the
-  // per-id BulkIdResponseDto results), or `undefined` when nothing was merged (blocked/declined).
-  const mergePersonWithCrossOwnerConfirmation = async (
-    targetPerson: PersonResponseDto,
-    sourcePeople: PersonResponseDto[],
-  ): Promise<number | undefined> => {
-    let results: BulkIdResponseDto[] = [];
-    const committed = await runMergeWithCrossOwnerConfirmation(async (confirmCrossOwner) => {
-      results = await mergePersonLegacy({
-        id: targetPerson.id,
-        mergePersonDto: confirmCrossOwner
-          ? { ids: sourcePeople.map(({ id }) => id), confirmCrossOwner: true }
-          : { ids: sourcePeople.map(({ id }) => id) },
-      });
-    }, createCrossOwnerMergeHandlers());
-    return committed ? results.filter(({ success }) => success).length : undefined;
-  };
-
-  const mergePeople = async (targetCandidate: PersonResponseDto, selectedPeople: PersonResponseDto[]) => {
-    const targetPerson = person;
-    const sourcePeople =
-      targetCandidate.id === targetPerson.id
-        ? selectedPeople
-        : [targetCandidate, ...selectedPeople.filter((selectedPerson) => selectedPerson.id !== targetPerson.id)];
-    const usesScopedRepair =
-      isSpaceScopedPerson(targetPerson) || sourcePeople.some((sourcePerson) => isSpaceScopedPerson(sourcePerson));
-
-    const mergedCount = usesScopedRepair
-      ? await mergeScopedPeopleWithCrossOwnerConfirmation(targetPerson, sourcePeople)
-      : await mergePersonWithCrossOwnerConfirmation(targetPerson, sourcePeople);
-
-    if (mergedCount === undefined) {
-      // Cross-owner merge was blocked or the user declined the confirmation — nothing merged.
-      return;
-    }
-
-    const mergedPerson = await getPerson({ id: targetPerson.id });
-    toastManager.primary($t('merged_people_count', { values: { count: mergedCount } }));
-    return mergedPerson;
-  };
-
-  const handleSwapMergePerson = async (person: PersonResponseDto) => {
-    const profile = person.primaryProfile;
-    if (profile?.type === 'space-person' && profile.spaceId) {
-      await goto(
-        Route.viewSpacePerson(profile.spaceId, profile.id, { previousRoute: Route.people(), action: 'merge' }),
-      );
-      return;
-    }
-
-    await goto(Route.viewPerson(person, { previousRoute: Route.people(), action: 'merge' }));
   };
 
   const handleMergeSuggestion = async (): Promise<{ merged: boolean }> => {
@@ -378,7 +261,7 @@
       return;
     }
 
-    const result = await searchPerson({ name: personName, withHidden: true });
+    const result = await searchPerson({ name: personName, withHidden: true, withSharedSpaces: true });
 
     const normalizedPersonName = normalizeSearchString(personName);
     const existingPerson = result.find(
@@ -407,9 +290,10 @@
 
   const handleGoBack = async () => {
     viewMode = PersonPageViewMode.VIEW_ASSETS;
-    if ($page.url.searchParams.has(QueryParameter.ACTION)) {
-      $page.url.searchParams.delete(QueryParameter.ACTION);
-      await goto($page.url);
+    if (page.url.searchParams.has(QueryParameter.ACTION)) {
+      const url = new URL(page.url.href);
+      url.searchParams.delete(QueryParameter.ACTION);
+      await goto(url);
     }
   };
 
@@ -423,126 +307,23 @@
     await updateAssetCount();
   };
 
-  // Space-person writes need the editor role; default to offering the actions until the
-  // membership resolves (the server enforces the role on every write regardless).
-  let canEditSpacePerson = $state(true);
-  $effect(() => {
-    const profile = person.primaryProfile;
-    canEditSpacePerson = true;
-    if (profile?.type === 'space-person' && profile.spaceId) {
-      const spaceId = profile.spaceId;
-      void isSpaceEditor(spaceId, authManager.user.id).then((editable) => {
-        if (person.primaryProfile?.spaceId === spaceId) {
-          canEditSpacePerson = editable;
-        }
-      });
-    }
-  });
-
-  let suggestionTotal = $state(0);
-  let suggestionPreviews = $state<PersonFaceSuggestionResponseDto[]>([]);
-
-  type SuggestionTarget = { type: 'person'; personId: string } | { type: 'space'; spaceId: string; personId: string };
-
-  /**
-   * A space member who holds no person row for this identity reaches the shared person through this
-   * (global) route from the main People list — their primary profile IS the space profile, and the
-   * owner-only person endpoints do not know that id. Route those reads and verdicts at the shared
-   * space endpoints instead, so suggestions are not a /spaces-only affordance. The server returns an
-   * empty page to members below editor, which keeps the banner hidden for viewers.
-   */
-  const getSuggestionTarget = (target: PersonResponseDto): SuggestionTarget => {
-    const profile = target.primaryProfile;
-    return profile?.type === 'space-person' && profile.spaceId
-      ? { type: 'space', spaceId: profile.spaceId, personId: profile.id }
-      : { type: 'person', personId: target.id };
-  };
-
-  const fetchSuggestions = (target: SuggestionTarget, page: number, size: number) =>
-    target.type === 'space'
-      ? getSpacePersonFaceSuggestions({ id: target.spaceId, personId: target.personId, page, size })
-      : getPersonFaceSuggestions({ id: target.personId, page, size });
-
-  // F24/S11b: the four action endpoints answer 200 with `{ acted }` — the acted/no-op signal is in the body
-  // precisely because `oazapfts.ok()` resolves to the body and discards the status code for every 2xx, so a
-  // 200-vs-204 contract could never reach a caller. These pass straight through to the modal; a genuine
-  // 4xx/5xx still rejects into its handleError path.
-  const confirmSuggestion = (target: SuggestionTarget, assetFaceId: string) =>
-    target.type === 'space'
-      ? confirmSpacePersonFaceSuggestion({ id: target.spaceId, personId: target.personId, assetFaceId })
-      : confirmPersonFaceSuggestion({ id: target.personId, assetFaceId });
-
-  const dismissSuggestion = (target: SuggestionTarget, assetFaceId: string) =>
-    target.type === 'space'
-      ? dismissSpacePersonFaceSuggestion({ id: target.spaceId, personId: target.personId, assetFaceId })
-      : dismissPersonFaceSuggestion({ id: target.personId, assetFaceId });
-
-  const ignoreSuggestion = (target: SuggestionTarget, assetFaceId: string) =>
-    target.type === 'space'
-      ? ignoreSpacePersonFaceSuggestion({ id: target.spaceId, personId: target.personId, assetFaceId })
-      : ignorePersonFaceSuggestion({ id: target.personId, assetFaceId });
-
-  const loadSuggestionSummary = async (currentPerson: PersonResponseDto) => {
-    try {
-      const res = await fetchSuggestions(getSuggestionTarget(currentPerson), 1, 5);
-      if (currentPerson.id !== person.id) {
-        return;
-      }
-      suggestionTotal = res.total;
-      suggestionPreviews = res.items;
-    } catch {
-      if (currentPerson.id !== person.id) {
-        return;
-      }
-      suggestionTotal = 0;
-      suggestionPreviews = [];
-    }
-  };
-
-  const openSuggestionReview = async () => {
-    const currentPerson = person;
-    const currentTarget = getSuggestionTarget(currentPerson);
-    const currentThumbnailUrl = getScopedThumbnailUrl(currentPerson);
-
-    const result = await modalManager.show(PersonSuggestionReviewModal, {
-      person: currentPerson,
-      referenceThumbnailUrl: currentThumbnailUrl,
-      loadPage: ({ page, size }: { page: number; size: number }) => fetchSuggestions(currentTarget, page, size),
-      confirm: (assetFaceId: string) => confirmSuggestion(currentTarget, assetFaceId),
-      dismiss: (assetFaceId: string) => dismissSuggestion(currentTarget, assetFaceId),
-      ignore: (assetFaceId: string) => ignoreSuggestion(currentTarget, assetFaceId),
-    });
-    await loadSuggestionSummary(currentPerson);
-    if (result && result.confirmed > 0) {
-      await invalidateAll();
-      thumbnailData = getScopedThumbnailUrl(person, Date.now().toString());
-    }
-  };
+  // Space-person writes need the owner/editor role, read from the spaces list; offered until it says
+  // otherwise (the server enforces the role on every write regardless).
+  const personSpaceId = $derived(
+    person.primaryProfile?.type === 'space-person' ? person.primaryProfile.spaceId : undefined,
+  );
+  const spacesQuery = createQuery(
+    () => ({ ...getAllSpacesQuery(), enabled: !!personSpaceId }),
+    () => queryClient,
+  );
+  const canEditSpacePerson = $derived(
+    !personSpaceId || isSpaceEditor(spacesQuery.data, personSpaceId, authManager.user.id),
+  );
 
   const handleSetVisibility = (assetIds: string[]) => {
     timelineManager.removeAssets(assetIds);
     assetMultiSelectManager.clear();
   };
-
-  function handleTimelineGroupingChange(grouping: TimelineGrouping) {
-    const anchor = getTimelineTopVisibleAnchor(timelineManager);
-    timelineGrouping = grouping;
-    temporalAnchor = anchor;
-  }
-
-  function handleTimelineBucketActivate(bucket: ActivatableTimelineBucket) {
-    if (assetMultiSelectManager.selectionActive) {
-      return;
-    }
-
-    const result = getTimelineBucketZoomTarget(bucket);
-    if (!result) {
-      return;
-    }
-
-    timelineGrouping = result.grouping;
-    temporalAnchor = result.anchor;
-  }
 
   const onPersonUpdate = async (response: PersonResponseDto) => {
     if (response.id !== person.id) {
@@ -568,26 +349,14 @@
   const { SetDateOfBirth, Favorite, Unfavorite, HidePerson, ShowPerson } = $derived(
     getPersonActions($t, person, { canEditSpacePerson }),
   );
-  const SelectRepresentativeFace: ActionItem = {
-    title: $t('select_representative_face'),
-    icon: mdiAccountBoxOutline,
-    $if: () => canEditSpacePerson,
-    onAction: async () => {
-      const updated = await modalManager.show(RepresentativeFacePickerModal, {
-        title: $t('select_representative_face'),
-        loadFaces: ({ page, size }: { page: number; size: number }) => getPersonFacesPage(person, { page, size }),
-        updateFace: async (faceId: string) => {
-          person = await updatePersonRepresentativeFace(person, faceId);
-        },
-        getThumbnailUrl: (face: PersonFaceResponseDto) => getPersonFaceThumbnail(person, face.id),
-        canUpdate: true,
-      });
-
-      if (updated) {
-        thumbnailData = getScopedThumbnailUrl(person, Date.now().toString());
-      }
-    },
-  };
+  const refreshThumbnail = () => (thumbnailData = getScopedThumbnailUrl(person, Date.now().toString()));
+  const { SelectRepresentativeFace, SeparateFromGroupedPerson } = getPersonPageActions($t, {
+    getPerson: () => person,
+    canEditSpacePerson: () => canEditSpacePerson,
+    onPersonUpdate: (updated) => (person = updated),
+    onThumbnailUpdate: refreshThumbnail,
+  });
+  const ChangePersonType = $derived(getPersonTypeAction($t, person, refreshAll));
 
   const Merge: ActionItem = {
     title: $t('merge_people'),
@@ -596,35 +365,10 @@
     onAction: () => {
       viewMode = PersonPageViewMode.MERGE_PEOPLE;
     },
+    shortcuts: { key: 'm' },
   };
 
-  const SeparateFromGroupedPerson: ActionItem = {
-    title: $t('separate_from_grouped_person'),
-    icon: mdiAccountMultipleCheckOutline,
-    onAction: async () => {
-      const isConfirm = await modalManager.showDialog({ prompt: $t('separate_from_grouped_person_prompt') });
-      if (!isConfirm) {
-        return;
-      }
-
-      try {
-        await detachScopedPerson({
-          detachScopedPersonDto: { profile: { type: ScopedPersonProfileType.Person, id: person.id } },
-        });
-        await invalidateAll();
-        toastManager.primary($t('separate_from_grouped_person'));
-      } catch (error) {
-        handleError(error, $t('errors.unable_to_save_name'));
-      }
-    },
-  };
-
-  $effect(() => {
-    const currentPerson = person;
-    suggestionTotal = 0;
-    suggestionPreviews = [];
-    void loadSuggestionSummary(currentPerson);
-  });
+  const personActionsEnabled = $derived(!assetViewerManager.isViewing && !assetMultiSelectManager.selectionActive);
 </script>
 
 <OnEvents
@@ -634,24 +378,29 @@
   onAssetsArchive={updateAssetCount}
   onAssetsUnarchive={updateAssetCount}
 />
+<CommandPaletteDefaultProvider
+  name={$t('person')}
+  actions={personActionsEnabled
+    ? [SelectRepresentativeFace, SetDateOfBirth, HidePerson, ShowPerson, Merge, Favorite, Unfavorite]
+    : []}
+/>
 
 <main
   class="relative z-0 flex h-dvh flex-col overflow-hidden px-2 pt-(--control-bar-height) md:px-6 md:pt-(--control-bar-height-md)"
-  use:scrollMemoryClearer={{
+  {@attach scrollMemoryClearer({
     routeStartsWith: Route.people(),
     beforeClear: () => {
       sessionStorage.removeItem(SessionStorageKey.INFINITE_SCROLL_PAGE);
     },
-  }}
+  })}
 >
   <!-- Sticky grouping switcher: lives outside the scrolling timeline so it stays visible (see Tags).
        mt-12 clears the taller ControlAppBar, which exceeds the --control-bar-height padding reserve. -->
   <TimelineRouteGroupingBar
-    grouping={timelineGrouping}
+    {...timelineGrouping.barProps}
     hidden={assetMultiSelectManager.selectionActive || viewMode !== PersonPageViewMode.VIEW_ASSETS}
     class="mt-12 shrink-0"
     resultCount={numberOfAssets}
-    onGroupingChange={handleTimelineGroupingChange}
     onAddAllToCollection={handleAddAllToCollection}
   />
   <div class="relative min-h-0 flex-1">
@@ -663,11 +412,7 @@
         {options}
         assetInteraction={assetMultiSelectManager}
         onEscape={handleEscape}
-        {temporalAnchor}
-        onTimelineBucketActivate={handleTimelineBucketActivate}
-        onTemporalAnchorResolved={() => (temporalAnchor = undefined)}
-        grouping={timelineGrouping}
-        onGroupingChange={handleTimelineGroupingChange}
+        {...timelineGrouping.timelineProps}
       >
         {#if viewMode === PersonPageViewMode.VIEW_ASSETS}
           <!-- Person information block -->
@@ -675,7 +420,7 @@
             class="relative p-4 pt-12 sm:px-6"
             use:clickOutside={{
               onOutclick: handleCancelEditName,
-              onEscape: handleCancelEditName,
+              onEscape: isEditingName ? handleCancelEditName : undefined,
             }}
             use:listNavigation={suggestionContainer}
           >
@@ -698,14 +443,17 @@
                       title={canEditSpacePerson ? $t('edit_name') : undefined}
                       onclick={() => (isEditingName = canEditSpacePerson)}
                     >
-                      <ImageThumbnail
-                        circle
-                        shadow
-                        url={thumbnailData}
-                        altText={person.name}
-                        widthStyle="3.375rem"
-                        heightStyle="3.375rem"
-                      />
+                      <div class="@container relative size-13.5">
+                        <ImageThumbnail
+                          circle
+                          shadow
+                          url={thumbnailData}
+                          altText={person.name}
+                          widthStyle="100%"
+                          hidden={person.isHidden}
+                        />
+                        <PersonIndicator {person} />
+                      </div>
                       <div class="flex flex-col justify-center px-4 text-start text-primary">
                         <p class="w-40 truncate font-medium">{person.name || $t('add_a_name')}</p>
                         <p class="text-sm text-gray-500 dark:text-gray-400">
@@ -762,7 +510,7 @@
                         <ImageThumbnail
                           circle
                           shadow
-                          url={getPeopleThumbnailUrl(person)}
+                          url={getGlobalPersonThumbnailUrl(person)}
                           altText={person.name}
                           widthStyle="2rem"
                           heightStyle="2rem"
@@ -775,23 +523,7 @@
               </div>
             {/if}
           </div>
-          {#if canEditSpacePerson}
-            <!-- Defence in depth, not the primary gate: the server already returns an empty page (`total: 0`)
-                 to space members below editor (loadSuggestionSummary/fetchSuggestions above), which is what
-                 actually keeps this hidden from viewers today. `canEditSpacePerson` is always true for a
-                 personal (non-space) person — only a space-scoped profile is role-gated. This client-side
-                 check exists so that a future relaxation of that read gate ("let viewers see what is
-                 pending") does not also silently expose the review action — it must be relaxed here
-                 explicitly, not by accident. -->
-            <PersonSuggestionBanner
-              {person}
-              snoozeId={getSuggestionTarget(person).personId}
-              total={suggestionTotal}
-              previews={suggestionPreviews}
-              referenceThumbnailUrl={thumbnailData}
-              onReview={openSuggestionReview}
-            />
-          {/if}
+          <PersonSuggestions {person} {canEditSpacePerson} {thumbnailData} onConfirmed={refreshThumbnail} />
         {/if}
       </Timeline>
     {/key}
@@ -801,10 +533,12 @@
 <header>
   {#if assetMultiSelectManager.selectionActive}
     <AssetSelectControlBar>
-      {@const Actions = getAssetBulkActions($t)}
+      {const Actions = $derived(getAssetBulkActions($t))}
       <CommandPaletteDefaultProvider name={$t('assets')} actions={Object.values(Actions)} />
-      <CreateSharedLink />
+      <ActionButton action={Actions.CreateSharedLink} />
+
       <SelectAllAssets {timelineManager} assetInteraction={assetMultiSelectManager} />
+
       <ActionButton action={Actions.AddToAlbum} />
       <FavoriteAction
         removeFavorite={assetMultiSelectManager.isAllFavorite}
@@ -820,14 +554,9 @@
         <ChangeDate menuItem />
         <ChangeDescription menuItem />
         <ChangeLocation menuItem />
-        <ArchiveAction
-          menuItem
-          unarchive={assetMultiSelectManager.isAllArchived}
-          onArchive={(ids, visibility) => timelineManager.update(ids, (asset) => (asset.visibility = visibility))}
-        />
-        {#if authManager.preferences.tags.enabled && assetMultiSelectManager.isAllUserOwned}
-          <TagAction menuItem />
-        {/if}
+        <ActionMenuItem action={Actions.Archive} />
+        <ActionMenuItem action={Actions.Unarchive} />
+        <ActionMenuItem action={Actions.Tag} />
         <SetVisibilityAction menuItem onVisibilitySet={handleSetVisibility} />
         <DeleteAssets
           menuItem
@@ -847,6 +576,7 @@
             SetDateOfBirth,
             Merge,
             SeparateFromGroupedPerson,
+            ChangePersonType,
             Favorite,
             Unfavorite,
           ]}
@@ -867,15 +597,5 @@
 {/if}
 
 {#if viewMode === PersonPageViewMode.MERGE_PEOPLE}
-  <PeopleMergeSelector
-    {person}
-    getDisplayName={getMergeDisplayName}
-    getThumbnailUrl={getScopedThumbnailUrl}
-    loadPeople={loadMergePeople}
-    {mergePeople}
-    searchPeople={(name) => searchPerson({ name, withHidden: true, withSharedSpaces: true })}
-    onBack={handleGoBack}
-    onMerge={handleMerge}
-    onSwapPerson={handleSwapMergePerson}
-  />
+  <MergeFaceSelector {person} onBack={handleGoBack} onMerge={handleMerge} />
 {/if}

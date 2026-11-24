@@ -1,11 +1,13 @@
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:immich_mobile/data/server/person.dart';
+import 'package:immich_mobile/data/store.dart';
 import 'package:immich_mobile/domain/models/person.model.dart';
 import 'package:immich_mobile/domain/services/people.service.dart';
 import 'package:immich_mobile/providers/infrastructure/db.provider.dart';
-import 'package:immich_mobile/providers/infrastructure/user_metadata.provider.dart';
+import 'package:immich_mobile/providers/shared_space.provider.dart';
 import 'package:immich_mobile/providers/user.provider.dart';
 import 'package:immich_mobile/repositories/shared_space_api.repository.dart';
+import 'package:immich_mobile/utils/space_permissions.dart';
 
 final peopleServiceProvider = Provider<PeopleService>(
   (ref) => PeopleService(
@@ -16,34 +18,34 @@ final peopleServiceProvider = Provider<PeopleService>(
 );
 
 /// Whether the viewer may edit Space-scoped people in [spaceId] (owner or editor role),
-/// mirroring the web People page (isSpaceEditor). Cached per space for the container lifetime
-/// and re-resolved on login change; defaults to editable until resolved and fails open, since
-/// the server enforces the role on every write. Personal/owned people (null spaceId) never
-/// consult this — they are always editable by their owner.
+/// mirroring the web People page (isSpaceEditor). Read from the viewer's own row in the
+/// already-loaded spaces list ([sharedSpacesProvider] — `getAll` embeds `members`), so it
+/// re-resolves whenever that list is refreshed or the login changes. Defaults to editable and
+/// fails open — while loading (callers read `.valueOrNull ?? true`), on a failed list, for a
+/// space missing from it, or with no resolved user — since the server enforces the role on every
+/// write. Personal/owned people (null spaceId) never consult this — they are always editable by
+/// their owner.
 final driftSpaceEditableProvider = FutureProvider.family<bool, String>((ref, spaceId) async {
   final userId = ref.watch(currentUserProvider.select((user) => user?.id));
   if (userId == null) {
     return true;
   }
-  final repository = ref.watch(sharedSpaceApiRepositoryProvider);
-  return repository.isSpaceEditor(spaceId, userId);
-});
-
-final peopleAssetProvider = FutureProvider.family<List<Person>, ({String id, String ownerId})>((ref, key) async {
-  final service = ref.watch(peopleServiceProvider);
-  final currentUserId = ref.watch(currentUserProvider.select((user) => user?.id));
-  return service.getAssetPeople(key.id, ownedByCurrentUser: key.ownerId == currentUserId);
-});
-
-final getAllPeopleProvider = StreamProvider.family<List<Person>, PeopleSortBy>((ref, sortBy) async* {
-  final service = ref.watch(peopleServiceProvider);
-  final prefs = await ref.watch(userMetadataPreferencesProvider.future);
-  yield* service.watch(minFaces: prefs?.minimumFaces ?? 3, sortBy: sortBy);
+  try {
+    final spaces = await ref.watch(sharedSpacesProvider.future);
+    for (final space in spaces) {
+      if (space.id == spaceId) {
+        return spaceIsWritable(space, userId);
+      }
+    }
+  } catch (_) {
+    // Offline or a failed list: keep offering edits, the server enforces the role.
+  }
+  return true;
 });
 
 /// People for the global People page AND the photos-filter People picker (see
 /// `peoplePickerAllProvider`) — the viewer's own people plus people on Space-shared assets,
-/// matching the web People page / picker. Kept distinct from [getAllPeopleProvider] so
+/// matching the web People page / picker. Kept distinct from `Store.people.all()` so
 /// the remaining owner-scoped, local-first surface (the library people card) stays local.
 /// See issue #727.
 ///
@@ -54,11 +56,12 @@ final getAllPeopleProvider = StreamProvider.family<List<Person>, PeopleSortBy>((
 final driftGetAllPeopleWithSharedSpacesProvider =
     FutureProvider.family<List<Person>, ({PeopleSortBy sortBy, PeopleFilterBy filterBy})>((ref, key) async {
       final service = ref.watch(peopleServiceProvider);
-      final prefs = await ref.watch(userMetadataPreferencesProvider.future);
+      final prefs = await ref.watch(Store.userMetadata.preferences().future);
       return service.getAllPeopleWithSharedSpaces(
         minFaces: prefs?.minimumFaces ?? 3,
         sortBy: key.sortBy,
-        filterBy: key.filterBy,
+        // A stock Immich server ignores the pets filter, so a persisted Pets choice must not reach it.
+        filterBy: ref.watch(serverSupportsSpacesProvider) ? key.filterBy : PeopleFilterBy.all,
       );
     });
 
@@ -73,8 +76,8 @@ final driftGetAllPeopleWithSharedSpacesProvider =
 ///
 /// `autoDispose` is deliberate: the route to this page (Spaces tab → space detail → app-bar
 /// face icon) invalidates nothing on entry, unlike the Library tab, which the global people
-/// providers sit behind and which the invalidation sites in `tab_shell.page.dart` /
-/// `gallery_bottom_nav.widget.dart` cover. Without `autoDispose`, this provider would keep the
+/// providers sit behind and which the invalidation site in
+/// `gallery_bottom_nav.widget.dart` covers. Without `autoDispose`, this provider would keep the
 /// list it fetched for the app's whole session, so leaving and re-entering the page would
 /// re-render a stale cache with no gesture to refresh it short of changing the sort mode or
 /// restarting the app. `autoDispose` tears the provider down when [SpacePeoplePage] is popped

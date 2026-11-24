@@ -1,8 +1,10 @@
 import { Kysely } from 'kysely';
 import { BulkIdErrorReason, BulkIdResponseDto } from 'src/dtos/asset-ids.response.dto.js';
-import { AssetStatus, AssetVisibility } from 'src/enum.js';
+import { AssetStatus, AssetVisibility, SharedSpaceRole } from 'src/enum.js';
+import { GalleryAssetRepository } from 'src/gallery/repositories/gallery-asset.repository.js';
 import { AccessRepository } from 'src/repositories/access.repository.js';
 import { AlbumRepository } from 'src/repositories/album.repository.js';
+import { AssetFavoriteRepository } from 'src/repositories/asset-favorite.repository.js';
 import { AssetRepository } from 'src/repositories/asset.repository.js';
 import { ConfigRepository } from 'src/repositories/config.repository.js';
 import { DuplicateRepository } from 'src/repositories/duplicate.repository.js';
@@ -21,6 +23,7 @@ import { getKyselyDB } from 'test/utils.js';
 
 let defaultDatabase: Kysely<DB>;
 
+// eslint-disable-next-line unicorn/no-unnecessary-parameters
 const setup = (db?: Kysely<DB>) => {
   const { sut, ctx } = newMediumService(DuplicateService, {
     database: db || defaultDatabase,
@@ -28,6 +31,9 @@ const setup = (db?: Kysely<DB>) => {
       AccessRepository,
       AlbumRepository,
       AssetRepository,
+      GalleryAssetRepository,
+      // Gallery: AssetFavoriteRepository.mergeOnto carries other users' favorites of the trashed copies to the keeper.
+      AssetFavoriteRepository,
       ConfigRepository,
       DuplicateRepository,
       // gallery-fork: resolveGroup carries the keeper's shared-space membership (#317), so it
@@ -105,6 +111,22 @@ describe(DuplicateService.name, () => {
       expect(duplicates[0].assets.map(({ id }) => id).sort()).toEqual([small.id, large.id].sort());
       // largest file size wins
       expect(duplicates[0].suggestedKeepAssetIds).toEqual([large.id]);
+    });
+
+    it("should report the viewer's own favorites", async () => {
+      const { sut, ctx } = setup();
+      const { user } = await ctx.newUser();
+      const { user: other } = await ctx.newUser();
+      const duplicateId = factory.uuid();
+
+      const favorite = await newDuplicateAsset(ctx, { ownerId: user.id, duplicateId, isFavorite: true });
+      const plain = await newDuplicateAsset(ctx, { ownerId: user.id, duplicateId });
+      await ctx.database.insertInto('asset_favorite').values({ userId: other.id, assetId: plain.id }).execute();
+
+      const [group] = await sut.getDuplicates(factory.auth({ user: { id: user.id } }));
+
+      const isFavorite = Object.fromEntries(group.assets.map(({ id, isFavorite }) => [id, isFavorite]));
+      expect(isFavorite).toEqual({ [favorite.id]: true, [plain.id]: false });
     });
 
     it('should not return duplicates owned by someone else', async () => {
@@ -296,7 +318,7 @@ describe(DuplicateService.name, () => {
       }
     });
 
-    it('should fail without permission to delete an asset owned by someone else', async () => {
+    it('should ignore an asset owned by someone else', async () => {
       const { sut, ctx } = setup();
       const { user } = await ctx.newUser();
       const { user: other } = await ctx.newUser();
@@ -308,16 +330,54 @@ describe(DuplicateService.name, () => {
       const auth = factory.auth({ user: { id: user.id } });
       await expect(
         sut.resolve(auth, { groups: [{ duplicateId, keepAssetIds: [mine.id], trashAssetIds: [theirs.id] }] }),
-      ).resolves.toEqual([
-        {
-          id: duplicateId,
-          success: false,
-          error: BulkIdErrorReason.NO_PERMISSION,
-          errorMessage: 'No permission to delete assets',
-        },
-      ]);
+      ).resolves.toEqual([{ id: duplicateId, success: true }]);
 
-      await expect(ctx.get(AssetRepository).getById(theirs.id)).resolves.toMatchObject({ deletedAt: null });
+      await expect(ctx.get(AssetRepository).getById(theirs.id)).resolves.toMatchObject({
+        deletedAt: null,
+        duplicateId,
+      });
+    });
+
+    // immich-32603 scopes the group to the caller's assets: another owner's copy is ignored rather than refused, so
+    // nothing is kept and the caller's copy is trashed. The fork's invariant still holds: no write lands on theirs.
+    it("should not write onto another owner's keeper in a group the caller joined", async () => {
+      const { sut, ctx } = setup();
+      const { user } = await ctx.newUser();
+      const { user: other } = await ctx.newUser();
+      const duplicateId = factory.uuid();
+
+      const theirs = await newDuplicateAsset(ctx, { ownerId: other.id, duplicateId }, { description: 'theirs' });
+      // PUT /assets lets the caller set any duplicateId on an asset they own, so they can join another owner's group.
+      const mine = await newDuplicateAsset(
+        ctx,
+        { ownerId: user.id, duplicateId, isFavorite: true },
+        { description: 'mine' },
+      );
+      const tag = await newTag(ctx, user.id, 'mine');
+      await ctx.newTagAsset({ tagIds: [tag.id], assetIds: [mine.id] });
+      // The caller edits a space holding their copy, so an unchecked resolve would add the keeper to it.
+      const { space } = await ctx.newSharedSpace({ createdById: user.id });
+      await ctx.newSharedSpaceMember({ spaceId: space.id, userId: user.id, role: SharedSpaceRole.Editor });
+      await ctx.newSharedSpaceAsset({ spaceId: space.id, assetId: mine.id, addedById: user.id });
+
+      const auth = factory.auth({ user: { id: user.id } });
+      const results = await sut.resolve(auth, {
+        groups: [{ duplicateId, keepAssetIds: [theirs.id], trashAssetIds: [mine.id] }],
+      });
+
+      await expect(
+        ctx.database.selectFrom('shared_space_asset').select('assetId').where('spaceId', '=', space.id).execute(),
+      ).resolves.toEqual([{ assetId: mine.id }]);
+      await expect(ctx.get(AssetRepository).getById(theirs.id, { exifInfo: true, tags: true })).resolves.toMatchObject({
+        isFavorite: false,
+        duplicateId,
+        exifInfo: { description: 'theirs' },
+        tags: [],
+      });
+      await expect(ctx.get(AssetRepository).getById(mine.id)).resolves.toMatchObject({
+        deletedAt: expect.any(Date),
+      });
+      expect(results).toEqual([{ id: duplicateId, success: true }]);
     });
 
     it('should resolve several groups in one request', async () => {
@@ -480,6 +540,28 @@ describe(DuplicateService.name, () => {
 
         const result = await ctx.get(AssetRepository).getById(keeper.id, { exifInfo: true });
         expect(result?.exifInfo?.description?.split('\n').sort()).toEqual(['from keeper', 'from trashed']);
+      });
+
+      it('should not merge metadata into an asset owned by someone else', async () => {
+        const { sut, ctx } = setup();
+        const { user } = await ctx.newUser();
+        const { user: other } = await ctx.newUser();
+        const duplicateId = factory.uuid();
+
+        const theirs = await newDuplicateAsset(ctx, { ownerId: other.id, duplicateId }, { description: 'theirs' });
+        const mine = await newDuplicateAsset(ctx, { ownerId: user.id, duplicateId }, { description: 'mine' });
+
+        const auth = factory.auth({ user: { id: user.id } });
+        expectSuccess(
+          await sut.resolve(auth, {
+            groups: [{ duplicateId, keepAssetIds: [theirs.id], trashAssetIds: [mine.id] }],
+          }),
+          duplicateId,
+        );
+
+        const result = await ctx.get(AssetRepository).getById(theirs.id, { exifInfo: true });
+        expect(result).toMatchObject({ duplicateId, deletedAt: null });
+        expect(result?.exifInfo?.description).toBe('theirs');
       });
 
       it('should merge a location that both assets agree on', async () => {

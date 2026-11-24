@@ -10,6 +10,7 @@ import 'package:immich_mobile/domain/models/timeline.model.dart';
 import 'package:immich_mobile/domain/models/timeline_grouping.model.dart';
 import 'package:immich_mobile/domain/models/timeline_temporal_scope.model.dart';
 import 'package:immich_mobile/domain/utils/event_stream.dart';
+import 'package:immich_mobile/gallery/library_view.model.dart';
 import 'package:immich_mobile/infrastructure/repositories/settings.repository.dart';
 import 'package:immich_mobile/infrastructure/repositories/timeline.repository.dart';
 import 'package:immich_mobile/utils/async_mutex.dart';
@@ -42,7 +43,7 @@ enum TimelineOrigin {
 }
 
 class TimelineFactory {
-  final TimelineRepository _timelineRepository;
+  final SharedSpaceTimelineRepository _timelineRepository;
   final SettingsRepository _settingsRepository;
 
   const TimelineFactory({required this._timelineRepository, required this._settingsRepository});
@@ -58,8 +59,15 @@ class TimelineFactory {
     String currentUserId, {
     GroupAssetsBy? groupBy,
     TimelineTemporalScope temporalScope = const TimelineTemporalScope.none(),
+    LibraryViewMode libraryView = LibraryViewMode.both,
   }) => TimelineService(
-    _timelineRepository.main(timelineUsers, currentUserId, groupBy ?? this.groupBy, temporalScope: temporalScope),
+    _timelineRepository.main(
+      timelineUsers,
+      currentUserId,
+      groupBy ?? this.groupBy,
+      temporalScope: temporalScope,
+      libraryView: libraryView,
+    ),
   );
 
   TimelineService localAlbum({
@@ -97,7 +105,8 @@ class TimelineFactory {
     TimelineTemporalScope temporalScope = const TimelineTemporalScope.none(),
   }) => TimelineService(_timelineRepository.remote(userId, groupBy ?? this.groupBy, temporalScope: temporalScope));
 
-  TimelineService recentlyAdded(String userId) => TimelineService(_timelineRepository.recentlyAdded(userId, groupBy));
+  TimelineService recentlyAdded(String userId, {GroupAssetsBy? groupBy}) =>
+      TimelineService(_timelineRepository.recentlyAdded(userId, groupBy ?? this.groupBy));
 
   TimelineService favorite(
     String userId, {
@@ -154,7 +163,7 @@ class TimelineFactory {
   /// Timeline for a Space-shared person, restricted to the [assetIds] the server resolved for
   /// that person. Used instead of [person] when the viewer does not own the person: the local
   /// sync DB is owner-scoped, so the person's face→person links never sync and [person] would
-  /// be empty. See [TimelineRepository.sharedSpacePerson].
+  /// be empty. See [SharedSpaceTimelineRepository.sharedSpacePerson].
   TimelineService sharedSpacePerson(
     List<String> assetIds, {
     GroupAssetsBy? groupBy,

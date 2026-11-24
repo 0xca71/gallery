@@ -1,0 +1,200 @@
+# Faces in Videos
+
+By default, face detection looks at one frame of a video: its poster, which is usually from the first second or two.
+Anyone who appears later is missed, and the people it does find are cut from a small thumbnail, so their faces are
+often too blurry to tell who they are.
+
+With **Detect faces across the whole video** on, Gallery samples frames throughout each video instead. It follows each
+person from frame to frame, usually keeps one face per person, and shows each person from the clearest frame it found.
+
+This setting is off by default.
+
+Pets have their own setting, **Detect pets across the whole video**, under Pet Detection. See
+[Pets in videos](/features/pet-detection#pets-in-videos).
+
+## Turning it on
+
+Go to **Administration > Settings > Machine Learning Settings > Facial Recognition** and turn on **Detect faces across
+the whole video**.
+
+New videos are scanned this way as they are uploaded. Videos that were processed before you turned it on are not
+rescanned automatically, because a large library can take a long time. To scan them, go to **Administration > Jobs**
+and run **Face Detection** with **Missing**. That queues only the videos not yet scanned this way, along with anything
+face detection has not seen at all. After an update that improves how faces are followed through a video, **Missing**
+also rescans the videos scanned by the older version.
+
+To rescan one video, open it and choose **Refresh faces** from the menu.
+
+Names you have already given are kept. A face that matches someone already found keeps its name and moves to the new,
+clearer frame. An unnamed face that is no longer found is removed. A named face that is no longer found is kept, so a
+rescan never loses a name, unless the rescan joined it to another face of the same person in that video: then the
+duplicate goes and the name stays on the face that remains.
+
+:::note
+**Reset** on the Face Detection job deletes every face and every name in the library, as it always has. You don't need
+it to rescan your videos: use **Missing**.
+:::
+
+## Settings
+
+| Setting                      | Default | What it does                                                                                       |
+| ---------------------------- | ------- | -------------------------------------------------------------------------------------------------- |
+| Seconds between frames       | 2       | How often a frame is sampled. Videos of a minute or less are always sampled at least every second. |
+| Sample after scene cuts      | On      | Also looks at the start of each new shot in edited videos, so a short shot is not missed.          |
+| Frame budget per video       | 1800    | The most frames sampled from one video. A longer video is sampled at a wider interval instead.     |
+| Find small faces (crowds)    | Off     | Also searches each high-resolution frame as four quarters, to find small faces such as a crowd.    |
+| Same person within a video   | 0.5     | How alike two views in one video must be to count as the same person. See below.                   |
+| Minimum face size            | 20      | People whose face is never wider than this many pixels are skipped.                                |
+| Minimum frames per person    | 1       | People seen in fewer sampled frames are skipped.                                                   |
+| Start new people from videos | On      | When off, a face found in a video only joins a person who already exists.                          |
+| Minimum detection confidence | 0.75    | A video face whose clearest view scores lower stays unassigned. See below.                         |
+
+Changes to these settings apply to videos scanned afterwards. To apply them to videos already scanned, run **Face
+Detection** with **Refresh**, or choose **Refresh faces** on one video.
+
+The frame budget never cuts a video short. A two-hour video at the defaults is sampled about every 4 seconds from
+start to end, instead of stopping after the first hour.
+
+**Same person within a video** is separate from the recognition distance, so you can keep recognition strict without
+splitting people inside your videos. A higher value joins more views of one person, such as a face seen from the side,
+but can mix up two people who look alike.
+
+**Minimum face size** and **Minimum frames per person** keep background faces and passers-by out of your People list.
+**Start new people from videos** off goes further: video faces are then only matched to people found elsewhere, for
+example in your photos, and a stranger who appears only in videos is left unassigned instead of becoming a new person.
+
+**Minimum detection confidence** keeps small, blurry or half-hidden faces out of recognition. Faces like these look
+more alike to recognition than they really are, so without the check they pile up on a few people who are not one
+real person, often an unnamed person started from a background face in an old photo. A video face whose clearest view
+in the whole video scores below this value stays unassigned: it doesn't join a person and doesn't start one, and you
+can still name it yourself. On one library this cut the faces going to such mixed-up people by three quarters, while
+named people kept 95% of their video faces. Lower it if too many faces of people you know stay unassigned, or set it to
+0 to turn the check off. Faces in photos are not affected.
+
+**Find small faces** helps most with wide shots of groups and crowds. In testing, a 9-second crowd clip went from 7
+people found to 24. It takes about five times as long per frame, so leave it off unless your videos need it.
+
+## What to expect
+
+- **Each person usually appears once per video.** Gallery recognises the same person across frames, so a person on
+  screen for a minute is one face, not thirty.
+- **The thumbnail is the clearest view.** Each person is shown from the frame where their face was largest and
+  sharpest. Gallery also checks a few frames either side of that moment for an even sharper one. Small faces are
+  cropped with some of their surroundings, such as head and shoulders, so they are easier to recognise.
+- **Very small faces are left out.** A face under about 20 pixels across can't be recognised, even by you, so it is
+  not added.
+- **The detector is more forgiving in videos.** A face the detector is unsure of in any single frame is still kept if
+  it is seen clearly enough across several frames.
+- **Very different views can split one person in two.** A face seen from the front and from behind, or looking down,
+  can look like two different people. Gallery joins them when it saw the person turn between two frames, but keeps
+  them apart when it can't be sure, rather than risk mixing up two people. Give both the same name, or let recognition
+  match them to the same person.
+- **One video doesn't create a person on its own.** Recognition doesn't count other faces from the same video as
+  evidence, so someone who appears in only one video needs to be found in other photos or videos too, as many as the
+  facial recognition setting **Minimum recognized faces** asks for, before they get their own entry in People.
+- **Two people on screen together are never the same person.** When recognition would give two faces seen in the
+  same frame to one person, only the first keeps that person, and the other is matched to its next closest person or
+  stays unnamed. This stops small or blurry faces in a group, such as a choir or a car's interior camera, from all
+  landing on one person. In a collage video, where one person can be in two photos at once, the second copy stays
+  unnamed.
+- **You can see every moment a person appears,** and jump the video to each one. See
+  [Seeing where someone appears](#seeing-where-someone-appears).
+
+Low-resolution and very blurry videos have limits. If a person is only ever a few pixels wide, or never in focus, no
+frame will show them clearly.
+
+## Seeing where someone appears
+
+Gallery remembers every moment it saw each person, not just the clearest one. To see them, open a video, open the
+info panel, and click the film button on a person's picture under **People**. A row of their face at each moment opens
+under the pictures, in time order, with the clearest view starred.
+
+Click a moment to jump the video there. The video pauses on that frame with a white box around the person's face and
+the rest of the picture dimmed, the way a photo highlights a face. The box goes away when you play the video, drag the
+timeline elsewhere, or pick another moment.
+
+<img src={require('./img/video-faces-moments.webp').default} alt='The info panel lists Alex’s moments as a row of face crops; the 8:38 crop is selected, and the video is paused at 8:38 with a white box around Alex’s face' title='A person’s moments in the info panel, with the video paused on one of them' />
+
+The same row appears when you name a face in a video: click the pencil next to **People**, then the pencil on a face.
+It helps when one crop is not enough to tell who someone is, such as two people who look alike or a small face in a
+crowd.
+
+<img src={require('./img/video-faces-picker.webp').default} alt='The Select face panel for an unnamed face shows its 50 moments above the people search; the video is paused at 2:11 with a white box around the face' title='Naming a face, with its moments above the people to choose from' />
+
+### In the mobile app
+
+Open a video and swipe up to its details. Under **People**, each person who appears in the video has a small film
+badge on the top-left of their picture. Tapping the picture still opens the person, as before. Tap the badge to open
+a row of their moments under the pictures, then tap a moment: the video above pauses there with the same white box
+around their face. Tap the badge again, or the close button, to close the row.
+
+<img src={require('./img/video-faces-mobile-badge.webp').default} width="45%" alt='The People row in a video’s details, with a small film badge on the top-left of each person’s picture' title='The film badge on each person who appears in the video' />
+<img src={require('./img/video-faces-mobile-moments.webp').default} width="45%" alt='Alex’s badge is on and his 48 moments are listed under People; the 0:29 moment is selected, and the video above is paused there with a white box around his face' title='A person’s moments, with the video paused on one of them' />
+
+The app shows moments but doesn't change them: to correct a moment, use the web. People shown through a shared space
+don't get the badge in the app yet.
+
+## Correcting a face
+
+Sometimes a moment shows someone else: two people standing in the same spot a moment apart can be followed as one
+person. The video's owner can fix that from the same row. Each moment has a menu in its corner:
+
+<img src={require('./img/video-faces-moment-menu.webp').default} width="60%" alt='The menu on a moment: Move to another person, Move to a new person, Move to unassigned, and Remove the moment' title='The menu on a moment' />
+
+| Option                  | What it does                                                                                           |
+| ----------------------- | ------------------------------------------------------------------------------------------------------ |
+| Move to another person… | Gives the moment to someone you pick. If they already appear in this video, it joins their face there. |
+| Move to a new person    | Starts a new, unnamed person with this moment. Name them from the **People** list.                     |
+| Move to unassigned      | Takes the moment out of this person and leaves it unnamed.                                             |
+| Remove the moment       | Takes the moment out of this person entirely.                                                          |
+
+Each change shows a message with **Undo** for a few seconds. Moving a moment back to the person it came from also
+puts it back where it was.
+
+- **The starred moment can move too.** The next clearest moment then becomes the face's picture, and the person's
+  thumbnail is updated if it came from this face.
+- **A person's only moment stands for their whole face.** Its menu moves the face to another person or a new person,
+  or deletes the face after asking.
+- **Several faces for one person can be combined.** If a person still has more than one face in a video, for example
+  after a head turn split them in two, click the combine button beside their name in the row. All their moments end
+  up in one face, and the **Edit people** list shows them once. Combining can't be undone.
+- **Gallery offers to combine when you name a face.** If you name a face in **Edit people** after someone who already
+  has a face in this video, a message says how many faces they now have here, with **Combine into one face**. It stays
+  for 10 seconds and changes nothing unless you click it.
+- **Running face detection on the video again undoes corrections.** It follows everyone through the video afresh, so
+  removed moments come back, moved ones are added back to the face they came from, and combined faces can split
+  again. A moment moved to a new person keeps that face, so it then shows twice.
+
+Only the video's owner can change moments, on the web. Anyone who can see the video can view them, in the browser or
+the app.
+
+## How long it takes
+
+Each sampled frame takes a fraction of a second on most servers. A two-minute phone video at the defaults is about 60
+frames, well under a minute of work. An hour-long video uses the full frame budget and can take tens of minutes on a
+server without a GPU, about as long as transcoding it. All of this runs in the background on the face detection
+queue.
+
+The server log shows each video as it is scanned:
+
+```
+Sampling 23 frames across 23s of video <id> (about every 1s, 1 scene cuts)
+Found 7 faces in 23 frames of video <id> in 27s: 0 added, 7 updated, 0 deleted, 46 dropped as too small or unsure, 3 sharper views from 22 extra frames
+```
+
+Videos sampled from 100 frames or more also log their progress every 10%, with an estimate of the time left.
+
+At the `debug` log level, each video also lists the pairs of faces it kept apart although they look alike, closest
+first and by face id. Each line says why: seen on screen together (one person can't be in a frame twice), too far
+apart in looks, or both. It also says in how many frames each face was seen, and how many of those views were
+confident. If one person keeps showing up as several faces in a video, these lines show why:
+
+```
+Video <id>: faces <id> and <id> kept apart: seen together in 1 frame, and too far apart. Distances: centroids 0.555, best views 0.558, stored 0.567. First face best seen at 10s, in 16 frames, 3 confident; second face best seen at 22.5s, in 1 frame, 1 confident.
+```
+
+A pair of faces of one person that stayed apart usually shows as "too far apart" with a low `stored` distance, or
+with "best views not confident" when neither face had a confident view.
+
+Each face found this way stores one frame, about 200 to 400 KB, next to the video's thumbnails. Deleting the video
+deletes its frames.

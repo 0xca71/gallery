@@ -1,11 +1,20 @@
 import { Injectable } from '@nestjs/common';
 import { ExpressionBuilder, Insertable, Kysely, RawBuilder, Selectable, Transaction, sql } from 'kysely';
 import { InjectKysely } from 'nestjs-kysely';
-import type { PeopleFaceStatistics, PersonStatistics } from 'src/repositories/person.repository.js';
 import { DummyValue, GenerateSql } from 'src/decorators.js';
 import { PeopleResponseDto, PersonResponseDto, ScopedPersonProfileRefDto } from 'src/dtos/person.dto.js';
 import { AssetVisibility, SharedSpaceRole, SourceType, VectorIndex } from 'src/enum.js';
+import type { PeopleFaceStatistics } from 'src/gallery/repositories/gallery-person.repository.js';
+import {
+  clearOrphanPersonIdentities,
+  personIdentityId,
+  personIsPet,
+  personSpecies,
+  personType,
+  setPersonIdentity,
+} from 'src/gallery/utils/person-sidecar.js';
 import { probes } from 'src/repositories/database.repository.js';
+import type { PersonStatistics } from 'src/repositories/person.repository.js';
 import { DB } from 'src/schema/index.js';
 import { FaceIdentityFaceSource, FaceIdentityFaceTable } from 'src/schema/tables/face-identity-face.table.js';
 import { FaceIdentityTable } from 'src/schema/tables/face-identity.table.js';
@@ -14,6 +23,16 @@ import { asDateString, asDateTimeString } from 'src/utils/date.js';
 import { targetTokens } from 'src/utils/face-repair.js';
 import { rekeyVerdictIdentity } from 'src/utils/face-verdict-merge.js';
 import { accessibleTimelineAssetPredicate, spaceVisibleAssetVisibilities } from 'src/utils/shared-space-album-scope.js';
+
+// A pet profile is listed only when it is an individual, not a species bucket (whose faces carry no embedding).
+// Pet recognition gives an individual pet_search rows (embedded_pet_identities); a human cluster the owner
+// reclassified as a pet keeps its face_search rows, checked here per identity.
+const humanEmbeddedIdentity = (identityId: RawBuilder<unknown>) => sql<boolean>`EXISTS (
+  SELECT 1
+  FROM face_identity_face AS embedded_face
+  INNER JOIN face_search ON face_search."faceId" = embedded_face."assetFaceId"
+  WHERE embedded_face."identityId" = ${identityId}
+)`;
 
 export type FaceIdentity = Selectable<FaceIdentityTable>;
 export type FaceIdentityFace = Selectable<FaceIdentityFaceTable>;
@@ -67,11 +86,11 @@ export type MergeIdentitiesResult = {
 };
 
 /**
- * A pair of `shared_space_person` rows in the SAME space that both hold one side of an identity
- * merge — one row on the target identity, one on a source identity. Merging would collide with the
- * `(spaceId, identityId)` unique partial index, so these pairs are collapsed (loser folded into the
- * survivor) before the identity merge runs.
- */
+A pair of `shared_space_person` rows in the SAME space that both hold one side of an identity
+merge — one row on the target identity, one on a source identity. Merging would collide with the
+`(spaceId, identityId)` unique partial index, so these pairs are collapsed (loser folded into the
+survivor) before the identity merge runs.
+*/
 export type SpaceMergeConflictPair = {
   spaceId: string;
   sourceId: string;
@@ -191,10 +210,10 @@ type RepairProfile = {
 };
 
 /**
- * An origin profile of a scoped merge, resolved with the merge RBAC: the actor's own `person`, or a
- * `shared_space_person` in a space where they are Owner/Editor. `identityId` may be null — a profile that
- * predates the identity model gets one minted by the planner rather than being refused.
- */
+An origin profile of a scoped merge, resolved with the merge RBAC: the actor's own `person`, or a
+`shared_space_person` in a space where they are Owner/Editor. `identityId` may be null — a profile that
+predates the identity model gets one minted by the planner rather than being refused.
+*/
 export type ScopedMergeOrigin = {
   kind: ProfileKind;
   id: string;
@@ -210,10 +229,10 @@ type AccessiblePeopleIdentityPageRow = {
 };
 
 /**
- * What the page query actually returns before the repository tidies it. `identityId` is null only
- * on the placeholder row a `withTotals` query emits when the requested page is past the end — the
- * row that still carries the header figures. Kept private so no consumer has to think about it.
- */
+What the page query actually returns before the repository tidies it. `identityId` is null only
+on the placeholder row a `withTotals` query emits when the requested page is past the end — the
+row that still carries the header figures. Kept private so no consumer has to think about it.
+*/
 type AccessiblePeoplePageRawRow = {
   identityId: string | null;
   visibleAssetCount: string | number;
@@ -222,10 +241,10 @@ type AccessiblePeoplePageRawRow = {
 };
 
 /**
- * Reshape the page query's rows into the map {@link FaceIdentityRepository.hydrateAccessiblePeople}
- * takes, so hydrate does not recompute a count the page query already produced. `visibleAssetCount`
- * arrives as a string when postgres returns the bigint aggregate.
- */
+Reshape the page query's rows into the map {@link FaceIdentityRepository.hydrateAccessiblePeople}
+takes, so hydrate does not recompute a count the page query already produced. `visibleAssetCount`
+arrives as a string when postgres returns the bigint aggregate.
+*/
 const toAssetCounts = (rows: AccessiblePeopleIdentityPageRow[]): ReadonlyMap<string, number> =>
   new Map(rows.map((row) => [row.identityId, Number(row.visibleAssetCount)]));
 
@@ -313,7 +332,7 @@ export class FaceIdentityRepository {
     if (ownPersonTokenIds.size > 0) {
       const rows = await this.db
         .selectFrom('person')
-        .select(['personGroupId', 'identityId'])
+        .select(['personGroupId', personIdentityId().as('identityId')])
         .where('ownerId', '=', input.userId)
         .where('personGroupId', 'in', [...ownPersonTokenIds])
         .execute();
@@ -443,8 +462,9 @@ export class FaceIdentityRepository {
             AND NOT EXISTS (
               SELECT 1
               FROM person existing_person
+              INNER JOIN person_identity ON person_identity."personGroupId" = existing_person."personGroupId"
               WHERE existing_person."ownerId" = ${input.userId}
-                AND existing_person."identityId" = shared_space_person."identityId"
+                AND person_identity."identityId" = shared_space_person."identityId"
             )
             ${
               input.excludeIdentityId
@@ -480,7 +500,7 @@ export class FaceIdentityRepository {
           EXISTS (
             SELECT 1
             FROM person
-            WHERE person."identityId" IS NULL
+            WHERE ${personIdentityId()} IS NULL
           )
           OR EXISTS (
             SELECT 1
@@ -503,7 +523,7 @@ export class FaceIdentityRepository {
               AND asset_face."deletedAt" IS NULL
               AND asset_face."isVisible" = true
               AND asset."deletedAt" IS NULL
-              AND person."identityId" IS DISTINCT FROM face_identity_face."identityId"
+              AND ${personIdentityId()} IS DISTINCT FROM face_identity_face."identityId"
           )
         ) AS "hasPersonalIdentityWork",
         EXISTS (
@@ -559,7 +579,7 @@ export class FaceIdentityRepository {
           asset.id AS "assetId",
           asset_face.id AS "assetFaceId",
           face_identity_face."identityId",
-          COALESCE(person.type, 'person') AS type
+          ${personType()} AS type
         FROM shared_space_asset
         INNER JOIN shared_space ON shared_space.id = shared_space_asset."spaceId"
         INNER JOIN asset ON asset.id = shared_space_asset."assetId"
@@ -582,7 +602,7 @@ export class FaceIdentityRepository {
           asset.id AS "assetId",
           asset_face.id AS "assetFaceId",
           face_identity_face."identityId",
-          COALESCE(person.type, 'person') AS type
+          ${personType()} AS type
         FROM shared_space_library
         INNER JOIN shared_space ON shared_space.id = shared_space_library."spaceId"
         INNER JOIN asset ON asset."libraryId" = shared_space_library."libraryId"
@@ -605,7 +625,7 @@ export class FaceIdentityRepository {
           asset.id AS "assetId",
           asset_face.id AS "assetFaceId",
           face_identity_face."identityId",
-          COALESCE(person.type, 'person') AS type
+          ${personType()} AS type
         FROM shared_space_album
         INNER JOIN shared_space ON shared_space.id = shared_space_album."spaceId"
         INNER JOIN album ON album.id = shared_space_album."albumId" AND album."deletedAt" IS NULL
@@ -631,7 +651,7 @@ export class FaceIdentityRepository {
           asset.id AS "assetId",
           asset_face.id AS "assetFaceId",
           face_identity_face."identityId",
-          COALESCE(person.type, 'person') AS type
+          ${personType()} AS type
         FROM shared_space_album
         INNER JOIN shared_space ON shared_space.id = shared_space_album."spaceId"
         INNER JOIN album ON album.id = shared_space_album."albumId" AND album."deletedAt" IS NULL
@@ -927,13 +947,13 @@ export class FaceIdentityRepository {
   }
 
   /**
-   * Does this viewer belong to any space whose assets appear on their timeline surfaces?
-   *
-   * When they do not, every space arm of {@link accessibleTimelineAssetPredicate} is dead and the
-   * People-page aggregates can run a far cheaper predicate. This is a single indexed lookup, and
-   * it is resolved per request rather than cached so that joining or leaving a space takes effect
-   * on the next page load.
-   */
+  Does this viewer belong to any space whose assets appear on their timeline surfaces?
+  
+  When they do not, every space arm of {@link accessibleTimelineAssetPredicate} is dead and the
+  People-page aggregates can run a far cheaper predicate. This is a single indexed lookup, and
+  it is resolved per request rather than cached so that joining or leaving a space takes effect
+  on the next page load.
+  */
   private async hasTimelineSpaces(userId: string): Promise<boolean> {
     const row = await this.db
       .selectFrom('shared_space_member')
@@ -1023,11 +1043,11 @@ export class FaceIdentityRepository {
         GROUP BY accessible_faces."identityId"
       ),
       accessible_profiles AS (
-        SELECT person."identityId", person."isHidden", person.name, person.type
+        SELECT ${personIdentityId()} AS "identityId", person."isHidden", person.name, ${personType()} AS type
         FROM person
         WHERE person."ownerId" = ${userId}
-          AND person."identityId" IS NOT NULL
-          AND EXISTS (SELECT 1 FROM accessible_faces WHERE accessible_faces."identityId" = person."identityId")
+          AND ${personIdentityId()} IS NOT NULL
+          AND EXISTS (SELECT 1 FROM accessible_faces WHERE accessible_faces."identityId" = ${personIdentityId()})
         UNION ALL
         SELECT
           shared_space_person."identityId",
@@ -1130,11 +1150,11 @@ export class FaceIdentityRepository {
         GROUP BY accessible_faces."identityId"
       ),
       accessible_profiles AS (
-        SELECT person."identityId", person."isHidden", person.name, person.type
+        SELECT ${personIdentityId()} AS "identityId", person."isHidden", person.name, ${personType()} AS type
         FROM person
         WHERE person."ownerId" = ${userId}
-          AND person."identityId" IS NOT NULL
-          AND EXISTS (SELECT 1 FROM accessible_faces WHERE accessible_faces."identityId" = person."identityId")
+          AND ${personIdentityId()} IS NOT NULL
+          AND EXISTS (SELECT 1 FROM accessible_faces WHERE accessible_faces."identityId" = ${personIdentityId()})
         UNION ALL
         SELECT
           shared_space_person."identityId",
@@ -1316,13 +1336,13 @@ export class FaceIdentityRepository {
   }
 
   /**
-   * Resolve the identity-wide person view for a viewer who already holds a person row for that
-   * identity (typically the library owner accessing their own person). Mirrors the read-time
-   * name/birthday resolution used by {@link getAccessiblePersonByProfileId}, so an owner viewing a
-   * single person sees a birthday set on a sibling shared-space profile of the same identity rather
-   * than the raw (often empty) `person.birthDate`. Not decorated with `@GenerateSql`: it issues the
-   * exact `hydrateAccessiblePeople` query already documented under that method.
-   */
+  Resolve the identity-wide person view for a viewer who already holds a person row for that
+  identity (typically the library owner accessing their own person). Mirrors the read-time
+  name/birthday resolution used by {@link getAccessiblePersonByProfileId}, so an owner viewing a
+  single person sees a birthday set on a sibling shared-space profile of the same identity rather
+  than the raw (often empty) `person.birthDate`. Not decorated with `@GenerateSql`: it issues the
+  exact `hydrateAccessiblePeople` query already documented under that method.
+  */
   async getResolvedPersonByIdentityId(userId: string, identityId: string): Promise<PersonResponseDto | undefined> {
     const people = await this.hydrateAccessiblePeople({ userId, identityIds: [identityId], withHidden: false });
     return people[0];
@@ -1354,15 +1374,14 @@ export class FaceIdentityRepository {
         .returningAll()
         .executeTakeFirstOrThrow();
 
-      await (
-        profileRef.type === 'person'
-          ? trx.updateTable('person').set({ identityId: identity.id }).where('personGroupId', '=', profileRef.id)
-          : trx
-              .updateTable('shared_space_person')
-              .set({ identityId: identity.id })
-              .where('id', '=', profileRef.id)
-              .where('spaceId', '=', profileRef.spaceId!)
-      ).execute();
+      await (profileRef.type === 'person'
+        ? setPersonIdentity(trx, profileRef.id, identity.id)
+        : trx
+            .updateTable('shared_space_person')
+            .set({ identityId: identity.id })
+            .where('id', '=', profileRef.id)
+            .where('spaceId', '=', profileRef.spaceId!)
+            .execute());
 
       const faceIds = await this.getScopedProfileFaceIds(profileRef, trx);
       if (faceIds.length > 0) {
@@ -1406,12 +1425,12 @@ export class FaceIdentityRepository {
   }
 
   /**
-   * Resolve the origin profiles a scoped merge names, applying the merge RBAC to each: a `person` ref must
-   * be the actor's own, a `space-person` ref must sit in a space where the actor is Owner/Editor. Returns
-   * null if any ref fails to resolve, so the caller refuses the whole merge rather than silently dropping a
-   * source. Unlike the profiles the planner later fans out to, these are the ones the actor explicitly named
-   * — the fan-out is deliberately not RBAC-filtered (see IdentityMergePropagationService).
-   */
+  Resolve the origin profiles a scoped merge names, applying the merge RBAC to each: a `person` ref must
+  be the actor's own, a `space-person` ref must sit in a space where the actor is Owner/Editor. Returns
+  null if any ref fails to resolve, so the caller refuses the whole merge rather than silently dropping a
+  source. Unlike the profiles the planner later fans out to, these are the ones the actor explicitly named
+  — the fan-out is deliberately not RBAC-filtered (see IdentityMergePropagationService).
+  */
   async resolveScopedMergeOrigins(
     actorUserId: string,
     refs: ScopedPersonProfileRefDto[],
@@ -1423,7 +1442,12 @@ export class FaceIdentityRepository {
       if (ref.type === 'person') {
         const row = await db
           .selectFrom('person')
-          .select(['person.personGroupId', 'person.ownerId', 'person.identityId', 'person.type'])
+          .select([
+            'person.personGroupId',
+            'person.ownerId',
+            personIdentityId().as('identityId'),
+            personType().as('type'),
+          ])
           .where('person.personGroupId', '=', ref.id)
           .where('person.ownerId', '=', actorUserId)
           .executeTakeFirst();
@@ -1487,10 +1511,11 @@ export class FaceIdentityRepository {
     if (ref.type === 'person') {
       const row = await this.db
         .selectFrom('person')
-        .innerJoin('face_identity', 'face_identity.id', 'person.identityId')
+        .innerJoin('person_identity', 'person_identity.personGroupId', 'person.personGroupId')
+        .innerJoin('face_identity', 'face_identity.id', 'person_identity.identityId')
         .select([
           'person.personGroupId',
-          'person.identityId',
+          'person_identity.identityId',
           'person.faceAssetId as representativeFaceId',
           'face_identity.type as identityType',
         ])
@@ -1553,10 +1578,11 @@ export class FaceIdentityRepository {
     if (profileRef.type === 'person') {
       const row = await db
         .selectFrom('person')
-        .innerJoin('face_identity', 'face_identity.id', 'person.identityId')
+        .innerJoin('person_identity', 'person_identity.personGroupId', 'person.personGroupId')
+        .innerJoin('face_identity', 'face_identity.id', 'person_identity.identityId')
         .select([
           'person.personGroupId',
-          'person.identityId',
+          'person_identity.identityId',
           'person.faceAssetId as representativeFaceId',
           'face_identity.type as identityType',
         ])
@@ -1671,9 +1697,9 @@ export class FaceIdentityRepository {
   }
 
   /**
-   * The page plus the library-wide header figures, from one query. See {@link withTotals} on
-   * {@link queryAccessiblePeoplePage} for why the totals are not simply the page's own numbers.
-   */
+  The page plus the library-wide header figures, from one query. See {@link withTotals} on
+  {@link queryAccessiblePeoplePage} for why the totals are not simply the page's own numbers.
+  */
   @GenerateSql({
     params: [
       { userId: DummyValue.UUID, withHidden: true, limit: 51, offset: 0, minimumFaceCount: 3, hasTimelineSpaces: true },
@@ -1711,11 +1737,11 @@ export class FaceIdentityRepository {
     /** Resolved by the caller when it runs several of these queries, to avoid repeating the lookup. */
     hasTimelineSpaces?: boolean;
     /**
-     * Also derive the library-wide total/hidden header figures from the CTEs this query already
-     * builds, instead of a third query that rebuilt them from scratch. Every
-     * returned row carries them; a page past the end returns a single row whose `identityId` is
-     * null and which carries only the totals.
-     */
+    Also derive the library-wide total/hidden header figures from the CTEs this query already
+    builds, instead of a third query that rebuilt them from scratch. Every
+    returned row carries them; a page past the end returns a single row whose `identityId` is
+    null and which carries only the totals.
+    */
     withTotals?: boolean;
   }): Promise<AccessiblePeoplePageRawRow[]> {
     const searchName = input.searchName ?? '';
@@ -1795,24 +1821,25 @@ export class FaceIdentityRepository {
       ),
       accessible_profiles AS (
         SELECT
-          person."identityId",
+          ${personIdentityId()} AS "identityId",
           person.name,
           person."isHidden",
           person."isFavorite",
           person."updatedAt",
           person."personGroupId" AS "profileId",
-          person.type,
+          ${personType()} AS type,
           0 AS "profileRank"
         FROM person
         WHERE person."ownerId" = ${input.userId}
-          AND person."identityId" IS NOT NULL
+          AND ${personIdentityId()} IS NOT NULL
           AND EXISTS (
-            SELECT 1 FROM accessible_faces WHERE accessible_faces."identityId" = person."identityId"
+            SELECT 1 FROM accessible_faces WHERE accessible_faces."identityId" = ${personIdentityId()}
           )
-          AND (${typeFilter} = '' OR person.type = ${typeFilter})
+          AND (${typeFilter} = '' OR ${personType()} = ${typeFilter})
           AND (
-            ${typeFilter} <> 'pet'
-            OR person."identityId" IN (SELECT "identityId" FROM embedded_pet_identities)
+            NOT ${personIsPet()}
+            OR ${personIdentityId()} IN (SELECT "identityId" FROM embedded_pet_identities)
+            OR ${humanEmbeddedIdentity(personIdentityId())}
           )
         UNION ALL
         SELECT
@@ -1844,8 +1871,9 @@ export class FaceIdentityRepository {
           )
           AND (${typeFilter} = '' OR shared_space_person.type = ${typeFilter})
           AND (
-            ${typeFilter} <> 'pet'
+            shared_space_person.type <> 'pet'
             OR shared_space_person."identityId" IN (SELECT "identityId" FROM embedded_pet_identities)
+            OR ${humanEmbeddedIdentity(sql.ref('shared_space_person.identityId'))}
           )
       ),
       eligible_profiles AS (
@@ -1944,21 +1972,21 @@ export class FaceIdentityRepository {
     identityIds: string[];
     withHidden: boolean;
     /**
-     * Per-identity `COUNT(DISTINCT assetId)` the caller has already computed, keyed by identity id.
-     *
-     * `getAccessiblePeopleIdentityPage` produces exactly this number (its `visibleAssetCount`) for
-     * every identity it returns, so the two callers that page first — {@link getAccessiblePeople}
-     * and {@link searchAccessiblePeople} — can hand it over instead of making this query rebuild
-     * the `accessible_faces` CTE to recompute the identical value. On a large library that
-     * recomputation dominated `GET /api/people`.
-     *
-     * Supplying it must not change the result. Two invariants make that hold, and both are pinned
-     * by tests: the counts are the same aggregate over the same CTE definition, and an identity
-     * only reaches this method because the page query already established it is accessible — which
-     * is what the dropped `EXISTS (accessible_faces)` guard was re-checking. Identities absent from
-     * the map (or counted zero, which the page query never emits) are dropped, matching the
-     * uncounted path where they fall out of `ranked_profiles`.
-     */
+    Per-identity `COUNT(DISTINCT assetId)` the caller has already computed, keyed by identity id.
+    
+    `getAccessiblePeopleIdentityPage` produces exactly this number (its `visibleAssetCount`) for
+    every identity it returns, so the two callers that page first — {@link getAccessiblePeople}
+    and {@link searchAccessiblePeople} — can hand it over instead of making this query rebuild
+    the `accessible_faces` CTE to recompute the identical value. On a large library that
+    recomputation dominated `GET /api/people`.
+    
+    Supplying it must not change the result. Two invariants make that hold, and both are pinned
+    by tests: the counts are the same aggregate over the same CTE definition, and an identity
+    only reaches this method because the page query already established it is accessible — which
+    is what the dropped `EXISTS (accessible_faces)` guard was re-checking. Identities absent from
+    the map (or counted zero, which the page query never emits) are dropped, matching the
+    uncounted path where they fall out of `ranked_profiles`.
+    */
     assetCounts?: ReadonlyMap<string, number>;
     /** Resolved by the caller when it runs several of these queries, to avoid repeating the lookup. */
     hasTimelineSpaces?: boolean;
@@ -1978,9 +2006,8 @@ export class FaceIdentityRepository {
 
     // Only the uncounted path emits an accessibility predicate, so skip the lookup entirely on the
     // hot path rather than paying a round-trip for a value that is never interpolated.
-    const hasTimelineSpaces = countedIdentities
-      ? false
-      : (input.hasTimelineSpaces ?? (await this.hasTimelineSpaces(input.userId)));
+    const hasTimelineSpaces =
+      !countedIdentities && (input.hasTimelineSpaces ?? (await this.hasTimelineSpaces(input.userId)));
 
     // With counts supplied, carry them alongside the ids through a parallel unnest so the whole
     // accessible_faces/asset_counts pair can be dropped from the query.
@@ -2050,7 +2077,7 @@ export class FaceIdentityRepository {
           'user-person'::text AS "profileType",
           person."personGroupId" AS "profileId",
           NULL::uuid AS "spaceId",
-          person."identityId",
+          ${personIdentityId()} AS "identityId",
           person.name,
           person."birthDate",
           CASE WHEN person."birthDate" IS NOT NULL THEN 'manual' ELSE 'none' END AS "birthDateSource",
@@ -2060,11 +2087,11 @@ export class FaceIdentityRepository {
           person."isFavorite",
           person.color,
           person."updatedAt",
-          person.type,
-          person.species,
+          ${personType()} AS type,
+          ${personSpecies()} AS species,
           0 AS "profileRank"
         FROM person
-        INNER JOIN requested_identities ON requested_identities."identityId" = person."identityId"
+        INNER JOIN requested_identities ON requested_identities."identityId" = ${personIdentityId()}
         WHERE person."ownerId" = ${input.userId}
           AND (${input.withHidden}::boolean OR person."isHidden" = false)
         UNION ALL
@@ -2194,6 +2221,10 @@ export class FaceIdentityRepository {
       numberOfAssets: Number(row.numberOfAssets ?? 0),
       type: row.type ?? 'person',
       species: row.species,
+      // Gallery: person sharing is dormant (specs/2026-10-01-upstream-person-sharing-dormant-design.md).
+      otherPeople: [],
+      sharedBy: [],
+      sharedWith: [],
     };
   }
 
@@ -2202,7 +2233,7 @@ export class FaceIdentityRepository {
     const ensure = async (runner: Kysely<DB> | Transaction<DB>) => {
       const person = await runner
         .selectFrom('person')
-        .select(['personGroupId', 'identityId', 'type', 'faceAssetId'])
+        .select(['personGroupId', personIdentityId().as('identityId'), personType().as('type'), 'faceAssetId'])
         .where('personGroupId', '=', personId)
         .executeTakeFirstOrThrow();
 
@@ -2223,11 +2254,7 @@ export class FaceIdentityRepository {
         .returningAll()
         .executeTakeFirstOrThrow();
 
-      await runner
-        .updateTable('person')
-        .set({ identityId: identity.id })
-        .where('personGroupId', '=', person.personGroupId)
-        .execute();
+      await setPersonIdentity(runner, person.personGroupId, identity.id);
 
       return identity;
     };
@@ -2243,22 +2270,25 @@ export class FaceIdentityRepository {
     const profiles: MergePropagationProfile[] = [];
 
     if (personIds.length > 0 || identityIds.length > 0) {
-      let query = db.selectFrom('person').select(({ selectFrom }) => [
-        'person.personGroupId',
-        'person.ownerId',
-        'person.identityId',
-        'person.type',
-        'person.name',
-        selectFrom('asset_face')
-          .select(sql<number>`count(*)::int`.as('faceCount'))
-          .whereRef('asset_face.personGroupId', '=', 'person.personGroupId')
-          .as('faceCount'),
-      ]);
+      let query = db
+        .selectFrom('person')
+        .leftJoin('person_identity', 'person_identity.personGroupId', 'person.personGroupId')
+        .select(({ selectFrom }) => [
+          'person.personGroupId',
+          'person.ownerId',
+          'person_identity.identityId',
+          personType().as('type'),
+          'person.name',
+          selectFrom('asset_face')
+            .select(sql<number>`count(*)::int`.as('faceCount'))
+            .whereRef('asset_face.personGroupId', '=', 'person.personGroupId')
+            .as('faceCount'),
+        ]);
 
       query =
         personIds.length > 0
           ? query.where('person.personGroupId', 'in', personIds)
-          : query.where('person.identityId', 'in', identityIds);
+          : query.where('person_identity.identityId', 'in', identityIds);
 
       const people = await query.execute();
       profiles.push(
@@ -2331,15 +2361,25 @@ export class FaceIdentityRepository {
     }
   }
 
+  /**
+  The space person's identity, minting one if it has none.
+  
+  `adoptIdentityId`: when the space person has no identity yet, take this existing one instead of
+  minting a new one. The caller passes it when the space person is the same human as an existing
+  owner person (§6.3.1), so the owner layer reuses that person rather than gaining a duplicate.
+  Skipped when another space person in the same space already holds the identity, because
+  `(spaceId, identityId)` is unique; the person then gets a fresh identity as before.
+  */
   @GenerateSql({ params: [DummyValue.UUID] })
   async ensureSpacePersonIdentity(
     spacePersonId: string,
     db: Kysely<DB> | Transaction<DB> = this.db,
+    { adoptIdentityId }: { adoptIdentityId?: string | null } = {},
   ): Promise<FaceIdentity> {
     const ensure = async (runner: Kysely<DB> | Transaction<DB>) => {
       const person = await runner
         .selectFrom('shared_space_person')
-        .select(['id', 'identityId', 'type', 'representativeFaceId'])
+        .select(['id', 'spaceId', 'identityId', 'type', 'representativeFaceId'])
         .where('id', '=', spacePersonId)
         .executeTakeFirstOrThrow();
 
@@ -2349,6 +2389,33 @@ export class FaceIdentityRepository {
           .selectAll()
           .where('id', '=', person.identityId)
           .executeTakeFirstOrThrow();
+      }
+
+      if (adoptIdentityId) {
+        const adopted = await runner
+          .updateTable('shared_space_person')
+          .set({ identityId: adoptIdentityId })
+          .where('id', '=', person.id)
+          .where('identityId', 'is', null)
+          .where((eb) =>
+            eb.not(
+              eb.exists(
+                eb
+                  .selectFrom('shared_space_person as holder')
+                  .select('holder.id')
+                  .where('holder.spaceId', '=', person.spaceId)
+                  .where('holder.identityId', '=', adoptIdentityId),
+              ),
+            ),
+          )
+          .executeTakeFirst();
+        if (Number(adopted.numUpdatedRows) > 0) {
+          return runner
+            .selectFrom('face_identity')
+            .selectAll()
+            .where('id', '=', adoptIdentityId)
+            .executeTakeFirstOrThrow();
+        }
       }
 
       const identity = await runner
@@ -2379,11 +2446,30 @@ export class FaceIdentityRepository {
     return this.replaceFaceIdentity(input);
   }
 
+  // Spec §6.2 (Slice 4): does this face already carry an identity? `createSpacePerson` needs this
+  // BEFORE deciding whether a plain `createPerson` is safe, or whether it must route through
+  // `createOrGetPersonForIdentity` instead — a face left over from an earlier attach/detach cycle
+  // (or ML backfill) may already resolve to an identity that a space person here already holds,
+  // and a plain insert would violate `shared_space_person_spaceId_identityId_key` (F-33).
+  // `assetFaceId` is `face_identity_face`'s primary key, so at most one row can match.
+  @GenerateSql({ params: [DummyValue.UUID] })
+  async getIdentityIdForFace(
+    assetFaceId: string,
+    db: Kysely<DB> | Transaction<DB> = this.db,
+  ): Promise<string | undefined> {
+    const row = await db
+      .selectFrom('face_identity_face')
+      .select('identityId')
+      .where('assetFaceId', '=', assetFaceId)
+      .executeTakeFirst();
+    return row?.identityId;
+  }
+
   // The positive verdict read, scoped to a bounded set of faces. `source='manual'` is the durable record
   // that a human placed a face on a person — written by every human reassignment, keyed by identity so it
   // survives merges, and replaced (never accumulated) by the next human reassignment. Both face engines
   // exclude these faces from their queues.
-  // H6: face-verdict.service.ts calls this for every flagged face in a scan. minFaces is admin-settable, so
+  // H6: face-assignment.service.ts calls this for every flagged face in a scan. minFaces is admin-settable, so
   // a full-library scan can pass every flagged face in the instance — chunked at 1000, matching every
   // sibling bulk face path in this file (replaceFaceIdentities, demoteManualFaceLinks): one id is one bind
   // parameter, so an unchunked IN-list breaks at Postgres's 65 535-parameter ceiling.
@@ -2411,7 +2497,7 @@ export class FaceIdentityRepository {
   // IDENTITY has to match a suspicion aimed at the person itself, which is what the identity token provides;
   // the person token remains so verdicts written before the person had an identity keep matching.
   //
-  // H6: chunked at 1000 for the same reason as getManualLinkedFaceIds above — face-verdict.service.ts calls
+  // H6: chunked at 1000 for the same reason as getManualLinkedFaceIds above — face-assignment.service.ts calls
   // this for every suspected owner in a scan, and minFaces is admin-settable.
   @GenerateSql({ params: [[DummyValue.UUID]] })
   async getPersonVerdictTokens(personIds: string[]): Promise<Map<string, string[]>> {
@@ -2422,7 +2508,7 @@ export class FaceIdentityRepository {
     for (let index = 0; index < personIds.length; index += 1000) {
       const rows = await this.db
         .selectFrom('person')
-        .select(['personGroupId', 'identityId'])
+        .select(['personGroupId', personIdentityId().as('identityId')])
         .where('personGroupId', 'in', personIds.slice(index, index + 1000))
         .execute();
       for (const row of rows) {
@@ -2493,12 +2579,12 @@ export class FaceIdentityRepository {
   }
 
   /**
-   * Returns the asset-face ids actually written. With `requirePersonId` set, only faces still assigned to
-   * that person are written (H5): the caller's eligibility read happens outside the transaction, so a
-   * concurrent reassign would otherwise leave the face on one person while this re-points its identity to
-   * another — the torn state `reattributeFaces` and `detachFaces` both guard against at write time, and
-   * which a later FaceIdentityBackfill resolves in the wrong direction.
-   */
+  Returns the asset-face ids actually written. With `requirePersonId` set, only faces still assigned to
+  that person are written (H5): the caller's eligibility read happens outside the transaction, so a
+  concurrent reassign would otherwise leave the face on one person while this re-points its identity to
+  another — the torn state `reattributeFaces` and `detachFaces` both guard against at write time, and
+  which a later FaceIdentityBackfill resolves in the wrong direction.
+  */
   async replaceFaceIdentities(
     input: {
       assetFaceIds: string[];
@@ -2621,6 +2707,20 @@ export class FaceIdentityRepository {
     await this.db.deleteFrom('face_identity_face').where('assetFaceId', 'in', assetFaceIds).execute();
   }
 
+  // Removes the face's link only while it still points at `identityId`. Returns whether a row went.
+  @GenerateSql({ params: [{ assetFaceId: DummyValue.UUID, identityId: DummyValue.UUID }] })
+  async unlinkFaceFromIdentity(
+    input: { assetFaceId: string; identityId: string },
+    db: Kysely<DB> | Transaction<DB> = this.db,
+  ): Promise<boolean> {
+    const result = await db
+      .deleteFrom('face_identity_face')
+      .where('assetFaceId', '=', input.assetFaceId)
+      .where('identityId', '=', input.identityId)
+      .executeTakeFirst();
+    return Number(result.numDeletedRows) > 0;
+  }
+
   @GenerateSql({ params: [SourceType.MachineLearning] })
   async unlinkFacesBySourceType(sourceType: SourceType, options: { excludePetFaces?: boolean } = {}): Promise<void> {
     await this.db
@@ -2644,9 +2744,10 @@ export class FaceIdentityRepository {
       .where(({ not, exists, selectFrom, ref }) =>
         not(
           exists(
-            selectFrom('person')
+            selectFrom('person_identity')
+              .innerJoin('person', 'person.personGroupId', 'person_identity.personGroupId')
               .select(sql`1`.as('one'))
-              .whereRef('person.identityId', '=', ref('face_identity.id')),
+              .whereRef('person_identity.identityId', '=', ref('face_identity.id')),
           ),
         ),
       )
@@ -2674,7 +2775,7 @@ export class FaceIdentityRepository {
   async backfillPersonalIdentities(input: { cursor?: string; limit: number }): Promise<BackfillResult> {
     const people = await this.db
       .selectFrom('person')
-      .select(['personGroupId', 'ownerId', 'identityId'])
+      .select(['personGroupId', 'ownerId', personIdentityId().as('identityId')])
       .$if(!!input.cursor, (qb) => qb.where('personGroupId', '>', input.cursor!))
       .orderBy('personGroupId')
       .limit(input.limit + 1)
@@ -2928,10 +3029,11 @@ export class FaceIdentityRepository {
   private getPersonByIdentity(ownerId: string, identityId: string, excludePersonId?: string) {
     return this.db
       .selectFrom('person')
-      .select(['personGroupId'])
-      .where('ownerId', '=', ownerId)
-      .where('identityId', '=', identityId)
-      .$if(!!excludePersonId, (qb) => qb.where('personGroupId', '!=', excludePersonId!))
+      .innerJoin('person_identity', 'person_identity.personGroupId', 'person.personGroupId')
+      .select(['person.personGroupId'])
+      .where('person.ownerId', '=', ownerId)
+      .where('person_identity.identityId', '=', identityId)
+      .$if(!!excludePersonId, (qb) => qb.where('person.personGroupId', '!=', excludePersonId!))
       .executeTakeFirst();
   }
 
@@ -3317,17 +3419,18 @@ export class FaceIdentityRepository {
         .where('identityId', 'in', mergeableSourceIdentityIds)
         .execute();
 
+      await clearOrphanPersonIdentities(trx, [...mergeableSourceIdentityIds, input.targetIdentityId]);
       await trx
-        .updateTable('person')
+        .updateTable('person_identity')
         .set({ identityId: input.targetIdentityId })
         .where('identityId', 'in', mergeableSourceIdentityIds)
         .where(({ not, exists, selectFrom, ref }) =>
           not(
             exists(
-              selectFrom('person as target_person')
+              selectFrom('person_identity as target_identity')
                 .select(sql`1`.as('one'))
-                .where('target_person.identityId', '=', input.targetIdentityId)
-                .whereRef('target_person.ownerId', '=', ref('person.ownerId')),
+                .where('target_identity.identityId', '=', input.targetIdentityId)
+                .whereRef('target_identity.ownerId', '=', ref('person_identity.ownerId')),
             ),
           ),
         )
@@ -3355,7 +3458,9 @@ export class FaceIdentityRepository {
 
       const deletable = await trx
         .selectFrom('face_identity')
-        .leftJoin('person', 'person.identityId', 'face_identity.id')
+        // clearOrphanPersonIdentities above leaves only live people's links to these identities
+        .leftJoin('person_identity', 'person_identity.identityId', 'face_identity.id')
+        .leftJoin('person', 'person.personGroupId', 'person_identity.personGroupId')
         .leftJoin('shared_space_person', 'shared_space_person.identityId', 'face_identity.id')
         .leftJoin('face_identity_face', 'face_identity_face.identityId', 'face_identity.id')
         .select('face_identity.id')
@@ -3426,8 +3531,9 @@ export class FaceIdentityRepository {
       .where('identityId', 'in', sourceIdentityIds)
       .execute();
 
+    await clearOrphanPersonIdentities(db, [...sourceIdentityIds, input.targetIdentityId]);
     await db
-      .updateTable('person')
+      .updateTable('person_identity')
       .set({ identityId: input.targetIdentityId })
       .where('identityId', 'in', sourceIdentityIds)
       .execute();
@@ -3442,12 +3548,41 @@ export class FaceIdentityRepository {
     // carry that type, so a re-pointed pet profile does not keep type='pet' while pointing at a person identity —
     // a mismatch the automatic dedup/matching queries (which filter on type) would misread (#733 review). The
     // type-inequality guard keeps this a no-op for the common same-type merge.
-    await db
-      .updateTable('person')
-      .set({ type: targetIdentity.type })
-      .where('identityId', '=', input.targetIdentityId)
-      .where('type', '!=', targetIdentity.type)
-      .execute();
+    // A person's type is its person_pet row.
+    const retyped =
+      targetIdentity.type === 'pet'
+        ? await db
+            .insertInto('person_pet')
+            .columns(['personGroupId'])
+            .expression((eb) =>
+              eb
+                .selectFrom('person_identity')
+                .innerJoin('person', 'person.personGroupId', 'person_identity.personGroupId')
+                .select('person_identity.personGroupId')
+                .where('person_identity.identityId', '=', input.targetIdentityId),
+            )
+            .onConflict((oc) => oc.doNothing())
+            .returning('personGroupId')
+            .execute()
+        : await db
+            .deleteFrom('person_pet')
+            .where('personGroupId', 'in', (eb) =>
+              eb.selectFrom('person_identity').select('personGroupId').where('identityId', '=', input.targetIdentityId),
+            )
+            .returning('personGroupId')
+            .execute();
+    if (retyped.length > 0) {
+      // touch the retyped people so sync re-delivers them, as the in-place person.type update did
+      await db
+        .updateTable('person')
+        .set((eb) => ({ name: eb.ref('person.name') }))
+        .where(
+          'personGroupId',
+          'in',
+          retyped.map(({ personGroupId }) => personGroupId),
+        )
+        .execute();
+    }
     await db
       .updateTable('shared_space_person')
       .set({ type: targetIdentity.type })
@@ -3460,7 +3595,9 @@ export class FaceIdentityRepository {
 
     const deletable = await db
       .selectFrom('face_identity')
-      .leftJoin('person', 'person.identityId', 'face_identity.id')
+      // clearOrphanPersonIdentities above leaves only live people's links to these identities
+      .leftJoin('person_identity', 'person_identity.identityId', 'face_identity.id')
+      .leftJoin('person', 'person.personGroupId', 'person_identity.personGroupId')
       .leftJoin('shared_space_person', 'shared_space_person.identityId', 'face_identity.id')
       .leftJoin('face_identity_face', 'face_identity_face.identityId', 'face_identity.id')
       .select('face_identity.id')
@@ -3543,14 +3680,16 @@ export class FaceIdentityRepository {
 
     const [personalConflicts, spaceConflicts] = await Promise.all([
       db
-        .selectFrom('person as source_person')
-        .innerJoin('person as target_person', (join) =>
+        .selectFrom('person_identity as source_identity')
+        .innerJoin('person as source_person', 'source_person.personGroupId', 'source_identity.personGroupId')
+        .innerJoin('person_identity as target_identity', (join) =>
           join
-            .onRef('target_person.ownerId', '=', 'source_person.ownerId')
-            .on('target_person.identityId', '=', input.targetIdentityId),
+            .onRef('target_identity.ownerId', '=', 'source_identity.ownerId')
+            .on('target_identity.identityId', '=', input.targetIdentityId),
         )
+        .innerJoin('person as target_person', 'target_person.personGroupId', 'target_identity.personGroupId')
         .select('source_person.personGroupId')
-        .where('source_person.identityId', 'in', sourceIdentityIds)
+        .where('source_identity.identityId', 'in', sourceIdentityIds)
         .execute(),
       db
         .selectFrom('shared_space_person as source_person')
@@ -3578,12 +3717,12 @@ export class FaceIdentityRepository {
   }
 
   /**
-   * Returns the same-space `shared_space_person` conflict pairs that block this identity merge:
-   * for every space holding both a target-identity row and a source-identity row, the two rows with
-   * the fields needed to choose a collapse survivor (id, name, nameSource, faceCount). Spans all
-   * spaces because {@link mergeIdentities} checks conflicts globally — collapsing only the current
-   * space would still leave the merge blocked by another space's pair.
-   */
+  Returns the same-space `shared_space_person` conflict pairs that block this identity merge:
+  for every space holding both a target-identity row and a source-identity row, the two rows with
+  the fields needed to choose a collapse survivor (id, name, nameSource, faceCount). Spans all
+  spaces because {@link mergeIdentities} checks conflicts globally — collapsing only the current
+  space would still leave the merge blocked by another space's pair.
+  */
   async getSpaceMergeConflictPairs(input: {
     targetIdentityId: string;
     sourceIdentityIds: string[];

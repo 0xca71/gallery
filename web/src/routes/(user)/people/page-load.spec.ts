@@ -1,7 +1,10 @@
-import { sdkMock } from '$lib/__mocks__/sdk.mock';
-import { PEOPLE_PAGE_SIZE } from '$lib/constants';
-import { PeopleFilterBy, PeopleSortBy, peopleViewSettings } from '$lib/stores/preferences.store';
-import { load } from './+page';
+import { sdkMock } from '#lib/gallery/__mocks__/sdk.mock.ts';
+import { PeopleFilterBy, PeopleSortBy, peopleViewSettings } from '#lib/gallery/stores/preferences.store.ts';
+
+// Loaded after sdk.mock.ts: browser mode links static imports in order, and any module that imports
+// @immich/sdk before sdk.mock.ts registers its vi.mock binds the real SDK for the whole file.
+const { PEOPLE_PAGE_SIZE } = await import('#lib/constants.ts');
+const { load } = await import('./+page');
 
 const { authenticate, getFormatter, featureFlagsMock } = vi.hoisted(() => ({
   authenticate: vi.fn(),
@@ -11,15 +14,15 @@ const { authenticate, getFormatter, featureFlagsMock } = vi.hoisted(() => ({
   },
 }));
 
-vi.mock('$lib/utils/auth', () => ({ authenticate }));
+vi.mock('#lib/utils/auth.js', () => ({ authenticate }));
 // preferences.store (reached via people-filter, for the persisted People/Pets choice) pulls the
 // locale helpers out of this module at import time, so the mock has to carry them too.
-vi.mock('$lib/utils/i18n', () => ({
+vi.mock('#lib/utils/i18n.js', () => ({
   getFormatter,
   getPreferredLocale: () => 'en',
   convertBCP47: (value: string) => value,
 }));
-vi.mock('$lib/managers/feature-flags-manager.svelte', () => ({ featureFlagsManager: featureFlagsMock }));
+vi.mock('#lib/managers/feature-flags-manager.svelte.js', () => ({ featureFlagsManager: featureFlagsMock }));
 
 describe('people page load', () => {
   const peopleResponse = {

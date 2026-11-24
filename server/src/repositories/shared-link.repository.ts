@@ -1,12 +1,12 @@
 import { Injectable } from '@nestjs/common';
 import {
+  sql,
   type ExpressionBuilder,
   type Insertable,
   type Kysely,
   type Selectable,
   type ShallowDehydrateObject,
   type Updateable,
-  sql,
 } from 'kysely';
 import { jsonArrayFrom, jsonObjectFrom } from 'kysely/helpers/postgres';
 import { omit } from 'lodash-es';
@@ -14,16 +14,13 @@ import { InjectKysely } from 'nestjs-kysely';
 import { Album, columns } from 'src/database.js';
 import { ChunkedArray, DummyValue, GenerateSql } from 'src/decorators.js';
 import { AlbumUserRole, SharedLinkType } from 'src/enum.js';
+import { projectedDuration } from 'src/gallery/utils/projected-duration.js';
 import { DB } from 'src/schema/index.js';
 import { AssetExifTable } from 'src/schema/tables/asset-exif.table.js';
 import { AssetTable } from 'src/schema/tables/asset.table.js';
 import { SharedLinkTable } from 'src/schema/tables/shared-link.table.js';
-import {
-  asBaseEb,
-  sharedLinkAssetIsServable,
-  sharedLinkCreatorCanPublish,
-} from 'src/utils/shared-link-space-tether.js';
-import { spaceVisibilityGate } from 'src/utils/shared-space-album-scope.js';
+import { anyUuid, dummy } from 'src/utils/database.js';
+import { asBaseEb, sharedLinkAlbumIsServable, sharedLinkAssetIsServable } from 'src/utils/shared-link-space-tether.js';
 
 export type SharedLinkSearchOptions = {
   userId: string;
@@ -32,19 +29,18 @@ export type SharedLinkSearchOptions = {
 };
 
 const withSharedAssets = (eb: ExpressionBuilder<DB, 'shared_link'>) => {
-  return (
-    eb
-      .selectFrom('shared_link_asset')
-      .whereRef('shared_link.id', '=', 'shared_link_asset.sharedLinkId')
-      .innerJoin('asset', 'asset.id', 'shared_link_asset.assetId')
-      .where('asset.deletedAt', 'is', null)
-      // #1018: the payload must list exactly what the access gate serves, or the visitor's grid
-      // renders holes. Assets the creator does not own are tethered to the link's space, so one
-      // withdrawn contribution drops out of both at the same moment.
-      .where((eb) => sharedLinkAssetIsServable(asBaseEb(eb)))
-      .selectAll('asset')
-      .orderBy('asset.fileCreatedAt', 'asc')
-  );
+  // #1018: the payload must list exactly what the access gate serves, or the visitor's grid
+  // renders holes. Assets the creator does not own are tethered to the link's space, so one
+  // withdrawn contribution drops out of both at the same moment.
+  return eb
+    .selectFrom('shared_link_asset')
+    .whereRef('shared_link.id', '=', 'shared_link_asset.sharedLinkId')
+    .innerJoin('asset', 'asset.id', 'shared_link_asset.assetId')
+    .where('asset.deletedAt', 'is', null)
+    .where((eb) => sharedLinkAssetIsServable(asBaseEb(eb)))
+    .selectAll('asset')
+    .select(projectedDuration)
+    .orderBy('asset.fileCreatedAt', 'asc');
 };
 
 export const withExifInfo = (eb: ExpressionBuilder<DB, 'asset'>) => {
@@ -55,22 +51,18 @@ export const withExifInfo = (eb: ExpressionBuilder<DB, 'asset'>) => {
     .as('exifInfo');
 };
 
-const withAlbumOwner = (eb: ExpressionBuilder<DB, 'album'>) => {
-  return eb
-    .selectFrom('user')
-    .select(columns.user)
-    .where((eb) =>
-      eb.exists(
-        eb
-          .selectFrom('album_user')
-          .where('album_user.role', '=', sql.lit(AlbumUserRole.Owner))
-          .whereRef('album_user.albumId', '=', 'album.id')
-          .whereRef('album_user.userId', '=', 'user.id'),
-      ),
-    )
-    .where('user.deletedAt', 'is', null)
-    .as('owner');
-};
+const withAlbumOwner = (eb: ExpressionBuilder<DB, 'album'>) =>
+  jsonArrayFrom(
+    eb
+      .selectFrom('album_user')
+      .innerJoin('user', 'user.id', 'album_user.userId')
+      .where('album_user.role', '=', sql.lit(AlbumUserRole.Owner))
+      .whereRef('album_user.albumId', '=', 'album.id')
+      .select('album_user.role')
+      .select((eb) => jsonObjectFrom(eb.selectFrom(dummy).select(columns.user)).$notNull().as('user')),
+  )
+    .$notNull()
+    .as('albumUsers');
 
 const withSharedLinkAlbum = (eb: ExpressionBuilder<DB, 'shared_link'>) => {
   return eb
@@ -88,6 +80,7 @@ export class SharedLinkRepository {
   get(userId: string, id: string) {
     return this.db
       .selectFrom('shared_link')
+      .leftJoin('shared_link_space', 'shared_link_space.sharedLinkId', 'shared_link.id')
       .selectAll('shared_link')
       .select((eb) =>
         jsonArrayFrom(
@@ -97,69 +90,7 @@ export class SharedLinkRepository {
         ).as('assets'),
       )
       .leftJoinLateral(
-        (eb) =>
-          withSharedLinkAlbum(eb)
-            // #1018: album contents = the album's own rows ∪ the cross-owner contributions (#764)
-            // made to the space this link was created from. LATERAL so the contributed arm can
-            // correlate to `shared_link.spaceId`; a link with no space matches no contribution and
-            // this collapses back to the pre-#1018 `album_asset` join. UNION (not ALL) dedupes an
-            // asset that is both an album row and a retained contribution.
-            .leftJoinLateral(
-              (eb) =>
-                eb
-                  .selectFrom('album_asset')
-                  .select('album_asset.assetId as assetId')
-                  .whereRef('album_asset.albumId', '=', 'album.id')
-                  .union(
-                    eb
-                      .selectFrom('album_space_asset')
-                      .innerJoin('shared_space_album', (join) =>
-                        join
-                          .onRef('shared_space_album.albumId', '=', 'album_space_asset.albumId')
-                          .onRef('shared_space_album.spaceId', '=', 'album_space_asset.spaceId'),
-                      )
-                      // The contributed arm returns another member's asset, so it carries the space
-                      // visibility gate: archive + timeline only, never hidden or locked. The album's
-                      // own rows above keep plain album semantics and are deliberately not gated.
-                      .innerJoin('asset', 'asset.id', 'album_space_asset.assetId')
-                      .where((eb) => spaceVisibilityGate(eb))
-                      .select('album_space_asset.assetId as assetId')
-                      .whereRef('album_space_asset.albumId', '=', 'album.id')
-                      .whereRef('album_space_asset.spaceId', '=', 'shared_link.spaceId')
-                      .where((eb) => sharedLinkCreatorCanPublish(asBaseEb(eb))),
-                  )
-                  .as('album_members'),
-              (join) => join.onTrue(),
-            )
-            .leftJoinLateral(
-              (eb) =>
-                eb
-                  .selectFrom('asset')
-                  .selectAll('asset')
-                  .whereRef('album_members.assetId', '=', 'asset.id')
-                  .where('asset.deletedAt', 'is', null)
-                  .innerJoinLateral(withExifInfo, (join) => join.onTrue())
-                  .select((eb) => eb.fn.toJson(eb.table('exifInfo')).as('exifInfo'))
-                  .orderBy('asset.fileCreatedAt', 'asc')
-                  .as('assets'),
-              (join) => join.onTrue(),
-            )
-            .innerJoinLateral(withAlbumOwner, (join) => join.onTrue())
-            .select((eb) =>
-              eb.fn
-                .coalesce(
-                  eb.fn
-                    .jsonAgg('assets')
-                    .orderBy('assets.fileCreatedAt', 'asc')
-                    .filterWhere('assets.id', 'is not', null),
-
-                  sql`'[]'`,
-                )
-                .as('assets'),
-            )
-            .select((eb) => eb.fn.toJson('owner').as('owner'))
-            .groupBy(['album.id', sql`"owner".*`])
-            .as('album'),
+        (eb) => withSharedLinkAlbum(eb).select(withAlbumOwner).as('album'),
         (join) => join.onTrue(),
       )
       .select((eb) => eb.fn.toJson(eb.table('album')).$castTo<ShallowDehydrateObject<Album> | null>().as('album'))
@@ -170,23 +101,70 @@ export class SharedLinkRepository {
       .executeTakeFirst();
   }
 
-  @GenerateSql({ params: [{ userId: DummyValue.UUID, albumId: DummyValue.UUID }] })
-  getAll({ userId, id, albumId }: SharedLinkSearchOptions) {
-    return this.db
+  @GenerateSql(
+    { params: [{ userId: DummyValue.UUID }] },
+    { name: 'album', params: [{ userId: DummyValue.UUID, albumId: DummyValue.UUID }] },
+  )
+  async getAll({ userId, id, albumId }: SharedLinkSearchOptions) {
+    // This is a separate query so the second query's planner can do MCV lookups for the cover assets using these IDs
+    const individualLinks = albumId
+      ? []
+      : await this.db
+          .selectFrom('shared_link')
+          .select('id')
+          .where('userId', '=', userId)
+          .where('type', '=', sql.lit(SharedLinkType.Individual))
+          .execute();
+
+    return await this.db
       .selectFrom('shared_link')
+      .leftJoin('shared_link_space', 'shared_link_space.sharedLinkId', 'shared_link.id')
       .selectAll('shared_link')
-      .select((eb) => jsonArrayFrom(withSharedAssets(eb).limit(1)).as('assets'))
+      .$if(!albumId, (qb) =>
+        qb
+          .leftJoin(
+            (eb) =>
+              eb
+                .selectFrom('shared_link_asset')
+                .innerJoin('asset', 'asset.id', 'shared_link_asset.assetId')
+                // #1018: the cover must be an asset the link serves; the tether reads the link row.
+                .innerJoin('shared_link', 'shared_link.id', 'shared_link_asset.sharedLinkId')
+                .leftJoin('shared_link_space', 'shared_link_space.sharedLinkId', 'shared_link_asset.sharedLinkId')
+                .where('shared_link_asset.sharedLinkId', '=', anyUuid(individualLinks.map(({ id }) => id)))
+                .where('asset.deletedAt', 'is', null)
+                .where((eb) => sharedLinkAssetIsServable(asBaseEb(eb)))
+                .select((eb) => [
+                  'shared_link_asset.sharedLinkId',
+                  eb.fn.min('asset.fileCreatedAt').as('fileCreatedAt'),
+                ])
+                .groupBy('shared_link_asset.sharedLinkId')
+                .as('cover'),
+            (join) => join.onRef('cover.sharedLinkId', '=', 'shared_link.id'),
+          )
+          .select((eb) =>
+            jsonArrayFrom(
+              eb
+                .selectFrom('shared_link_asset')
+                .innerJoin('asset', 'asset.id', 'shared_link_asset.assetId')
+                .whereRef('shared_link_asset.sharedLinkId', '=', 'shared_link.id')
+                .whereRef('asset.fileCreatedAt', '=', 'cover.fileCreatedAt')
+                .where('asset.deletedAt', 'is', null)
+                .where((eb) => sharedLinkAssetIsServable(asBaseEb(eb)))
+                .selectAll('asset')
+                .select(projectedDuration)
+                .limit(sql.lit(1)),
+            ).as('assets'),
+          ),
+      )
       .where('shared_link.userId', '=', userId)
       .leftJoinLateral(
-        (eb) =>
-          withSharedLinkAlbum(eb)
-            .innerJoinLateral(withAlbumOwner, (join) => join.onTrue())
-            .select((eb) => eb.fn.toJson('owner').as('owner'))
-            .as('album'),
+        (eb) => withSharedLinkAlbum(eb).select(withAlbumOwner).as('album'),
         (join) => join.onTrue(),
       )
       .select((eb) => eb.fn.toJson('album').$castTo<ShallowDehydrateObject<Album> | null>().as('album'))
-      .where((eb) => eb.or([eb('shared_link.type', '=', SharedLinkType.Individual), eb('album.id', 'is not', null)]))
+      .where((eb) =>
+        eb.or([eb('shared_link.type', '=', sql.lit(SharedLinkType.Individual)), eb('album.id', 'is not', null)]),
+      )
       .$if(!!albumId, (eb) => eb.where('shared_link.albumId', '=', albumId!))
       .$if(!!id, (eb) => eb.where('shared_link.id', '=', id!))
       .orderBy('shared_link.createdAt', 'desc')
@@ -203,16 +181,18 @@ export class SharedLinkRepository {
     return this.authBuilder().where('shared_link.slug', '=', slug).executeTakeFirst();
   }
 
+  // gallery-fork (#1018): an album link made from a space lives only as long as its space tether
   private authBuilder() {
     return this.db
       .selectFrom('shared_link')
       .leftJoin('album', 'album.id', 'shared_link.albumId')
+      .leftJoin('shared_link_space', 'shared_link_space.sharedLinkId', 'shared_link.id')
       .where('album.deletedAt', 'is', null)
       .select((eb) => [
         'shared_link.id',
         'shared_link.userId',
         'shared_link.albumId',
-        'shared_link.spaceId',
+        'shared_link_space.spaceId',
         'shared_link.expiresAt',
         'shared_link.showExif',
         'shared_link.allowUpload',
@@ -222,22 +202,33 @@ export class SharedLinkRepository {
           eb.selectFrom('user').select(columns.authUser).whereRef('user.id', '=', 'shared_link.userId'),
         ).as('user'),
       ])
-      .where((eb) => eb.or([eb('shared_link.type', '=', SharedLinkType.Individual), eb('album.id', 'is not', null)]));
+      .where((eb) => eb.or([eb('shared_link.type', '=', SharedLinkType.Individual), eb('album.id', 'is not', null)]))
+      .where((eb) => sharedLinkAlbumIsServable(asBaseEb(eb)));
   }
 
-  async create(entity: Insertable<SharedLinkTable> & { assetIds?: string[] }) {
-    const { id } = await this.db
-      .insertInto('shared_link')
-      .values(omit(entity, 'assetIds'))
-      .returningAll()
-      .executeTakeFirstOrThrow();
+  async create(entity: Insertable<SharedLinkTable> & { assetIds?: string[]; spaceId?: string | null }) {
+    // gallery-fork: one transaction, so a failed shared_link_space write cannot leave a space link behind
+    // that serves only the creator's assets.
+    const { id } = await this.db.transaction().execute(async (trx) => {
+      const link = await trx
+        .insertInto('shared_link')
+        .values(omit(entity, 'assetIds', 'spaceId'))
+        .returningAll()
+        .executeTakeFirstOrThrow();
 
-    if (entity.assetIds && entity.assetIds.length > 0) {
-      await this.db
-        .insertInto('shared_link_asset')
-        .values(entity.assetIds!.map((assetId) => ({ assetId, sharedLinkId: id })))
-        .execute();
-    }
+      if (entity.spaceId) {
+        await trx.insertInto('shared_link_space').values({ sharedLinkId: link.id, spaceId: entity.spaceId }).execute();
+      }
+
+      if (entity.assetIds && entity.assetIds.length > 0) {
+        await trx
+          .insertInto('shared_link_asset')
+          .values(entity.assetIds!.map((assetId) => ({ assetId, sharedLinkId: link.id })))
+          .execute();
+      }
+
+      return link;
+    });
 
     return this.getSharedLinks(id);
   }
@@ -291,6 +282,7 @@ export class SharedLinkRepository {
             .selectFrom('asset')
             .whereRef('asset.id', '=', 'shared_link_asset.assetId')
             .selectAll('asset')
+            .select(projectedDuration)
             .innerJoinLateral(withExifInfo, (join) => join.onTrue())
             .as('assets'),
         (join) => join.onTrue(),

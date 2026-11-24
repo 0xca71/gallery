@@ -1,10 +1,9 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
-import { isAbsolute, parse } from 'node:path';
 import { Readable } from 'node:stream';
 import sanitize from 'sanitize-filename';
-import type { AuthDto } from 'src/dtos/auth.dto.js';
-import type { ImmichReadStream } from 'src/repositories/storage.repository.js';
+import { isDiskPath } from 'src/backends/disk-storage.backend.js';
 import { StorageCore } from 'src/cores/storage.core.js';
+import { isEditedOnly, type AuthDto } from 'src/dtos/auth.dto.js';
 import {
   DownloadArchiveDto,
   DownloadArchiveInfo,
@@ -13,10 +12,11 @@ import {
 } from 'src/dtos/download.dto.js';
 import { Permission } from 'src/enum.js';
 import { StorageBackend } from 'src/interfaces/storage-backend.interface.js';
+import type { ImmichReadStream } from 'src/repositories/storage.repository.js';
 import { BaseService } from 'src/services/base.service.js';
-import { StorageService } from 'src/services/storage.service.js';
 import { getAlbumSpaceIds } from 'src/utils/album-space-ids.js';
 import { HumanReadableSize } from 'src/utils/bytes.js';
+import { getFileNameWithoutExtension, getFilenameExtension } from 'src/utils/file.js';
 import { getPreferences } from 'src/utils/preferences.js';
 
 class LazyS3Readable extends Readable {
@@ -113,10 +113,12 @@ export class DownloadService extends BaseService {
       archive.assetIds.push(id);
       archive.size += Number(size || 0);
 
-      if (archive.size > targetSize) {
-        archives.push(archive);
-        archive = { size: 0, assetIds: [] };
+      if (archive.size <= targetSize) {
+        return;
       }
+
+      archives.push(archive);
+      archive = { size: 0, assetIds: [] };
     };
 
     for await (const asset of assets) {
@@ -154,8 +156,9 @@ export class DownloadService extends BaseService {
   async downloadArchive(auth: AuthDto, dto: DownloadArchiveDto): Promise<ImmichReadStream & { abort: () => void }> {
     await this.requireAccess({ auth, permission: Permission.AssetDownload, ids: dto.assetIds });
 
+    const edited = isEditedOnly(auth, dto.edited);
     const zip = this.storageRepository.createZipStream();
-    const assets = await this.assetRepository.getForOriginals(dto.assetIds, dto.edited ?? false);
+    const assets = await this.assetRepository.getForOriginals(dto.assetIds, edited);
     const assetMap = new Map(assets.map((asset) => [asset.id, asset]));
     const paths: Record<string, number> = {};
     const lazies: LazyS3Readable[] = [];
@@ -168,29 +171,31 @@ export class DownloadService extends BaseService {
 
       const { originalPath, editedPath, originalFileName } = asset;
 
-      let filename = sanitize(originalFileName) || 'unnamed';
+      const name = getFileNameWithoutExtension(sanitize(originalFileName) || 'unnamed');
+      const extension = getFilenameExtension(editedPath || originalPath);
+      let filename = name + extension;
+
       const count = paths[filename] || 0;
       paths[filename] = count + 1;
       if (count !== 0) {
-        const parsedFilename = parse(filename);
-        filename = `${parsedFilename.name}+${count}${parsedFilename.ext}`;
+        filename = `${name}+${count}${extension}`;
       }
 
-      let filePath = dto.edited && editedPath ? editedPath : originalPath;
+      let filePath = editedPath || originalPath;
 
-      if (isAbsolute(filePath)) {
+      if (isDiskPath(filePath)) {
         // Disk asset — resolve symlinks and add by path
         try {
           filePath = await this.storageRepository.realpath(filePath);
         } catch {
-          this.logger.warn('Unable to resolve realpath', { originalPath });
+          this.logger.warn('Unable to resolve realpath', { filePath });
         }
         zip.addFile(filePath, filename);
       } else {
         // S3 asset — open socket lazily when archiver starts consuming this entry.
         // All N sockets would open concurrently if we awaited backend.get() here;
         // archiver is sequential (concurrency 1) so only 1 socket is ever needed at once.
-        const backend = StorageService.resolveBackendForKey(filePath);
+        const backend = await this.backendMedia.backendFor(filePath);
         const lazy = new LazyS3Readable(backend, filePath);
         lazies.push(lazy);
         zip.addFile(lazy, filename);

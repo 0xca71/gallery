@@ -1,8 +1,9 @@
 <script lang="ts">
-  import { ResizeBoundary, transformManager } from '$lib/managers/edit/transform-manager.svelte';
-  import { getAssetMediaUrl } from '$lib/utils';
-  import { getAltText } from '$lib/utils/thumbnail-util';
-  import { toTimelineAsset } from '$lib/utils/timeline-util';
+  import { imageAdjustManager } from '#lib/gallery/edit/image-adjust-manager.svelte.ts';
+  import { ResizeBoundary, transformManager } from '#lib/managers/edit/transform-manager.svelte.ts';
+  import { getAssetMediaUrl } from '#lib/utils.ts';
+  import { getAltText } from '#lib/utils/thumbnail-util.ts';
+  import { toTimelineAsset } from '#lib/utils/timeline-util.ts';
   import { AssetMediaSize, type AssetResponseDto } from '@immich/sdk';
   import { Icon } from '@immich/ui';
   import { onMount } from 'svelte';
@@ -20,20 +21,12 @@
   let canvasContainer = $state<HTMLElement | null>(null);
 
   let imageSrc = $derived(
-    getAssetMediaUrl({
-      id: asset.id,
-      cacheKey: `${asset.thumbhash ?? ''}:${asset.fileModifiedAt}`,
-      edited: false,
-      size: AssetMediaSize.Preview,
-    }),
+    getAssetMediaUrl({ id: asset.id, cacheKey: asset.thumbhash, edited: false, size: AssetMediaSize.Preview }),
   );
 
   let imageTransform = $derived.by(() => {
     const transforms: string[] = [];
 
-    if (transformManager.fineRotation !== 0) {
-      transforms.push(`rotate(${transformManager.fineRotation}deg)`);
-    }
     if (transformManager.mirrorHorizontal) {
       transforms.push('scaleX(-1)');
     }
@@ -43,8 +36,6 @@
 
     return transforms.join(' ');
   });
-
-  let hasSubCrop = $derived(transformManager.hasManualSubCrop());
 
   const edges = [ResizeBoundary.Top, ResizeBoundary.Right, ResizeBoundary.Bottom, ResizeBoundary.Left];
   const corners = [
@@ -71,47 +62,46 @@
 </script>
 
 <div class="flex size-full flex-col items-center justify-center p-8" bind:this={canvasContainer}>
-  <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
   <div
-    class="crop-area max-h-full max-w-full cursor-crosshair overflow-hidden transition-transform motion-reduce:transition-none"
-    class:rotated={transformManager.normalizedBaseRotation % 180 > 0}
-    style:rotate={transformManager.baseRotation + 'deg'}
+    class="crop-area max-h-full max-w-full transition-transform motion-reduce:transition-none"
+    class:rotated={transformManager.normalizedRotation % 180 > 0}
+    style:rotate={transformManager.imageRotation + 'deg'}
     bind:this={transformManager.cropAreaEl}
-    onmousedown={(e) => transformManager.handleMouseDownOn(e, ResizeBoundary.Marquee)}
-    ondblclick={() => transformManager.resetCrop()}
-    role="application"
     aria-label="Crop area"
   >
     <img
       draggable="false"
       src={imageSrc}
       alt={$getAltText(toTimelineAsset(asset))}
-      class={[
-        'h-full select-none',
-        !transformManager.isInteracting && 'transition-transform motion-reduce:transition-none',
-      ]}
+      class="h-full transition-transform select-none motion-reduce:transition-none"
       style:transform={imageTransform}
+      style:filter={imageAdjustManager.filter}
     />
     <div
       class={[
         'overlay pointer-events-none absolute top-0 size-full transition-colors motion-reduce:transition-none',
         transformManager.isInteracting ? 'bg-black/30' : 'bg-black/56',
+        imageAdjustManager.mode !== 'crop' && 'invisible',
       ]}
       bind:this={transformManager.overlayEl}
     ></div>
-    <div class="crop-frame absolute border-2 border-white" bind:this={transformManager.cropFrame}>
+    <!-- Gallery: hidden, not unmounted, while the Adjust sliders show: draw() keeps writing its position. -->
+    <div
+      class="crop-frame absolute border-2 border-white"
+      class:invisible={imageAdjustManager.mode !== 'crop'}
+      bind:this={transformManager.cropFrame}
+    >
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div
         class={[
-          'grid size-full transition-opacity motion-reduce:transition-none',
-          hasSubCrop ? 'cursor-move' : 'cursor-crosshair',
+          'grid size-full cursor-move transition-opacity motion-reduce:transition-none',
           transformManager.isInteracting ? 'opacity-100' : 'opacity-0',
         ]}
         onmousedown={(e) => transformManager.handleMouseDownOn(e, ResizeBoundary.None)}
       ></div>
 
       {#each edges as edge (edge)}
-        {@const rotatedEdge = rotateBoundary(edges, edge, transformManager.normalizedBaseRotation / 90)}
+        {const rotatedEdge = $derived(rotateBoundary(edges, edge, transformManager.normalizedRotation / 90))}
         <button
           class={['absolute', edge]}
           style={`${edge}: -10px`}
@@ -122,7 +112,7 @@
       {/each}
 
       {#each corners as corner (corner)}
-        {@const rotatedCorner = rotateBoundary(corners, corner, transformManager.normalizedBaseRotation / 90)}
+        {const rotatedCorner = $derived(rotateBoundary(corners, corner, transformManager.normalizedRotation / 90))}
         <button
           class={['corner', corner]}
           onmousedown={(e) => transformManager.handleMouseDownOn(e, corner)}

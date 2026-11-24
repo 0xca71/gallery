@@ -51,14 +51,16 @@ import { describe, expect, it } from 'vitest';
 // Server root — vitest runs with cwd at server/ (matches face-identity-query-shape.spec.ts).
 const SERVER_ROOT = process.cwd();
 
-const REPO_DIR = 'src/repositories';
+// src/gallery holds the fork repositories (and the fork access classes) moved out of src/repositories;
+// both trees are walked recursively so a space read added in any subfolder is caught.
+const REPO_DIRS = ['src/repositories', 'src/gallery'];
 const EXTRA_FILES = ['src/utils/database.ts'];
 
 // Fork-owned space-scope helpers. A call to any of these IS a space read (they
 // encode the direct/library/album access path). Detected as bare identifiers so a
 // call, spread, or import all count.
 const SPACE_HELPER =
-  /\b(spaceAssetPathBranches|spaceAlbumAssetExists|spaceAlbumAssetExistsSql|spaceContributedAssetExists|spaceDirectAssetExists|spaceLibraryAssetExists|accessibleSpaces|accessibleSpaceAlbums|accessibleLibraries)\b/;
+  /\b(spaceAssetPathBranches|spaceAlbumAssetExists|spaceAlbumAssetExistsSql|spaceContributedAssetExists|spaceDirectAssetExists|spaceLibraryAssetExists|accessibleSpaces|accessibleSpaceAlbums|accessibleLibraries|sharedWithViewer|ownedOrSharedWithViewer|albumConfinedToViewer|albumMembership|spaceLinkedAlbumIds)\b/;
 
 // The raw join tables. A reference to any of these is also a space read.
 const SPACE_TABLE = /\bshared_space_(asset|library|album)\b/;
@@ -69,9 +71,11 @@ const SPACE_READ_MARKER = new RegExp(`${SPACE_HELPER.source}|${SPACE_TABLE.sourc
 // Derive the file set: every repository + utils/database.ts that contains a
 // space-read marker. Glob, do not hardcode — a new leaky file is auto-included.
 const deriveScopingFiles = (): string[] => {
-  const repoFiles = readdirSync(join(SERVER_ROOT, REPO_DIR))
-    .filter((f) => f.endsWith('.ts') && !f.endsWith('.spec.ts'))
-    .map((f) => `${REPO_DIR}/${f}`);
+  const repoFiles = REPO_DIRS.flatMap((dir) =>
+    readdirSync(join(SERVER_ROOT, dir), { recursive: true, encoding: 'utf8' })
+      .filter((f) => f.endsWith('.ts') && !f.endsWith('.spec.ts'))
+      .map((f) => `${dir}/${f}`),
+  );
   return [...repoFiles, ...EXTRA_FILES].filter((file) =>
     SPACE_READ_MARKER.test(readFileSync(join(SERVER_ROOT, file), 'utf8')),
   );
@@ -100,9 +104,9 @@ const NON_DECL = new Set([
   // Bare calls to the fork's own gate/scope helpers, e.g. `spaceVisibilityGate(eb),` as the
   // first array element of an `eb.and([...])` conjunct. DECL cannot distinguish a call site
   // from a declaration (both look like `identifier(`), so without this exclusion the backward
-  // scan in enclosingFn stops at the call instead of continuing to the real enclosing function
-  // (e.g. albumSharedSpaceScope) — misattributing the enclosing fn and defeating its allowlist
-  // entry (Slice 1 / security-1 regression).
+  // scan in enclosingFn stops at the call instead of continuing to the real enclosing function,
+  // misattributing the enclosing fn and defeating its allowlist entry (Slice 1 / security-1
+  // regression).
   'spaceVisibilityGate',
   // Same reason: `spaceAlbumAssetExists(eb, {` / `spaceContributedAssetExists(eb, {` as the first
   // token of a wrapped `.where((eb) => eb.not(...))` arm would otherwise be read as a declaration,
@@ -159,7 +163,7 @@ const key = (file: string, fn: string) => `${shortName(file)}::${fn}`;
 // ─────────────────────────────────────────────────────────────────────────────
 
 const ALBUM_MARKER =
-  /shared_space_album|spaceAlbumAssetExists|spaceAssetPathBranches|spaceAlbumAssetExistsSql|accessibleSpaceAlbums/;
+  /shared_space_album|spaceAlbumAssetExists|spaceAssetPathBranches|spaceAlbumAssetExistsSql|accessibleSpaceAlbums|spaceLinkedAlbumIds/;
 const LIBRARY_REF = /\bshared_space_library\b/;
 const WINDOW = 45;
 
@@ -173,12 +177,6 @@ const BENIGN_LINE = [
 // Enclosing functions that legitimately reference shared_space_library WITHOUT an
 // album arm. Keyed by `<file>::<function>`. Every entry needs a real reason.
 const ALBUM_ALLOWLIST: Record<string, string> = {
-  // Album-ABSENCE gate (keeps plain non-space album assets visible) — references
-  // asset/library absence by design, never an album access arm.
-  'database.ts::albumSharedSpaceScope': 'album-absence gate, not an album access arm',
-  // Pre-existing intentional RBAC gap: AssetUpdate/edit has no space-album arm
-  // (space editors can add/remove but not metadata-edit linked-album assets).
-  'access.repository.ts::checkSpaceEditAccess': 'known RBAC gap: AssetUpdate has no space-album arm (pre-existing)',
   // GET /shared-spaces/:id/map-markers unions direct+library only. Visibility-gated
   // (visibleSpaceAssetVisibilities) so no leak — but album-linked markers are absent.
   // Pre-existing album-completeness gap, tracked separately; NOT a visibility hole.
@@ -200,15 +198,34 @@ const ALBUM_ALLOWLIST: Record<string, string> = {
     'library-path EXIF restore write-infra; no album arm applies (mirrors emitLibraryAssetVisibilityPurge)',
 };
 
+// Comment lines, by block: since eslint-plugin-unicorn v78 (no-asterisk-prefix-in-documentation-comments)
+// a doc comment's body lines no longer start with `*`, so a prefix test would read them as code.
+const commentLines = (lines: string[]): boolean[] => {
+  let inBlock = false;
+  return lines.map((raw) => {
+    const trimmed = raw.trim();
+    if (inBlock) {
+      inBlock = !trimmed.includes('*/');
+      return true;
+    }
+    if (trimmed.startsWith('/*')) {
+      inBlock = !trimmed.includes('*/', 2);
+      return true;
+    }
+    return trimmed.startsWith('//') || trimmed.startsWith('*');
+  });
+};
+
 describe('space-album scope guard: every library scoping arm has album coverage', () => {
   it.each(SCOPING_FILES)('%s', (file) => {
     const lines = readFileSync(join(SERVER_ROOT, file), 'utf8').split('\n');
+    const isComment = commentLines(lines);
     const orphans: string[] = [];
 
     for (let i = 0; i < lines.length; i++) {
       const raw = lines[i];
       const trimmed = raw.trim();
-      if (trimmed.startsWith('//') || trimmed.startsWith('*')) {
+      if (isComment[i]) {
         continue;
       }
       if (!LIBRARY_REF.test(raw)) {
@@ -266,8 +283,10 @@ describe('space-album scope guard: every library scoping arm has album coverage'
 //     defined as `eb(column, 'in', spaceVisibleAssetVisibilities)` — the same set, under a name that
 //     says why the face-review surfaces need it (no Locked-folder crop reaches a reviewer, because
 //     neither the suggestion queue nor the cleanup console re-authenticates).
+//   - sharedWithViewer / ownedOrSharedWithViewer / albumConfinedToViewer / albumMembership: the viewer-scope
+//     helpers apply spaceVisibilityGate to their space arms themselves.
 const VIS_GATE_MARKER =
-  /spaceVisibilityGate|spaceVisibleAssetVisibilities|visibleSpaceAssetVisibilities|reviewableAssetVisibility|peopleAssetVisibilities|visibilityFilter|AssetVisibility\.(Timeline|Archive)|SHARED_SPACE_LIBRARY_SYNC_COLUMNS|SHARED_SPACE_ALBUM_SYNC_COLUMNS/;
+  /sharedWithViewer|ownedOrSharedWithViewer|albumConfinedToViewer|albumMembership|spaceVisibilityGate|spaceVisibleAssetVisibilities|visibleSpaceAssetVisibilities|reviewableAssetVisibility|peopleAssetVisibilities|visibilityFilter|AssetVisibility\.(Timeline|Archive)|SHARED_SPACE_LIBRARY_SYNC_COLUMNS|SHARED_SPACE_ALBUM_SYNC_COLUMNS/;
 
 // Lines that reference a space marker but are NOT an asset-read scoping arm.
 const VIS_BENIGN_LINE = [
@@ -373,46 +392,33 @@ const VIS_ALLOWLIST: Record<string, string> = {
   // — Sync scope helper: accessibleLibraries builds a UNION of library ids (owned +
   //   space-linked) used as a subquery scope. It returns library ids, never asset rows;
   //   the asset streams that USE it (LibraryAssetSync/ExifSync) carry the visibility gate.
-  'sync.repository.ts::accessibleLibraries': 'returns library ids only (UNION of owned + space-linked), not asset rows',
+  'gallery-sync.repository.ts::accessibleLibraries':
+    'returns library ids only (UNION of owned + space-linked), not asset rows',
 
   // — SharedSpaceSync.getUpserts streams SHARED_SPACE_SYNC_COLUMNS (space name/settings
   //   metadata) scoped by accessibleSpaces — space rows, NOT asset rows. The per-asset
   //   space streams (SharedSpaceAssetSync etc.) carry the visibility gate separately.
-  'sync.repository.ts::getUpserts':
+  'gallery-sync.repository.ts::getUpserts':
     'sync stream of shared_space metadata columns (accessibleSpaces-scoped), not asset rows',
-  // — Every getDeletes in sync.repository.ts is the same shape: auditQuery() over a
+  // — Every getDeletes in gallery-sync.repository.ts is the same shape: auditQuery() over a
   //   shared_space*_audit tombstone table selecting ids only (id/spaceId plus the deleted
   //   row's own id), scoped by accessibleSpaces so a member is told only about spaces they
   //   can see. Tombstones carry no asset content, so no visibility gate applies; the asset
   //   streams that DO serve rows carry theirs separately. Listed explicitly because these
   //   arms used to pass only by sitting within VIS_WINDOW of a neighbouring gated stream —
   //   proximity that any later insertion between the classes silently removes.
-  'sync.repository.ts::getDeletes': 'audit-table tombstone stream (ids only, accessibleSpaces-scoped), not asset rows',
+  'gallery-sync.repository.ts::getDeletes':
+    'audit-table tombstone stream (ids only, accessibleSpaces-scoped), not asset rows',
   // LibrarySync.getCreatedAfter streams library_user access-GRANT rows (libraryId,
   // createId) scoped by accessibleLibraries — a per-user grant ledger, not asset
   // rows. The library asset streams (LibraryAssetSync/ExifSync) carry the gate.
-  'sync.repository.ts::getCreatedAfter':
+  'gallery-sync.repository.ts::getCreatedAfter':
     'streams library_user access-grant metadata (accessibleLibraries-scoped), not asset rows',
 
-  // #752 P1-5: album metadata (assetCount/date-range) unions album_asset with member-gated
-  // album_space_asset contributions (join through shared_space_album ⋈ shared_space_member). The
-  // outer query IS visibility-gated — `.$call(withDefaultVisibility)` on the top-level `asset`
-  // selectFrom (Timeline/Archive only, applied uniformly to owner and contributed rows alike) —
-  // but the textual VIS_GATE_MARKER scan doesn't recognize `withDefaultVisibility` by name (it's
-  // the file-local default-visibility helper, not a space-specific gate identifier). Pinned by
-  // timeline-album-contributions.medium.spec.ts (Hidden/trashed contributions vanish from counts).
-  'album.repository.ts::getMetadataForIds':
-    'gated via withDefaultVisibility ($call-ed on the outer asset query); scanner does not recognize this helper name',
-
-  // Task 9 (D1-b residue): the contributed (`album_space_asset`) arm's live-link gate — a
-  // correlated EXISTS against shared_space_album (albumId + spaceId) proving the album is still
-  // linked to the space the contribution was made through, mirroring contributionVisibleToMember
-  // (sync.repository.ts) / spaceContributedAssetExists. Pure link-existence check — same reasoning
-  // as hasLibraryLink / getAssetIdsWithoutOtherSpacePath above — no asset content is read here.
-  // Asset visibility for the matched rows is enforced elsewhere (same as the rest of inAlbums,
-  // which was never gate-scanned before this arm's shared_space_album reference existed).
-  'database.ts::inAlbums':
-    'live-link EXISTS(shared_space_album) correlated on albumId+spaceId; link-existence check, no asset content (Task 9)',
+  // Library Cleanup (specs/2026-09-23-library-cleanup-design.md): POST /cleanup/in-spaces warns
+  // the caller before trashing an asset that also lives in a shared space.
+  'cleanup.repository.ts::getAssetIdsInSpaces':
+    'returns asset ids only (Library Cleanup Space-warning); caller already scoped to own assets',
 };
 
 const VIS_WINDOW = 50;
@@ -420,13 +426,14 @@ const VIS_WINDOW = 50;
 describe('space-visibility gate guard: every space asset read has a visibility gate', () => {
   it.each(SCOPING_FILES)('%s', (file) => {
     const lines = readFileSync(join(SERVER_ROOT, file), 'utf8').split('\n');
+    const isComment = commentLines(lines);
     const orphans: string[] = [];
 
     for (let i = 0; i < lines.length; i++) {
       const raw = lines[i];
       const trimmed = raw.trim();
 
-      if (trimmed.startsWith('//') || trimmed.startsWith('*')) {
+      if (isComment[i]) {
         continue;
       }
       if (!SPACE_READ_MARKER.test(raw)) {

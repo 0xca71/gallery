@@ -13,8 +13,8 @@ import { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { Duplex, Readable, Writable } from 'node:stream';
 import { PNG } from 'pngjs';
 import { Mock, Mocked, assert, vitest } from 'vitest';
-import type { RepositoryInterface } from 'src/types.js';
 import { UploadFieldName } from 'src/dtos/asset-media.dto.js';
+import { GalleryMachineLearningRepository } from 'src/gallery/repositories/gallery-machine-learning.repository.js';
 import { AssetUploadInterceptor } from 'src/middleware/asset-upload.interceptor.js';
 import { AuthGuard } from 'src/middleware/auth.guard.js';
 import { FileUploadInterceptor } from 'src/middleware/file-upload.interceptor.js';
@@ -25,12 +25,11 @@ import { AlbumUserRepository } from 'src/repositories/album-user.repository.js';
 import { AlbumRepository } from 'src/repositories/album.repository.js';
 import { ApiKeyRepository } from 'src/repositories/api-key.repository.js';
 import { AppRepository } from 'src/repositories/app.repository.js';
-import { AssetEditSaveRepository } from 'src/repositories/asset-edit-save.repository.js';
 import { AssetEditRepository } from 'src/repositories/asset-edit.repository.js';
 import { AssetFileRepository } from 'src/repositories/asset-file.repository.js';
 import { AssetJobRepository } from 'src/repositories/asset-job.repository.js';
 import { AssetRepository } from 'src/repositories/asset.repository.js';
-import { ClassificationRepository } from 'src/repositories/classification.repository.js';
+import { AuthChallengeRepository } from 'src/repositories/auth-challenge.repository.js';
 import { ClusterGroupRepository } from 'src/repositories/cluster-group.repository.js';
 import { ConfigRepository } from 'src/repositories/config.repository.js';
 import { CronRepository } from 'src/repositories/cron.repository.js';
@@ -40,11 +39,6 @@ import { DownloadRepository } from 'src/repositories/download.repository.js';
 import { DuplicateRepository } from 'src/repositories/duplicate.repository.js';
 import { EmailRepository } from 'src/repositories/email.repository.js';
 import { EventRepository } from 'src/repositories/event.repository.js';
-import { FaceIdentityRepository } from 'src/repositories/face-identity.repository.js';
-import { FacePersonVerdictRepository } from 'src/repositories/face-person-verdict.repository.js';
-import { FaceRepairDeclineRepository } from 'src/repositories/face-repair-decline.repository.js';
-import { FaceRepairScanRepository } from 'src/repositories/face-repair-scan.repository.js';
-import { FaceRepairRepository } from 'src/repositories/face-repair.repository.js';
 import { IntegrityRepository } from 'src/repositories/integrity.repository.js';
 import { JobRepository } from 'src/repositories/job.repository.js';
 import { LibraryRepository } from 'src/repositories/library.repository.js';
@@ -59,6 +53,8 @@ import { NotificationRepository } from 'src/repositories/notification.repository
 import { OAuthRepository } from 'src/repositories/oauth.repository.js';
 import { OcrRepository } from 'src/repositories/ocr.repository.js';
 import { PartnerRepository } from 'src/repositories/partner.repository.js';
+import { PasskeyRepository } from 'src/repositories/passkey.repository.js';
+import { PersonUserRepository } from 'src/repositories/person-user.repository.js';
 import { PersonRepository } from 'src/repositories/person.repository.js';
 import { PluginRepository } from 'src/repositories/plugin.repository.js';
 import { ProcessRepository } from 'src/repositories/process.repository.js';
@@ -67,9 +63,7 @@ import { ServerInfoRepository } from 'src/repositories/server-info.repository.js
 import { SessionRepository } from 'src/repositories/session.repository.js';
 import { SharedLinkAssetRepository } from 'src/repositories/shared-link-asset.repository.js';
 import { SharedLinkRepository } from 'src/repositories/shared-link.repository.js';
-import { SharedSpaceRepository } from 'src/repositories/shared-space.repository.js';
 import { StackRepository } from 'src/repositories/stack.repository.js';
-import { StorageMigrationRepository } from 'src/repositories/storage-migration.repository.js';
 import { StorageRepository } from 'src/repositories/storage.repository.js';
 import { SyncCheckpointRepository } from 'src/repositories/sync-checkpoint.repository.js';
 import { SyncRepository } from 'src/repositories/sync.repository.js';
@@ -77,18 +71,20 @@ import { SystemMetadataRepository } from 'src/repositories/system-metadata.repos
 import { TagRepository } from 'src/repositories/tag.repository.js';
 import { TelemetryRepository } from 'src/repositories/telemetry.repository.js';
 import { TrashRepository } from 'src/repositories/trash.repository.js';
-import { UserGroupRepository } from 'src/repositories/user-group.repository.js';
 import { UserRepository } from 'src/repositories/user.repository.js';
 import { VersionHistoryRepository } from 'src/repositories/version-history.repository.js';
 import { VideoStreamRepository } from 'src/repositories/video-stream.repository.js';
 import { ViewRepository } from 'src/repositories/view-repository.js';
+import { WebAuthnRepository } from 'src/repositories/webauthn.repository.js';
 import { WebsocketRepository } from 'src/repositories/websocket.repository.js';
 import { WorkflowRepository } from 'src/repositories/workflow.repository.js';
 import { DB } from 'src/schema/index.js';
 import { AuthService } from 'src/services/auth.service.js';
 import { BaseService } from 'src/services/base.service.js';
+import type { RepositoryInterface } from 'src/types.js';
 import { getKyselyConfig } from 'src/utils/database.js';
 import { ClusterGroupFactory } from 'test/factories/cluster-group.factory.js';
+import { GalleryServiceOverrides, getGalleryMocks, newGalleryRepositories } from 'test/gallery/utils.js';
 import { IAccessRepositoryMock, newAccessRepositoryMock } from 'test/repositories/access.repository.mock.js';
 import { newAssetRepositoryMock } from 'test/repositories/asset.repository.mock.js';
 import { newConfigRepositoryMock } from 'test/repositories/config.repository.mock.js';
@@ -149,8 +145,12 @@ export const controllerSetup = async (controller: ControllerClass | ControllerCl
     .overrideInterceptor(AssetUploadInterceptor)
     .useValue(noopInterceptor)
     .compile();
-  const app = moduleRef.createNestApplication();
-  await app.init();
+  const app = moduleRef.createNestApplication({
+    routeConflictPolicy: { duplicate: 'error' },
+    routeResolutionStrategy: 'specificity',
+  });
+  // listen on an ephemeral port once, so supertest doesn't bind a new one per request (#1042)
+  await app.listen(0, '127.0.0.1');
 
   // allow the AuthController to override the AuthService itself
   const resolvedAuthService = app.get<Mocked<AuthService>>(AuthService);
@@ -241,7 +241,7 @@ export const automock = <T>(
   return result;
 };
 
-export type ServiceOverrides = {
+export type ServiceOverrides = GalleryServiceOverrides & {
   access: AccessRepository;
   activity: ActivityRepository;
   album: AlbumRepository;
@@ -249,12 +249,11 @@ export type ServiceOverrides = {
   apiKey: ApiKeyRepository;
   app: AppRepository;
   asset: AssetRepository;
-  assetEditSave: AssetEditSaveRepository;
   assetEdit: AssetEditRepository;
   assetFile: AssetFileRepository;
   assetJob: AssetJobRepository;
+  authChallenge: AuthChallengeRepository;
   clusterGroup: ClusterGroupRepository;
-  classification: ClassificationRepository;
   config: ConfigRepository;
   cron: CronRepository;
   crypto: CryptoRepository;
@@ -263,11 +262,6 @@ export type ServiceOverrides = {
   duplicateRepository: DuplicateRepository;
   email: EmailRepository;
   event: EventRepository;
-  faceIdentity: FaceIdentityRepository;
-  faceRepair: FaceRepairRepository;
-  faceRepairScan: FaceRepairScanRepository;
-  faceRepairDecline: FaceRepairDeclineRepository;
-  facePersonVerdict: FacePersonVerdictRepository;
   integrityReport: IntegrityRepository;
   job: JobRepository;
   library: LibraryRepository;
@@ -282,7 +276,9 @@ export type ServiceOverrides = {
   ocr: OcrRepository;
   oauth: OAuthRepository;
   partner: PartnerRepository;
+  passkey: PasskeyRepository;
   person: PersonRepository;
+  personUser: PersonUserRepository;
   plugin: PluginRepository;
   process: ProcessRepository;
   search: SearchRepository;
@@ -290,9 +286,7 @@ export type ServiceOverrides = {
   session: SessionRepository;
   sharedLink: SharedLinkRepository;
   sharedLinkAsset: SharedLinkAssetRepository;
-  sharedSpace: SharedSpaceRepository;
   stack: StackRepository;
-  storageMigration: StorageMigrationRepository;
   storage: StorageRepository;
   sync: SyncRepository;
   syncCheckpoint: SyncCheckpointRepository;
@@ -300,11 +294,11 @@ export type ServiceOverrides = {
   tag: TagRepository;
   telemetry: TelemetryRepository;
   trash: TrashRepository;
-  userGroup: UserGroupRepository;
   user: UserRepository;
   versionHistory: VersionHistoryRepository;
   videoStream: VideoStreamRepository;
   view: ViewRepository;
+  webAuthn: WebAuthnRepository;
   websocket: WebsocketRepository;
   workflow: WorkflowRepository;
 };
@@ -329,7 +323,6 @@ export const getMocks = () => {
   const databaseMock = automock(DatabaseRepository, { args: [, loggerMock], strict: false });
 
   databaseMock.withLock.mockImplementation((_type, fn) => fn());
-  databaseMock.withAssetLock.mockImplementation((_id, fn) => fn());
   // L7: default `transaction` to a passthrough that just invokes the callback with the mock
   // itself standing in for the trx handle — every repo method the callback calls is ALSO a mock,
   // so it behaves identically regardless of what's passed as `trx`. Mirrors withLock above.
@@ -341,7 +334,6 @@ export const getMocks = () => {
   databaseMock.vacuum.mockResolvedValue(void 0);
 
   const mocks: ServiceMocks = {
-    assetEditSave: automock(AssetEditSaveRepository, { strict: false }),
     access: newAccessRepositoryMock(),
     // eslint-disable-next-line no-sparse-arrays
     logger: automock(LoggingRepository, { args: [, configMock], strict: false }),
@@ -355,10 +347,9 @@ export const getMocks = () => {
     assetEdit: automock(AssetEditRepository),
     assetFile: automock(AssetFileRepository),
     assetJob: automock(AssetJobRepository),
+    authChallenge: automock(AuthChallengeRepository),
     clusterGroup: automock(ClusterGroupRepository),
     app: automock(AppRepository, { strict: false }),
-    // eslint-disable-next-line no-sparse-arrays
-    classification: automock(ClassificationRepository, { args: [, loggerMock], strict: false }),
     config: newConfigRepositoryMock(),
     database: databaseMock,
     downloadRepository: automock(DownloadRepository, { strict: false }),
@@ -366,16 +357,11 @@ export const getMocks = () => {
     email: automock(EmailRepository, { args: [loggerMock] }),
     // eslint-disable-next-line no-sparse-arrays
     event: automock(EventRepository, { args: [, , loggerMock], strict: false }),
-    faceIdentity: automock(FaceIdentityRepository, { strict: false }),
-    faceRepair: automock(FaceRepairRepository, { strict: false }),
-    faceRepairScan: automock(FaceRepairScanRepository, { strict: false }),
-    faceRepairDecline: automock(FaceRepairDeclineRepository, { strict: false }),
-    facePersonVerdict: automock(FacePersonVerdictRepository, { strict: false }),
     integrityReport: automock(IntegrityRepository, { strict: false }),
     job: newJobRepositoryMock(),
     apiKey: automock(ApiKeyRepository),
     library: automock(LibraryRepository, { strict: false }),
-    machineLearning: automock(MachineLearningRepository, { args: [loggerMock], strict: false }),
+    machineLearning: automock(GalleryMachineLearningRepository, { args: [loggerMock], strict: false }),
     map: automock(MapRepository, { args: [undefined, undefined, { setContext: () => {} }] }),
     media: newMediaRepositoryMock(),
     memory: automock(MemoryRepository),
@@ -385,7 +371,9 @@ export const getMocks = () => {
     ocr: automock(OcrRepository, { strict: false }),
     oauth: automock(OAuthRepository, { args: [loggerMock] }),
     partner: automock(PartnerRepository, { strict: false }),
+    passkey: automock(PasskeyRepository),
     person: automock(PersonRepository, { strict: false }),
+    personUser: automock(PersonUserRepository, { strict: false }),
     plugin: automock(PluginRepository, { strict: true, args: [databaseMock, loggerMock] }),
     process: automock(ProcessRepository),
     search: automock(SearchRepository, { strict: false }),
@@ -394,9 +382,7 @@ export const getMocks = () => {
     session: automock(SessionRepository),
     sharedLink: automock(SharedLinkRepository),
     sharedLinkAsset: automock(SharedLinkAssetRepository),
-    sharedSpace: automock(SharedSpaceRepository),
     stack: automock(StackRepository),
-    storageMigration: automock(StorageMigrationRepository),
     storage: newStorageRepositoryMock(),
     sync: automock(SyncRepository),
     syncCheckpoint: automock(SyncCheckpointRepository),
@@ -406,14 +392,15 @@ export const getMocks = () => {
     tag: automock(TagRepository, { args: [, loggerMock], strict: false }),
     telemetry: newTelemetryRepositoryMock(),
     trash: automock(TrashRepository),
-    userGroup: automock(UserGroupRepository),
     user: automock(UserRepository, { strict: false }),
     versionHistory: automock(VersionHistoryRepository),
     videoStream: automock(VideoStreamRepository, { strict: false }),
     view: automock(ViewRepository),
+    webAuthn: automock(WebAuthnRepository),
     // eslint-disable-next-line no-sparse-arrays
     websocket: automock(WebsocketRepository, { args: [, loggerMock], strict: false }),
     workflow: automock(WorkflowRepository, { strict: true }),
+    ...getGalleryMocks(loggerMock),
   };
 
   // every new user gets a cluster group, which is incidental to most tests
@@ -438,12 +425,11 @@ export const newTestService = <T extends BaseService>(
     overrides.app || (mocks.app as As<AppRepository>),
     overrides.asset || (mocks.asset as As<AssetRepository>),
     overrides.assetEdit || (mocks.assetEdit as As<AssetEditRepository>),
-    overrides.assetEditSave || (mocks.assetEditSave as As<AssetEditSaveRepository>),
     overrides.assetFile || (mocks.assetFile as As<AssetFileRepository>),
     overrides.assetJob || (mocks.assetJob as As<AssetJobRepository>),
+    overrides.authChallenge || (mocks.authChallenge as As<AuthChallengeRepository>),
     overrides.clusterGroup || (mocks.clusterGroup as As<ClusterGroupRepository>),
     overrides.config || (mocks.config as As<ConfigRepository> as ConfigRepository),
-    overrides.classification || (mocks.classification as As<ClassificationRepository>),
     overrides.cron || (mocks.cron as As<CronRepository>),
     overrides.crypto || (mocks.crypto as As<CryptoRepository>),
     overrides.database || (mocks.database as As<DatabaseRepository>),
@@ -451,11 +437,6 @@ export const newTestService = <T extends BaseService>(
     overrides.duplicateRepository || (mocks.duplicateRepository as As<DuplicateRepository>),
     overrides.email || (mocks.email as As<EmailRepository>),
     overrides.event || (mocks.event as As<EventRepository>),
-    overrides.faceIdentity || (mocks.faceIdentity as As<FaceIdentityRepository>),
-    overrides.faceRepair || (mocks.faceRepair as As<FaceRepairRepository>),
-    overrides.faceRepairScan || (mocks.faceRepairScan as As<FaceRepairScanRepository>),
-    overrides.faceRepairDecline || (mocks.faceRepairDecline as As<FaceRepairDeclineRepository>),
-    overrides.facePersonVerdict || (mocks.facePersonVerdict as As<FacePersonVerdictRepository>),
     overrides.integrityReport || (mocks.integrityReport as As<IntegrityRepository>),
     overrides.job || (mocks.job as As<JobRepository>),
     overrides.library || (mocks.library as As<LibraryRepository>),
@@ -469,7 +450,9 @@ export const newTestService = <T extends BaseService>(
     overrides.oauth || (mocks.oauth as As<OAuthRepository>),
     overrides.ocr || (mocks.ocr as As<OcrRepository>),
     overrides.partner || (mocks.partner as As<PartnerRepository>),
+    overrides.passkey || (mocks.passkey as As<PasskeyRepository>),
     overrides.person || (mocks.person as As<PersonRepository>),
+    overrides.personUser || (mocks.personUser as As<PersonUserRepository>),
     overrides.plugin || (mocks.plugin as As<PluginRepository>),
     overrides.process || (mocks.process as As<ProcessRepository>),
     overrides.search || (mocks.search as As<SearchRepository>),
@@ -477,9 +460,7 @@ export const newTestService = <T extends BaseService>(
     overrides.session || (mocks.session as As<SessionRepository>),
     overrides.sharedLink || (mocks.sharedLink as As<SharedLinkRepository>),
     overrides.sharedLinkAsset || (mocks.sharedLinkAsset as As<SharedLinkAssetRepository>),
-    overrides.sharedSpace || (mocks.sharedSpace as As<SharedSpaceRepository>),
     overrides.stack || (mocks.stack as As<StackRepository>),
-    overrides.storageMigration || (mocks.storageMigration as As<StorageMigrationRepository>),
     overrides.storage || (mocks.storage as As<StorageRepository>),
     overrides.sync || (mocks.sync as As<SyncRepository>),
     overrides.syncCheckpoint || (mocks.syncCheckpoint as As<SyncCheckpointRepository>),
@@ -487,13 +468,14 @@ export const newTestService = <T extends BaseService>(
     overrides.tag || (mocks.tag as As<TagRepository>),
     overrides.telemetry || (mocks.telemetry as unknown as TelemetryRepository),
     overrides.trash || (mocks.trash as As<TrashRepository>),
-    overrides.userGroup || (mocks.userGroup as As<UserGroupRepository>),
     overrides.user || (mocks.user as As<UserRepository>),
     overrides.versionHistory || (mocks.versionHistory as As<VersionHistoryRepository>),
     overrides.videoStream || (mocks.videoStream as As<VideoStreamRepository>),
     overrides.view || (mocks.view as As<ViewRepository>),
+    overrides.webAuthn || (mocks.webAuthn as As<WebAuthnRepository>),
     overrides.websocket || (mocks.websocket as As<WebsocketRepository>),
     overrides.workflow || (mocks.workflow as As<WorkflowRepository>),
+    newGalleryRepositories(mocks, overrides),
   );
 
   return {

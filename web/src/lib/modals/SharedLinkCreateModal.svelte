@@ -1,6 +1,8 @@
 <script lang="ts">
-  import SharedLinkFormFields from '$lib/components/SharedLinkFormFields.svelte';
-  import { handleCreateSharedLink } from '$lib/services/shared-link.service';
+  import SharedLinkFormFields from '#lib/components/SharedLinkFormFields.svelte';
+  import { executeMutation } from '#lib/queries/client.ts';
+  import { createSharedLinkMutation } from '#lib/queries/shared-link.query.ts';
+  import { showSharedLinkQrCode } from '#lib/services/shared-link.service.ts';
   import { SharedLinkType } from '@immich/sdk';
   import { FormModal } from '@immich/ui';
   import { mdiLink } from '@mdi/js';
@@ -11,23 +13,23 @@
     albumId?: string;
     assetIds?: string[];
     /**
-     * How many selected assets were dropped because the user does not own them. Off a space
-     * surface a shared link can only cover the caller's own assets, so the caller narrows
-     * `assetIds` and reports the remainder here rather than letting the request fail or the
-     * narrowing go unnoticed.
-     */
+    How many selected assets were dropped because the user does not own them. Off a space
+    surface a shared link can only cover the caller's own assets, so the caller narrows
+    `assetIds` and reports the remainder here rather than letting the request fail or the
+    narrowing go unnoticed.
+    */
     excludedCount?: number;
     /**
-     * #1018: the space this link is created from. Present only when the caller is a space
-     * Owner/Editor; the server then authorizes the link against the space, so nothing is narrowed
-     * out and the link covers what the space shows.
-     */
+    #1018: the space this link is created from. Present only when the caller is a space
+    Owner/Editor; the server then authorizes the link against the space, so nothing is narrowed
+    out and the link covers what the space shows.
+    */
     spaceId?: string;
     /**
-     * #1018: how many of `assetIds` other members contributed. Drives the consent warning — those
-     * photos are about to become publicly visible on someone else's behalf, so the caller is told
-     * before the link exists rather than after.
-     */
+    #1018: how many of `assetIds` other members contributed. Drives the consent warning — those
+    photos are about to become publicly visible on someone else's behalf, so the caller is told
+    before the link exists rather than after.
+    */
     contributedCount?: number;
   }
 
@@ -51,7 +53,7 @@
   );
 
   const onSubmit = async () => {
-    const success = await handleCreateSharedLink({
+    const sharedLinkCreateDto = {
       type,
       albumId,
       assetIds,
@@ -63,10 +65,13 @@
       showMetadata,
       slug,
       spaceId,
+    };
+    await executeMutation(createSharedLinkMutation, [{ sharedLinkCreateDto }], {
+      onSuccess: (sharedLink) => {
+        onClose();
+        void showSharedLinkQrCode(sharedLink);
+      },
     });
-    if (success) {
-      onClose();
-    }
   };
 </script>
 

@@ -1,12 +1,18 @@
 import { Kysely, sql } from 'kysely';
 import { AssetFileType, AssetVisibility, SharedSpaceRole, SourceType } from 'src/enum.js';
+import { GalleryPersonRepository } from 'src/gallery/repositories/gallery-person.repository.js';
+import { PetFaceRepository } from 'src/gallery/repositories/pet-face.repository.js';
+import { personType } from 'src/gallery/utils/person-sidecar.js';
+import { updatePersonWithType } from 'src/gallery/utils/person-type.js';
+import { DatabaseRepository } from 'src/repositories/database.repository.js';
 import { FaceIdentityRepository } from 'src/repositories/face-identity.repository.js';
 import { LoggingRepository } from 'src/repositories/logging.repository.js';
 import { PersonRepository } from 'src/repositories/person.repository.js';
+import { SharedSpaceRepository } from 'src/repositories/shared-space.repository.js';
 import { DB } from 'src/schema/index.js';
 import { BaseService } from 'src/services/base.service.js';
-import { newMediumService } from 'test/medium.factory.js';
-import { newEmbedding } from 'test/small.factory.js';
+import { newMediumService, updatePersonForTest } from 'test/medium.factory.js';
+import { newEmbedding, newUuid } from 'test/small.factory.js';
 import { getKyselyDB } from 'test/utils.js';
 
 let defaultDatabase: Kysely<DB>;
@@ -17,7 +23,7 @@ const setup = (db?: Kysely<DB>) => {
     real: [],
     mock: [LoggingRepository],
   });
-  return { ctx, sut: ctx.get(PersonRepository) };
+  return { ctx, sut: ctx.get(PersonRepository), gallerySut: ctx.get(GalleryPersonRepository) };
 };
 
 beforeAll(async () => {
@@ -82,7 +88,151 @@ const seedTypedPerson = async (
   return person;
 };
 
+// getAllForUser helpers. One axis of a 512-dim unit vector, so the cosine distance between two of
+// them is exactly 0 (same axis) or 1 (different) — no near-miss arithmetic to reason about.
+const axis = (index: number) =>
+  '[' + Array.from({ length: 512 }, (_, position) => (position === index ? 1 : 0)).join(',') + ']';
+
+const seedFace = async (
+  ctx: ReturnType<typeof setup>['ctx'],
+  input: { assetId: string; personGroupId?: string; embedding: string },
+) => {
+  const { result: faceId } = await ctx.newAssetFace({
+    assetId: input.assetId,
+    personGroupId: input.personGroupId ?? null,
+  });
+  await ctx.database.insertInto('face_search').values({ faceId, embedding: input.embedding }).execute();
+  return faceId;
+};
+
+const seedIdentityCluster = async (ctx: ReturnType<typeof setup>['ctx'], type: 'person' | 'pet') => {
+  const { user: owner } = await ctx.newUser();
+  const { person } = await ctx.newPerson({
+    ownerId: owner.id,
+    name: 'Rex',
+    type,
+    ...(type === 'pet' && { species: 'dog' }),
+  });
+  const { asset } = await ctx.newAsset({ ownerId: owner.id });
+  const { assetFace } = await ctx.newAssetFace({ assetId: asset.id, personGroupId: person.personGroupId });
+
+  const identity = await ctx.get(FaceIdentityRepository).ensurePersonIdentity(person.personGroupId);
+  const { user: otherOwner } = await ctx.newUser();
+  const { person: otherPerson } = await ctx.newPerson({
+    ownerId: otherOwner.id,
+    name: 'Rex elsewhere',
+    type,
+    ...(type === 'pet' && { species: 'dog' }),
+  });
+  await ctx.get(GalleryPersonRepository).updatePersonIdentity({
+    personId: otherPerson.personGroupId,
+    identityId: identity.id,
+  });
+  const { space } = await ctx.newSharedSpace({ createdById: owner.id, faceRecognitionEnabled: false });
+  const spacePerson = await ctx.get(SharedSpaceRepository).createPerson({
+    spaceId: space.id,
+    identityId: identity.id,
+    type,
+  });
+
+  return { owner, person, otherPerson, identity, assetFace, spacePerson };
+};
+
 describe(PersonRepository.name, () => {
+  describe('update type', () => {
+    it('reclassifies a person cluster as a pet without moving its faces', async () => {
+      const { ctx } = setup();
+      const { owner, person, otherPerson, identity, assetFace, spacePerson } = await seedIdentityCluster(ctx, 'person');
+
+      const updated = await updatePersonWithType(ctx.get(DatabaseRepository), ctx.get(PersonRepository), {
+        ownerId: owner.id,
+        personGroupId: person.personGroupId,
+        type: 'pet',
+      });
+
+      expect(updated).toMatchObject({ type: 'pet', species: null });
+      await expect(
+        ctx.database.selectFrom('person_pet').selectAll().where('personGroupId', '=', person.personGroupId).execute(),
+      ).resolves.toHaveLength(1);
+      await expect(
+        ctx.database
+          .selectFrom('person_pet')
+          .selectAll()
+          .where('personGroupId', '=', otherPerson.personGroupId)
+          .execute(),
+      ).resolves.toHaveLength(1);
+      await expect(
+        ctx.database.selectFrom('face_identity').select('type').where('id', '=', identity.id).executeTakeFirst(),
+      ).resolves.toEqual({ type: 'pet' });
+      await expect(
+        ctx.database
+          .selectFrom('shared_space_person')
+          .select('type')
+          .where('id', '=', spacePerson.id)
+          .executeTakeFirst(),
+      ).resolves.toEqual({ type: 'pet' });
+      await expect(
+        ctx.database.selectFrom('asset_face').select('personGroupId').where('id', '=', assetFace.id).executeTakeFirst(),
+      ).resolves.toEqual({ personGroupId: person.personGroupId });
+    });
+
+    it('reclassifies a pet cluster as a person without moving its faces', async () => {
+      const { ctx } = setup();
+      const { owner, person, otherPerson, identity, assetFace, spacePerson } = await seedIdentityCluster(ctx, 'pet');
+
+      const updated = await updatePersonWithType(ctx.get(DatabaseRepository), ctx.get(PersonRepository), {
+        ownerId: owner.id,
+        personGroupId: person.personGroupId,
+        type: 'person',
+      });
+
+      expect(updated).toMatchObject({ type: 'person', species: null });
+      await expect(
+        ctx.database.selectFrom('person_pet').selectAll().where('personGroupId', '=', person.personGroupId).execute(),
+      ).resolves.toHaveLength(0);
+      await expect(
+        ctx.database
+          .selectFrom('person_pet')
+          .selectAll()
+          .where('personGroupId', '=', otherPerson.personGroupId)
+          .execute(),
+      ).resolves.toHaveLength(0);
+      await expect(
+        ctx.database.selectFrom('face_identity').select('type').where('id', '=', identity.id).executeTakeFirst(),
+      ).resolves.toEqual({ type: 'person' });
+      await expect(
+        ctx.database
+          .selectFrom('shared_space_person')
+          .select('type')
+          .where('id', '=', spacePerson.id)
+          .executeTakeFirst(),
+      ).resolves.toEqual({ type: 'person' });
+      await expect(
+        ctx.database.selectFrom('asset_face').select('personGroupId').where('id', '=', assetFace.id).executeTakeFirst(),
+      ).resolves.toEqual({ personGroupId: person.personGroupId });
+    });
+    it('keeps a human cluster switched to pet on the People list', async () => {
+      const { ctx, sut } = setup();
+      const { user } = await ctx.newUser();
+      const { person } = await ctx.newPerson({ ownerId: user.id, name: 'Rex' });
+      for (let i = 0; i < 3; i++) {
+        const { asset } = await ctx.newAsset({ ownerId: user.id, visibility: AssetVisibility.Timeline });
+        await seedFace(ctx, { assetId: asset.id, personGroupId: person.personGroupId, embedding: axis(0) });
+      }
+
+      await updatePersonWithType(ctx.get(DatabaseRepository), sut, {
+        ownerId: user.id,
+        personGroupId: person.personGroupId,
+        type: 'pet',
+      });
+
+      for (const type of [undefined, 'pet'] as const) {
+        const { items } = await sut.getAllForUser({ take: 50, skip: 0 }, user.id, { withHidden: false, type });
+        expect(items.map(({ personGroupId }) => personGroupId)).toEqual([person.personGroupId]);
+      }
+    });
+  });
+
   describe('createAll', () => {
     it('should create people in the groups they were given', async () => {
       const { ctx, sut } = setup();
@@ -162,6 +312,20 @@ describe(PersonRepository.name, () => {
         .execute();
       expect(people).toEqual([{ ownerId: user1.id }]);
     });
+
+    it('should not keep the person row when a sidecar write fails', async () => {
+      const { ctx, sut } = setup();
+      const { user } = await ctx.newUser();
+      const group = await sut.createGroup(user.id);
+
+      // no such face_identity: the person_identity insert fails its FK after the person insert
+      await expect(
+        sut.create({ ownerId: user.id, personGroupId: group.id, type: 'pet', identityId: newUuid() }),
+      ).rejects.toThrow(/person_identity_identityId_fkey/);
+
+      const people = await ctx.database.selectFrom('person').where('personGroupId', '=', group.id).execute();
+      expect(people).toEqual([]);
+    });
   });
 
   describe('getByGroupId', () => {
@@ -213,7 +377,7 @@ describe(PersonRepository.name, () => {
     // every merge left an orphan person_group row behind until the nightly PersonCleanup collected
     // it. Nothing asserted the linkage, which is why it went unnoticed.
     it('should sweep the group the merged-away person vacated, and leave occupied groups alone', async () => {
-      const { ctx, sut } = setup(await getKyselyDB());
+      const { ctx, sut, gallerySut } = setup(await getKyselyDB());
       const { user } = await ctx.newUser();
       const [targetGroup, sourceGroup] = await sut.createGroups([
         { clusterGroupId: user.clusterGroupId },
@@ -228,7 +392,7 @@ describe(PersonRepository.name, () => {
         .returning('face_identity.id')
         .executeTakeFirstOrThrow();
 
-      await sut.mergePersonProfile({
+      await gallerySut.mergePersonProfile({
         sourcePersonId: source.personGroupId,
         targetPersonId: target.personGroupId,
         targetIdentityId: identity.id,
@@ -279,7 +443,7 @@ describe(PersonRepository.name, () => {
 
   describe('getPeopleOverviewStatistics', () => {
     it('counts visible and hidden personal people and all detected timeline faces in owned assets', async () => {
-      const { ctx, sut } = setup();
+      const { ctx, gallerySut } = setup();
       const { user } = await ctx.newUser();
       const { user: otherUser } = await ctx.newUser();
       const { asset } = await ctx.newAsset({ ownerId: user.id, visibility: AssetVisibility.Timeline });
@@ -293,7 +457,7 @@ describe(PersonRepository.name, () => {
       await ctx.newAssetFace({ assetId: asset.id, personGroupId: null });
       await ctx.newAssetFace({ assetId: otherAsset.id, personGroupId: otherPerson.personGroupId });
 
-      await expect(sut.getPeopleOverviewStatistics(user.id)).resolves.toEqual({
+      await expect(gallerySut.getPeopleOverviewStatistics(user.id)).resolves.toEqual({
         total: 2,
         hidden: 1,
         detectedFaceCount: 3,
@@ -301,21 +465,21 @@ describe(PersonRepository.name, () => {
     });
 
     it('returns zero visible people when all personal people are hidden', async () => {
-      const { ctx, sut } = setup();
+      const { ctx, gallerySut } = setup();
       const { user } = await ctx.newUser();
       const { asset } = await ctx.newAsset({ ownerId: user.id, visibility: AssetVisibility.Timeline });
       const { person } = await ctx.newPerson({ ownerId: user.id, isHidden: true });
 
       await ctx.newAssetFace({ assetId: asset.id, personGroupId: person.personGroupId });
 
-      const result = await sut.getPeopleOverviewStatistics(user.id);
+      const result = await gallerySut.getPeopleOverviewStatistics(user.id);
 
       expect(result).toEqual({ total: 1, hidden: 1, detectedFaceCount: 1 });
       expect(result.total - result.hidden).toBe(0);
     });
 
     it('includes archived assets but excludes other out-of-scope assets and non-visible or deleted faces from detectedFaceCount', async () => {
-      const { ctx, sut } = setup();
+      const { ctx, gallerySut } = setup();
       const { user } = await ctx.newUser();
       const { asset: validAsset } = await ctx.newAsset({ ownerId: user.id, visibility: AssetVisibility.Timeline });
       const { person } = await ctx.newPerson({ ownerId: user.id, isHidden: false });
@@ -342,7 +506,7 @@ describe(PersonRepository.name, () => {
       await ctx.newAssetFace({ assetId: validAsset.id, personGroupId: person.personGroupId, isVisible: false });
       await ctx.newAssetFace({ assetId: validAsset.id, personGroupId: person.personGroupId, deletedAt: new Date() });
 
-      await expect(sut.getPeopleOverviewStatistics(user.id)).resolves.toEqual({
+      await expect(gallerySut.getPeopleOverviewStatistics(user.id)).resolves.toEqual({
         total: 1,
         hidden: 0,
         detectedFaceCount: 2,
@@ -350,7 +514,7 @@ describe(PersonRepository.name, () => {
     });
 
     it('excludes people whose only faces are on offline or non-owned assets from personal totals', async () => {
-      const { ctx, sut } = setup();
+      const { ctx, gallerySut } = setup();
       const { user } = await ctx.newUser();
       const { user: otherUser } = await ctx.newUser();
       const { asset: validAsset } = await ctx.newAsset({ ownerId: user.id, visibility: AssetVisibility.Timeline });
@@ -371,7 +535,7 @@ describe(PersonRepository.name, () => {
       await ctx.newAssetFace({ assetId: offlineAsset.id, personGroupId: offlineOnlyPerson.personGroupId });
       await ctx.newAssetFace({ assetId: otherOwnerAsset.id, personGroupId: otherOwnerAssetOnlyPerson.personGroupId });
 
-      await expect(sut.getPeopleOverviewStatistics(user.id)).resolves.toEqual({
+      await expect(gallerySut.getPeopleOverviewStatistics(user.id)).resolves.toEqual({
         total: 1,
         hidden: 0,
         detectedFaceCount: 1,
@@ -379,10 +543,10 @@ describe(PersonRepository.name, () => {
     });
 
     it('returns zeroes for an empty personal library', async () => {
-      const { ctx, sut } = setup();
+      const { ctx, gallerySut } = setup();
       const { user } = await ctx.newUser();
 
-      await expect(sut.getPeopleOverviewStatistics(user.id)).resolves.toEqual({
+      await expect(gallerySut.getPeopleOverviewStatistics(user.id)).resolves.toEqual({
         total: 0,
         hidden: 0,
         detectedFaceCount: 0,
@@ -390,7 +554,7 @@ describe(PersonRepository.name, () => {
     });
 
     it('counts only people eligible for the personal people list when minimumFaceCount is set', async () => {
-      const { ctx, sut } = setup();
+      const { ctx, sut, gallerySut } = setup();
       const { user } = await ctx.newUser();
       const { asset } = await ctx.newAsset({ ownerId: user.id, visibility: AssetVisibility.Timeline });
       const { person: belowThreshold } = await ctx.newPerson({ ownerId: user.id, name: '' });
@@ -409,7 +573,7 @@ describe(PersonRepository.name, () => {
         total: 2,
         hidden: 1,
       });
-      await expect(sut.getPeopleOverviewStatistics(user.id, { minimumFaceCount: 3 })).resolves.toEqual({
+      await expect(gallerySut.getPeopleOverviewStatistics(user.id, { minimumFaceCount: 3 })).resolves.toEqual({
         total: 2,
         hidden: 1,
         detectedFaceCount: 7,
@@ -419,7 +583,7 @@ describe(PersonRepository.name, () => {
 
   describe('getPeopleFaceStatistics', () => {
     it('splits owned timeline faces into visible, hidden, and unassigned buckets', async () => {
-      const { ctx, sut } = setup();
+      const { ctx, gallerySut } = setup();
       const { user } = await ctx.newUser();
       const { asset } = await ctx.newAsset({ ownerId: user.id, visibility: AssetVisibility.Timeline });
       const { person: visiblePerson } = await ctx.newPerson({ ownerId: user.id, isHidden: false });
@@ -431,8 +595,8 @@ describe(PersonRepository.name, () => {
       await ctx.newAssetFace({ assetId: asset.id, personGroupId: null });
       await ctx.newAssetFace({ assetId: asset.id, personGroupId: null });
 
-      const details = await sut.getPeopleFaceStatistics(user.id);
-      const overview = await sut.getPeopleOverviewStatistics(user.id);
+      const details = await gallerySut.getPeopleFaceStatistics(user.id);
+      const overview = await gallerySut.getPeopleOverviewStatistics(user.id);
 
       expect(details).toEqual({
         detectedFaceCount: 5,
@@ -448,21 +612,21 @@ describe(PersonRepository.name, () => {
     });
 
     it('returns all personal faces as unassigned when no eligible people are assigned and is deterministic', async () => {
-      const { ctx, sut } = setup();
+      const { ctx, gallerySut } = setup();
       const { user } = await ctx.newUser();
       const { asset } = await ctx.newAsset({ ownerId: user.id, visibility: AssetVisibility.Timeline });
 
       await ctx.newAssetFace({ assetId: asset.id, personGroupId: null });
       await ctx.newAssetFace({ assetId: asset.id, personGroupId: null });
 
-      await expect(sut.getPeopleOverviewStatistics(user.id)).resolves.toEqual({
+      await expect(gallerySut.getPeopleOverviewStatistics(user.id)).resolves.toEqual({
         total: 0,
         hidden: 0,
         detectedFaceCount: 2,
       });
 
-      const first = await sut.getPeopleFaceStatistics(user.id);
-      const second = await sut.getPeopleFaceStatistics(user.id);
+      const first = await gallerySut.getPeopleFaceStatistics(user.id);
+      const second = await gallerySut.getPeopleFaceStatistics(user.id);
 
       expect(first).toEqual({
         detectedFaceCount: 2,
@@ -475,10 +639,10 @@ describe(PersonRepository.name, () => {
     });
 
     it('returns zeroes for an empty personal library', async () => {
-      const { sut, ctx } = setup();
+      const { gallerySut, ctx } = setup();
       const { user } = await ctx.newUser();
 
-      await expect(sut.getPeopleFaceStatistics(user.id)).resolves.toEqual({
+      await expect(gallerySut.getPeopleFaceStatistics(user.id)).resolves.toEqual({
         detectedFaceCount: 0,
         assignedVisibleFaceCount: 0,
         namedVisiblePersonCount: 0,
@@ -488,7 +652,7 @@ describe(PersonRepository.name, () => {
     });
 
     it('includes archived assets but excludes deleted assets, offline assets, locked assets, non-visible faces, and deleted faces', async () => {
-      const { ctx, sut } = setup();
+      const { ctx, gallerySut } = setup();
       const { user } = await ctx.newUser();
       const { person } = await ctx.newPerson({ ownerId: user.id, isHidden: false });
       const { asset: validAsset } = await ctx.newAsset({ ownerId: user.id, visibility: AssetVisibility.Timeline });
@@ -513,7 +677,7 @@ describe(PersonRepository.name, () => {
       await ctx.newAssetFace({ assetId: validAsset.id, personGroupId: person.personGroupId, isVisible: false });
       await ctx.newAssetFace({ assetId: validAsset.id, personGroupId: person.personGroupId, deletedAt: new Date() });
 
-      await expect(sut.getPeopleFaceStatistics(user.id)).resolves.toEqual({
+      await expect(gallerySut.getPeopleFaceStatistics(user.id)).resolves.toEqual({
         detectedFaceCount: 2,
         assignedVisibleFaceCount: 2,
         namedVisiblePersonCount: 1,
@@ -523,7 +687,7 @@ describe(PersonRepository.name, () => {
     });
 
     it("treats a face assigned to another user's person on the current user's owned asset as unassigned", async () => {
-      const { ctx, sut } = setup();
+      const { ctx, gallerySut } = setup();
       const { user } = await ctx.newUser();
       const { user: otherUser } = await ctx.newUser();
       const { asset } = await ctx.newAsset({ ownerId: user.id, visibility: AssetVisibility.Timeline });
@@ -531,7 +695,7 @@ describe(PersonRepository.name, () => {
 
       await ctx.newAssetFace({ assetId: asset.id, personGroupId: otherPerson.personGroupId });
 
-      await expect(sut.getPeopleFaceStatistics(user.id)).resolves.toEqual({
+      await expect(gallerySut.getPeopleFaceStatistics(user.id)).resolves.toEqual({
         detectedFaceCount: 1,
         assignedVisibleFaceCount: 0,
         namedVisiblePersonCount: 0,
@@ -541,7 +705,7 @@ describe(PersonRepository.name, () => {
     });
 
     it('counts distinct named visible people with eligible visible faces', async () => {
-      const { ctx, sut } = setup();
+      const { ctx, gallerySut } = setup();
       const { user } = await ctx.newUser();
       const { user: otherUser } = await ctx.newUser();
       const { asset } = await ctx.newAsset({ ownerId: user.id, visibility: AssetVisibility.Timeline });
@@ -572,13 +736,13 @@ describe(PersonRepository.name, () => {
       await ctx.newAssetFace({ assetId: archivedAsset.id, personGroupId: outOfScopeNamed.personGroupId });
       await ctx.newAssetFace({ assetId: otherAsset.id, personGroupId: otherNamed.personGroupId });
 
-      await expect(sut.getPeopleFaceStatistics(user.id)).resolves.toMatchObject({
+      await expect(gallerySut.getPeopleFaceStatistics(user.id)).resolves.toMatchObject({
         namedVisiblePersonCount: 3,
       });
     });
 
     it('counts a current-user unnamed person below the minimum face threshold as unassigned', async () => {
-      const { ctx, sut } = setup();
+      const { ctx, gallerySut } = setup();
       const { user } = await ctx.newUser();
       const { asset } = await ctx.newAsset({ ownerId: user.id, visibility: AssetVisibility.Timeline });
       const { person } = await ctx.newPerson({ ownerId: user.id, name: '', isHidden: false });
@@ -586,58 +750,13 @@ describe(PersonRepository.name, () => {
       await ctx.newAssetFace({ assetId: asset.id, personGroupId: person.personGroupId });
       await ctx.newAssetFace({ assetId: asset.id, personGroupId: person.personGroupId });
 
-      await expect(sut.getPeopleFaceStatistics(user.id, { minimumFaceCount: 3 })).resolves.toEqual({
+      await expect(gallerySut.getPeopleFaceStatistics(user.id, { minimumFaceCount: 3 })).resolves.toEqual({
         detectedFaceCount: 2,
         assignedVisibleFaceCount: 0,
         namedVisiblePersonCount: 0,
         assignedHiddenFaceCount: 0,
         unassignedFaceCount: 2,
       });
-    });
-  });
-
-  describe('getBirthdaysForDay', () => {
-    it('should only return visible named people whose birthday matches the target month and day', async () => {
-      const { ctx, sut } = setup();
-      const { user } = await ctx.newUser();
-
-      const { person: matchingPerson } = await ctx.newPerson({
-        ownerId: user.id,
-        name: 'Alice',
-        birthDate: new Date('1990-04-23T00:00:00Z'),
-      });
-      await ctx.newPerson({
-        ownerId: user.id,
-        name: 'Bob',
-        birthDate: new Date('1990-04-24T00:00:00Z'),
-      });
-      await ctx.newPerson({
-        ownerId: user.id,
-        name: '',
-        birthDate: new Date('1990-04-23T00:00:00Z'),
-      });
-      await ctx.newPerson({
-        ownerId: user.id,
-        name: 'Hidden Alice',
-        isHidden: true,
-        birthDate: new Date('1990-04-23T00:00:00Z'),
-      });
-      await ctx.newPerson({
-        ownerId: user.id,
-        name: 'Milo',
-        type: 'pet',
-        birthDate: new Date('1990-04-23T00:00:00Z'),
-      });
-
-      const result = await sut.getBirthdaysForDay(user.id, { month: 4, day: 23 });
-
-      expect(result).toEqual([
-        expect.objectContaining({
-          personGroupId: matchingPerson.personGroupId,
-          name: 'Alice',
-          birthDate: new Date('1990-04-23T00:00:00Z'),
-        }),
-      ]);
     });
   });
 
@@ -748,20 +867,69 @@ describe(PersonRepository.name, () => {
       expect(items.map(({ personGroupId }) => personGroupId)).not.toContain(individual.personGroupId);
     });
 
-    it('keeps a named species bucket on the unfiltered view', async () => {
+    // A species bucket is named after its species ('dog'), so the name alone passes the minimumFaces
+    // gate. It is never an individual (docs/docs/features/pet-detection.md), on any view.
+    it('hides a named species bucket on every view and in the header total', async () => {
       const { sut, ctx } = setup();
       const { user } = await ctx.newUser();
       const bucket = await seedTypedPerson(ctx, {
         ownerId: user.id,
         type: 'pet',
-        species: 'horse',
-        name: 'horse',
+        species: 'dog',
+        name: 'dog',
         faces: 2,
       });
 
-      const { items } = await sut.getAllForUser({ take: 50, skip: 0 }, user.id, { withHidden: false });
+      for (const type of [undefined, 'person', 'pet']) {
+        const { items } = await sut.getAllForUser({ take: 50, skip: 0 }, user.id, { withHidden: false, type });
+        expect(items.map(({ personGroupId }) => personGroupId)).not.toContain(bucket.personGroupId);
+        await expect(sut.getNumberOfPeople(user.id, { type })).resolves.toMatchObject({ total: 0 });
+      }
+    });
 
-      expect(items.map(({ personGroupId }) => personGroupId)).toContain(bucket.personGroupId);
+    // OD-14: upstream's name filter, unaccented and case-insensitive word similarity.
+    it('filters by name like upstream', async () => {
+      const { sut, ctx } = setup();
+      const { user } = await ctx.newUser();
+      const jose = await seedTypedPerson(ctx, { ownerId: user.id, name: 'José Álvarez', faces: 3 });
+      await seedTypedPerson(ctx, { ownerId: user.id, name: 'Maria', faces: 3 });
+
+      const { items } = await sut.getAllForUser({ take: 50, skip: 0 }, user.id, { withHidden: false, name: 'jose' });
+
+      expect(items.map(({ personGroupId }) => personGroupId)).toEqual([jose.personGroupId]);
+    });
+
+    // GET /people advertises both filters (upstream's PersonSearchDto); they narrow the list.
+    it('filters by isFavorite and isHidden', async () => {
+      const { sut, ctx } = setup();
+      const { user } = await ctx.newUser();
+      const favorite = await seedTypedPerson(ctx, { ownerId: user.id, name: 'Fay', faces: 3 });
+      const hidden = await seedTypedPerson(ctx, { ownerId: user.id, name: 'Hal', faces: 3 });
+      const plain = await seedTypedPerson(ctx, { ownerId: user.id, name: 'Pat', faces: 3 });
+      await ctx.database
+        .updateTable('person')
+        .set({ isFavorite: true })
+        .where('personGroupId', '=', favorite.personGroupId)
+        .execute();
+      await ctx.database
+        .updateTable('person')
+        .set({ isHidden: true })
+        .where('personGroupId', '=', hidden.personGroupId)
+        .execute();
+
+      const ids = async (options: { isFavorite?: boolean; isHidden?: boolean }) => {
+        const { items } = await sut.getAllForUser({ take: 50, skip: 0 }, user.id, { withHidden: true, ...options });
+        return items.map(({ personGroupId }) => personGroupId).toSorted();
+      };
+
+      await expect(ids({ isFavorite: true })).resolves.toEqual([favorite.personGroupId]);
+      await expect(ids({ isFavorite: false })).resolves.toEqual([hidden.personGroupId, plain.personGroupId].toSorted());
+      await expect(ids({ isHidden: true })).resolves.toEqual([hidden.personGroupId]);
+      await expect(ids({ isHidden: false })).resolves.toEqual([favorite.personGroupId, plain.personGroupId].toSorted());
+
+      // As upstream, an explicit isHidden filter takes precedence over withHidden.
+      const { items } = await sut.getAllForUser({ take: 50, skip: 0 }, user.id, { withHidden: false, isHidden: true });
+      expect(items.map(({ personGroupId }) => personGroupId)).toEqual([hidden.personGroupId]);
     });
 
     it('scopes the header total to the type filter', async () => {
@@ -803,6 +971,7 @@ describe(PersonRepository.name, () => {
         species: 'dog',
         name: 'Bandit',
         faces: 3,
+        embedded: true,
       });
 
       const { items } = await sut.getAllForUser({ take: 50, skip: 0 }, user.id, { withHidden: false });
@@ -892,6 +1061,96 @@ describe(PersonRepository.name, () => {
     });
   });
 
+  describe('forBirthdayMemories', () => {
+    const target = { year: 2025, month: 6, day: 13 };
+
+    it('should return people with a birthday on the given day', async () => {
+      const { ctx, sut } = setup();
+      const { user } = await ctx.newUser();
+      const { person } = await ctx.newPerson({ ownerId: user.id, name: 'Alice', birthDate: '1990-06-13' });
+      await ctx.newPerson({ ownerId: user.id, name: 'Bob', birthDate: '1990-06-14' });
+
+      const people = await sut.forBirthdayMemories(user.id, target);
+
+      expect(people).toEqual([
+        { personGroupId: person.personGroupId, name: 'Alice', birthDate: { year: 1990, month: 6, day: 13 } },
+      ]);
+    });
+
+    it('should not return hidden people, unnamed people, or people without a birth date', async () => {
+      const { ctx, sut } = setup();
+      const { user } = await ctx.newUser();
+      await ctx.newPerson({ ownerId: user.id, name: 'Alice', birthDate: '1990-06-13', isHidden: true });
+      await ctx.newPerson({ ownerId: user.id, name: '', birthDate: '1990-06-13' });
+      await ctx.newPerson({ ownerId: user.id, name: 'Carol', birthDate: null });
+
+      const people = await sut.forBirthdayMemories(user.id, target);
+
+      expect(people).toEqual([]);
+    });
+
+    it('should not return people belonging to another user', async () => {
+      const { ctx, sut } = setup();
+      const { user } = await ctx.newUser();
+      const { user: otherUser } = await ctx.newUser();
+      await ctx.newPerson({ ownerId: otherUser.id, name: 'Alice', birthDate: '1990-06-13' });
+
+      const people = await sut.forBirthdayMemories(user.id, target);
+
+      expect(people).toEqual([]);
+    });
+
+    it('should not return people born in the target year', async () => {
+      const { ctx, sut } = setup();
+      const { user } = await ctx.newUser();
+      await ctx.newPerson({ ownerId: user.id, name: 'Alice', birthDate: '2025-06-13' });
+
+      const people = await sut.forBirthdayMemories(user.id, target);
+
+      expect(people).toEqual([]);
+    });
+
+    it('should include leap-day birthdays on february 28th of non-leap years', async () => {
+      const { ctx, sut } = setup();
+      const { user } = await ctx.newUser();
+      const { person } = await ctx.newPerson({ ownerId: user.id, name: 'Alice', birthDate: '1992-02-29' });
+
+      const people = await sut.forBirthdayMemories(user.id, { year: 2025, month: 2, day: 28 });
+
+      expect(people.map(({ personGroupId }) => personGroupId)).toEqual([person.personGroupId]);
+    });
+
+    it('should include people born on february 28th on february 28th of non-leap years', async () => {
+      const { ctx, sut } = setup();
+      const { user } = await ctx.newUser();
+      const { person } = await ctx.newPerson({ ownerId: user.id, name: 'Alice', birthDate: '1991-02-28' });
+
+      const people = await sut.forBirthdayMemories(user.id, { year: 2025, month: 2, day: 28 });
+
+      expect(people.map(({ personGroupId }) => personGroupId)).toEqual([person.personGroupId]);
+    });
+
+    it('should not include leap-day birthdays on february 28th of leap years', async () => {
+      const { ctx, sut } = setup();
+      const { user } = await ctx.newUser();
+      await ctx.newPerson({ ownerId: user.id, name: 'Alice', birthDate: '1992-02-29' });
+
+      const people = await sut.forBirthdayMemories(user.id, { year: 2024, month: 2, day: 28 });
+
+      expect(people).toEqual([]);
+    });
+
+    it('should include leap-day birthdays on february 29th of leap years', async () => {
+      const { ctx, sut } = setup();
+      const { user } = await ctx.newUser();
+      const { person } = await ctx.newPerson({ ownerId: user.id, name: 'Alice', birthDate: '1992-02-29' });
+
+      const people = await sut.forBirthdayMemories(user.id, { year: 2024, month: 2, day: 29 });
+
+      expect(people.map(({ personGroupId }) => personGroupId)).toEqual([person.personGroupId]);
+    });
+  });
+
   describe('getForFeatureFaceUpdate', () => {
     it('should ignore soft deleted faces', async () => {
       const { ctx, sut } = setup();
@@ -966,10 +1225,10 @@ describe(PersonRepository.name, () => {
     let personId: string;
     let personWithNoFacesId: string;
     let ctx: ReturnType<typeof setup>['ctx'];
-    let sut: ReturnType<typeof setup>['sut'];
+    let gallerySut: ReturnType<typeof setup>['gallerySut'];
 
     beforeAll(async () => {
-      ({ ctx, sut } = setup());
+      ({ ctx, gallerySut } = setup());
       const { user } = await ctx.newUser();
       const { asset } = await ctx.newAsset({ ownerId: user.id });
 
@@ -1011,7 +1270,7 @@ describe(PersonRepository.name, () => {
     });
 
     it('returns at most `limit` embeddings for visible, non-deleted faces', async () => {
-      const rows = await sut.getAssignedFaceEmbeddings(personId, 2);
+      const rows = await gallerySut.getAssignedFaceEmbeddings(personId, 2);
       expect(rows).toHaveLength(2);
       for (const r of rows) {
         expect(r.embedding).toBeTruthy();
@@ -1031,7 +1290,7 @@ describe(PersonRepository.name, () => {
         await ctx.database.insertInto('face_search').values({ faceId, embedding }).execute();
       }
 
-      const rows = await sut.getAssignedFaceEmbeddings(person.personGroupId, 2);
+      const rows = await gallerySut.getAssignedFaceEmbeddings(person.personGroupId, 2);
       const expected = await ctx.database
         .selectFrom('face_search')
         .select('embedding')
@@ -1050,20 +1309,20 @@ describe(PersonRepository.name, () => {
     });
 
     it('excludes isVisible=false and deleted faces', async () => {
-      const rows = await sut.getAssignedFaceEmbeddings(personId, 10);
+      const rows = await gallerySut.getAssignedFaceEmbeddings(personId, 10);
       // Person A has 3 visible non-deleted faces; isVisible=false and deletedAt faces are excluded
       expect(rows).toHaveLength(3);
     });
 
     it('returns empty for a person with no assigned faces', async () => {
-      const rows = await sut.getAssignedFaceEmbeddings(personWithNoFacesId, 20);
+      const rows = await gallerySut.getAssignedFaceEmbeddings(personWithNoFacesId, 20);
       expect(rows).toEqual([]);
     });
   });
 
   describe('representative face picker queries', () => {
     it('filters deleted, hidden, and offline representative face candidates', async () => {
-      const { ctx, sut } = setup();
+      const { ctx, gallerySut } = setup();
       const { user } = await ctx.newUser();
       const { person } = await ctx.newPerson({ ownerId: user.id });
       const { asset: validAsset } = await ctx.newAsset({ ownerId: user.id });
@@ -1092,25 +1351,25 @@ describe(PersonRepository.name, () => {
         deletedAt: new Date(),
       });
 
-      const faces = await sut.getRepresentativeFaces({ personId: person.personGroupId, take: 20, skip: 0 });
+      const faces = await gallerySut.getRepresentativeFaces({ personId: person.personGroupId, take: 20, skip: 0 });
 
       expect(faces.map((face) => face.id)).toEqual([validFaceId]);
       await expect(
-        sut.getRepresentativeFaceForUpdate({ personId: person.personGroupId, assetFaceId: offlineFaceId }),
+        gallerySut.getRepresentativeFaceForUpdate({ personId: person.personGroupId, assetFaceId: offlineFaceId }),
       ).resolves.toBeUndefined();
       await expect(
-        sut.getRepresentativeFaceForUpdate({ personId: person.personGroupId, assetFaceId: deletedAssetFaceId }),
+        gallerySut.getRepresentativeFaceForUpdate({ personId: person.personGroupId, assetFaceId: deletedAssetFaceId }),
       ).resolves.toBeUndefined();
       await expect(
-        sut.getRepresentativeFaceForUpdate({ personId: person.personGroupId, assetFaceId: hiddenFaceId }),
+        gallerySut.getRepresentativeFaceForUpdate({ personId: person.personGroupId, assetFaceId: hiddenFaceId }),
       ).resolves.toBeUndefined();
       await expect(
-        sut.getRepresentativeFaceForUpdate({ personId: person.personGroupId, assetFaceId: deletedFaceId }),
+        gallerySut.getRepresentativeFaceForUpdate({ personId: person.personGroupId, assetFaceId: deletedFaceId }),
       ).resolves.toBeUndefined();
     });
 
     it('rejects a face linked to a different identity', async () => {
-      const { ctx, sut } = setup();
+      const { ctx, gallerySut } = setup();
       const faceIdentityRepository = ctx.get(FaceIdentityRepository);
       const { user } = await ctx.newUser();
       const { person: targetPerson } = await ctx.newPerson({ ownerId: user.id });
@@ -1127,11 +1386,15 @@ describe(PersonRepository.name, () => {
         source: 'manual',
       });
 
-      const faces = await sut.getRepresentativeFaces({ personId: targetPerson.personGroupId, take: 20, skip: 0 });
+      const faces = await gallerySut.getRepresentativeFaces({
+        personId: targetPerson.personGroupId,
+        take: 20,
+        skip: 0,
+      });
 
       expect(faces.map((face) => face.id)).not.toContain(faceId);
       await expect(
-        sut.getRepresentativeFaceForUpdate({ personId: targetPerson.personGroupId, assetFaceId: faceId }),
+        gallerySut.getRepresentativeFaceForUpdate({ personId: targetPerson.personGroupId, assetFaceId: faceId }),
       ).resolves.toBeUndefined();
     });
 
@@ -1139,7 +1402,7 @@ describe(PersonRepository.name, () => {
     // they belong to AND that pass the shareable-visibility gate — never the owner's Hidden/never-shared
     // faces. The owner (no scope) keeps the full, unscoped list.
     it('scopes non-owner callers to space-reachable, shareable-visibility faces only', async () => {
-      const { ctx, sut } = setup();
+      const { ctx, gallerySut } = setup();
       const { user: owner } = await ctx.newUser();
       const { user: viewer } = await ctx.newUser();
       const { person } = await ctx.newPerson({ ownerId: owner.id });
@@ -1174,7 +1437,7 @@ describe(PersonRepository.name, () => {
         personGroupId: person.personGroupId,
       });
 
-      const scopedFaces = await sut.getRepresentativeFaces({
+      const scopedFaces = await gallerySut.getRepresentativeFaces({
         personId: person.personGroupId,
         take: 50,
         skip: 0,
@@ -1185,14 +1448,14 @@ describe(PersonRepository.name, () => {
       expect(scopedFaces.map((face) => face.id)).not.toContain(neverSharedFaceId);
 
       // Regression: the unscoped (owner) path is unchanged and still returns all three.
-      const ownerFaces = await sut.getRepresentativeFaces({ personId: person.personGroupId, take: 50, skip: 0 });
+      const ownerFaces = await gallerySut.getRepresentativeFaces({ personId: person.personGroupId, take: 50, skip: 0 });
       expect(new Set(ownerFaces.map((face) => face.id))).toEqual(
         new Set([spaceFaceId, hiddenFaceId, neverSharedFaceId]),
       );
     });
 
     it('excludes cross-user identity-fan-out faces from a scoped (non-owner) caller', async () => {
-      const { ctx, sut } = setup();
+      const { ctx, gallerySut } = setup();
       const faceIdentityRepository = ctx.get(FaceIdentityRepository);
       const { user: owner } = await ctx.newUser();
       const { user: viewer } = await ctx.newUser();
@@ -1216,11 +1479,7 @@ describe(PersonRepository.name, () => {
       // A DIFFERENT user's own person shares the same identity (e.g. a merged identity), with a face on
       // that other user's own asset -- never shared into any space the viewer belongs to.
       const { person: otherPerson } = await ctx.newPerson({ ownerId: otherUser.id });
-      await ctx.database
-        .updateTable('person')
-        .set({ identityId: identity.id })
-        .where('personGroupId', '=', otherPerson.personGroupId)
-        .execute();
+      await updatePersonForTest(ctx.database, otherPerson.personGroupId, { identityId: identity.id });
       const { asset: otherAsset } = await ctx.newAsset({ ownerId: otherUser.id, visibility: AssetVisibility.Timeline });
       const { assetFace: otherFace } = await ctx.newAssetFace({
         assetId: otherAsset.id,
@@ -1229,11 +1488,11 @@ describe(PersonRepository.name, () => {
       await faceIdentityRepository.linkFace({ assetFaceId: otherFace.id, identityId: identity.id, source: 'manual' });
 
       // Owner (unscoped) sees both -- the identity fan-out is intentional for the owner's own picker.
-      const ownerFaces = await sut.getRepresentativeFaces({ personId: person.personGroupId, take: 50, skip: 0 });
+      const ownerFaces = await gallerySut.getRepresentativeFaces({ personId: person.personGroupId, take: 50, skip: 0 });
       expect(new Set(ownerFaces.map((face) => face.id))).toEqual(new Set([ownFace.id, otherFace.id]));
 
       // The space viewer must NOT see the other user's face pulled in via the shared identity.
-      const scopedFaces = await sut.getRepresentativeFaces({
+      const scopedFaces = await gallerySut.getRepresentativeFaces({
         personId: person.personGroupId,
         take: 50,
         skip: 0,
@@ -1416,7 +1675,8 @@ describe(PersonRepository.name, () => {
 
   describe('deleteAllPets', () => {
     it('deletes pet people and their faces while preserving human people and faces', async () => {
-      const { ctx, sut } = setup();
+      const { ctx } = setup();
+      const sut = ctx.get(PetFaceRepository);
       const { user } = await ctx.newUser();
       const { asset } = await ctx.newAsset({ ownerId: user.id });
 
@@ -1432,7 +1692,7 @@ describe(PersonRepository.name, () => {
 
       const people = await ctx.database
         .selectFrom('person')
-        .select(['personGroupId', 'type'])
+        .select(['personGroupId', personType().as('type')])
         .where('ownerId', '=', user.id)
         .execute();
       const faces = await ctx.database
@@ -1446,14 +1706,73 @@ describe(PersonRepository.name, () => {
     });
   });
 
+  describe('getAllForUser', () => {
+    // The picker asks for one page of 500. When `closestFaceAssetId` ordered by resemblance ALONE,
+    // that LIMIT cut named people out of the page purely on resemblance — and since resemblance is
+    // the only input that changes between two faces on the same photo, the same picker offered a
+    // different set of names for each face it was opened on (#992: ten names for one face, two for
+    // the next). Named people now sort first, ahead of the limit, so no page is all clusters while
+    // names go missing. `take: 1` stands in for the real 500 against a real library.
+    it('keeps a named person in the page when a cluster resembles the edited face more closely', async () => {
+      const { ctx, sut } = setup();
+      const { user } = await ctx.newUser();
+      const { asset } = await ctx.newAsset({ ownerId: user.id });
+
+      const editedFaceId = await seedFace(ctx, { assetId: asset.id, embedding: axis(0) });
+
+      // Named, and deliberately the WORSE match: distance 1 to the edited face.
+      const { person: named } = await ctx.newPerson({ ownerId: user.id, name: 'Zelda' });
+      const namedFaceId = await seedFace(ctx, {
+        assetId: asset.id,
+        personGroupId: named.personGroupId,
+        embedding: axis(1),
+      });
+      await ctx.database
+        .updateTable('person')
+        .set({ faceAssetId: namedFaceId })
+        .where('personGroupId', '=', named.personGroupId)
+        .execute();
+
+      // Unnamed, so it needs three faces to clear the minimum-faces floor, and the PERFECT match:
+      // distance 0. Ordering on resemblance alone puts it first and `take: 1` then drops Zelda.
+      const { person: cluster } = await ctx.newPerson({ ownerId: user.id, name: '' });
+      const clusterFaceId = await seedFace(ctx, {
+        assetId: asset.id,
+        personGroupId: cluster.personGroupId,
+        embedding: axis(0),
+      });
+      await seedFace(ctx, { assetId: asset.id, personGroupId: cluster.personGroupId, embedding: axis(0) });
+      await seedFace(ctx, { assetId: asset.id, personGroupId: cluster.personGroupId, embedding: axis(0) });
+      await ctx.database
+        .updateTable('person')
+        .set({ faceAssetId: clusterFaceId })
+        .where('personGroupId', '=', cluster.personGroupId)
+        .execute();
+
+      const firstPage = await sut.getAllForUser({ take: 1, skip: 0 }, user.id, {
+        withHidden: true,
+        closestFaceAssetId: editedFaceId,
+      });
+      expect(firstPage.items.map((person) => person.name)).toEqual(['Zelda']);
+
+      // Both are still offered, and resemblance still orders within each group.
+      const wholeList = await sut.getAllForUser({ take: 10, skip: 0 }, user.id, {
+        withHidden: true,
+        closestFaceAssetId: editedFaceId,
+      });
+      expect(wholeList.items.map((person) => person.name)).toEqual(['Zelda', '']);
+    });
+  });
+
   describe('getScannablePeopleWithUnassignedFaces', () => {
     it('streams only named, non-hidden, type=person people with their own reference face whose owner has an unassigned ML face', async () => {
-      const { ctx, sut } = setup();
+      const { ctx, gallerySut } = setup();
       const { user } = await ctx.newUser();
       const { user: otherUser } = await ctx.newUser();
 
       const { person: named } = await ctx.newPerson({ ownerId: user.id, name: 'Alice', isHidden: false });
       const { person: unnamed } = await ctx.newPerson({ ownerId: user.id, name: '', isHidden: false });
+      const { person: blank } = await ctx.newPerson({ ownerId: user.id, name: ' '.repeat(3), isHidden: false });
       const { person: hidden } = await ctx.newPerson({ ownerId: user.id, name: 'Hidden', isHidden: true });
       const { person: pet } = await ctx.newPerson({ ownerId: user.id, name: 'Rex', isHidden: false, type: 'pet' });
       const { person: otherOwner } = await ctx.newPerson({ ownerId: otherUser.id, name: 'Bob', isHidden: false });
@@ -1461,25 +1780,28 @@ describe(PersonRepository.name, () => {
       // user owns an unassigned ML face, and `named` has their own reference face → `named` is eligible
       const { asset } = await ctx.newAsset({ ownerId: user.id });
       await giveOwnFace(ctx, asset.id, named.personGroupId);
+      // `blank` has a reference face too, so only its whitespace-only name keeps it out
+      await giveOwnFace(ctx, asset.id, blank.personGroupId);
       await ctx.newAssetFace({ assetId: asset.id, personGroupId: null });
       // otherUser has NO unassigned face → `otherOwner` excluded
       const { asset: a2 } = await ctx.newAsset({ ownerId: otherUser.id });
       await ctx.newAssetFace({ assetId: a2.id, personGroupId: otherOwner.personGroupId });
 
       const ids: string[] = [];
-      for await (const p of sut.getScannablePeopleWithUnassignedFaces()) {
+      for await (const p of gallerySut.getScannablePeopleWithUnassignedFaces()) {
         ids.push(p.personGroupId);
       }
 
       expect(ids).toContain(named.personGroupId);
       expect(ids).not.toContain(unnamed.personGroupId);
+      expect(ids).not.toContain(blank.personGroupId);
       expect(ids).not.toContain(hidden.personGroupId);
       expect(ids).not.toContain(pet.personGroupId);
       expect(ids).not.toContain(otherOwner.personGroupId);
     });
 
     it('excludes a named person whose owner has only assigned/deleted/invisible faces', async () => {
-      const { ctx, sut } = setup();
+      const { ctx, gallerySut } = setup();
       const { user } = await ctx.newUser();
       const { person } = await ctx.newPerson({ ownerId: user.id, name: 'Carol', isHidden: false });
       const { asset } = await ctx.newAsset({ ownerId: user.id });
@@ -1488,14 +1810,14 @@ describe(PersonRepository.name, () => {
       await ctx.newAssetFace({ assetId: asset.id, personGroupId: null, isVisible: false }); // invisible
 
       const ids: string[] = [];
-      for await (const p of sut.getScannablePeopleWithUnassignedFaces()) {
+      for await (const p of gallerySut.getScannablePeopleWithUnassignedFaces()) {
         ids.push(p.personGroupId);
       }
       expect(ids).not.toContain(person.personGroupId);
     });
 
     it('excludes a named person whose owner has only non-ML (manual) unassigned faces', async () => {
-      const { ctx, sut } = setup();
+      const { ctx, gallerySut } = setup();
       const { user } = await ctx.newUser();
       const { person } = await ctx.newPerson({ ownerId: user.id, name: 'Dave', isHidden: false });
       const { asset } = await ctx.newAsset({ ownerId: user.id });
@@ -1504,7 +1826,7 @@ describe(PersonRepository.name, () => {
       await ctx.newAssetFace({ assetId: asset.id, personGroupId: null, sourceType: SourceType.Manual });
 
       const ids: string[] = [];
-      for await (const p of sut.getScannablePeopleWithUnassignedFaces()) {
+      for await (const p of gallerySut.getScannablePeopleWithUnassignedFaces()) {
         ids.push(p.personGroupId);
       }
       expect(ids).not.toContain(person.personGroupId);
@@ -1515,7 +1837,7 @@ describe(PersonRepository.name, () => {
     // people below streamed (proved by temporarily reverting the person-reference-face EXISTS and
     // re-running this test: it failed with `ids` containing all three ids, not just alice's).
     it('S9.1: given an owner with three named people, only the one with their own reference face is scannable', async () => {
-      const { ctx, sut } = setup();
+      const { ctx, gallerySut } = setup();
       const { user } = await ctx.newUser();
 
       const { person: alice } = await ctx.newPerson({ ownerId: user.id, name: 'Alice', isHidden: false });
@@ -1530,7 +1852,7 @@ describe(PersonRepository.name, () => {
       // this test's three people rather than asserting on the raw (file-wide) stream contents.
       const relevantIds = new Set([alice.personGroupId, bob.personGroupId, carol.personGroupId]);
       const ids: string[] = [];
-      for await (const p of sut.getScannablePeopleWithUnassignedFaces()) {
+      for await (const p of gallerySut.getScannablePeopleWithUnassignedFaces()) {
         if (relevantIds.has(p.personGroupId)) {
           ids.push(p.personGroupId);
         }
@@ -1542,7 +1864,7 @@ describe(PersonRepository.name, () => {
     });
 
     it('S9.3: a person whose only unassigned candidate is on a Locked asset is not yielded (Slice 1 composition)', async () => {
-      const { ctx, sut } = setup();
+      const { ctx, gallerySut } = setup();
       // Owner-scoped gate 2 (an unassigned reviewable ML candidate exists somewhere in the owner's
       // library) is not itself person-specific — so the positive control needs its OWN owner, or its
       // genuine candidate would leak into `locked`'s gate 2 and defeat this test.
@@ -1568,7 +1890,7 @@ describe(PersonRepository.name, () => {
       await ctx.newAssetFace({ assetId: timelineAsset.id, personGroupId: null });
 
       const ids: string[] = [];
-      for await (const p of sut.getScannablePeopleWithUnassignedFaces()) {
+      for await (const p of gallerySut.getScannablePeopleWithUnassignedFaces()) {
         ids.push(p.personGroupId);
       }
 
@@ -1581,7 +1903,7 @@ describe(PersonRepository.name, () => {
       ['invisible', { isVisible: false }],
       ['non-ML', { sourceType: SourceType.Manual }],
     ] as const)('S9.4: a person whose only unassigned candidate is %s is not yielded', async (_label, overrides) => {
-      const { ctx, sut } = setup();
+      const { ctx, gallerySut } = setup();
       // Same reasoning as S9.3: the control needs its own owner so its genuine candidate cannot
       // leak into the excluded person's (owner-scoped) gate 2.
       const { user: excludedOwner } = await ctx.newUser();
@@ -1603,7 +1925,7 @@ describe(PersonRepository.name, () => {
       await ctx.newAssetFace({ assetId: controlAsset.id, personGroupId: null });
 
       const ids: string[] = [];
-      for await (const p of sut.getScannablePeopleWithUnassignedFaces()) {
+      for await (const p of gallerySut.getScannablePeopleWithUnassignedFaces()) {
         ids.push(p.personGroupId);
       }
 
@@ -1612,7 +1934,7 @@ describe(PersonRepository.name, () => {
     });
 
     it('S9.5 (pin): hidden, unnamed, and pet people remain excluded even with their own reference face and an owner candidate', async () => {
-      const { ctx, sut } = setup();
+      const { ctx, gallerySut } = setup();
       const { user } = await ctx.newUser();
 
       const { person: hidden } = await ctx.newPerson({ ownerId: user.id, name: 'Hidden', isHidden: true });
@@ -1627,7 +1949,7 @@ describe(PersonRepository.name, () => {
       await ctx.newAssetFace({ assetId: asset.id, personGroupId: null }); // shared unassigned candidate
 
       const ids: string[] = [];
-      for await (const p of sut.getScannablePeopleWithUnassignedFaces()) {
+      for await (const p of gallerySut.getScannablePeopleWithUnassignedFaces()) {
         ids.push(p.personGroupId);
       }
 
@@ -1638,7 +1960,7 @@ describe(PersonRepository.name, () => {
     });
 
     it('S9.6: owner A having an unassigned face does not make owner B people scannable', async () => {
-      const { ctx, sut } = setup();
+      const { ctx, gallerySut } = setup();
       const { user: ownerA } = await ctx.newUser();
       const { user: ownerB } = await ctx.newUser();
 
@@ -1653,7 +1975,7 @@ describe(PersonRepository.name, () => {
       await giveOwnFace(ctx, assetB.id, personB.personGroupId); // personB has their own reference face too, but no candidate
 
       const ids: string[] = [];
-      for await (const p of sut.getScannablePeopleWithUnassignedFaces()) {
+      for await (const p of gallerySut.getScannablePeopleWithUnassignedFaces()) {
         ids.push(p.personGroupId);
       }
 
@@ -1666,7 +1988,7 @@ describe(PersonRepository.name, () => {
   // so the refusal for a non-reviewable asset belongs here, at the query, not in the service. S1.12.
   describe('getFaceByIdIncludingTombstoned', () => {
     it('S1.12: throws for a face on a locked asset, returns it for a face on a timeline asset (control)', async () => {
-      const { ctx, sut } = setup();
+      const { ctx, gallerySut } = setup();
       const { user } = await ctx.newUser();
 
       const { asset: timelineAsset } = await ctx.newAsset({ ownerId: user.id, visibility: AssetVisibility.Timeline });
@@ -1675,14 +1997,14 @@ describe(PersonRepository.name, () => {
       const { asset: lockedAsset } = await ctx.newAsset({ ownerId: user.id, visibility: AssetVisibility.Locked });
       const { assetFace: lockedFace } = await ctx.newAssetFace({ assetId: lockedAsset.id, personGroupId: null });
 
-      await expect(sut.getFaceByIdIncludingTombstoned(timelineFace.id)).resolves.toMatchObject({
+      await expect(gallerySut.getFaceByIdIncludingTombstoned(timelineFace.id)).resolves.toMatchObject({
         id: timelineFace.id,
       }); // positive control
-      await expect(sut.getFaceByIdIncludingTombstoned(lockedFace.id)).rejects.toThrow();
+      await expect(gallerySut.getFaceByIdIncludingTombstoned(lockedFace.id)).rejects.toThrow();
     });
 
     it('S1.12 (pin): still returns a tombstoned (deletedAt set) face on a timeline asset', async () => {
-      const { ctx, sut } = setup();
+      const { ctx, gallerySut } = setup();
       const { user } = await ctx.newUser();
 
       const { asset: timelineAsset } = await ctx.newAsset({ ownerId: user.id, visibility: AssetVisibility.Timeline });
@@ -1693,7 +2015,7 @@ describe(PersonRepository.name, () => {
         .where('id', '=', tombstonedFace.id)
         .execute();
 
-      await expect(sut.getFaceByIdIncludingTombstoned(tombstonedFace.id)).resolves.toMatchObject({
+      await expect(gallerySut.getFaceByIdIncludingTombstoned(tombstonedFace.id)).resolves.toMatchObject({
         id: tombstonedFace.id,
       });
     });
@@ -1705,7 +2027,7 @@ describe(PersonRepository.name, () => {
   // both halves of it.
   describe('getFaceByIdOnLiveAsset', () => {
     it('T1.1/T1.2: returns a face on a live timeline asset, throws once its asset is trashed', async () => {
-      const { ctx, sut } = setup();
+      const { ctx, gallerySut } = setup();
       const { user } = await ctx.newUser();
 
       const { asset: liveAsset } = await ctx.newAsset({ ownerId: user.id, visibility: AssetVisibility.Timeline });
@@ -1719,22 +2041,22 @@ describe(PersonRepository.name, () => {
         .where('id', '=', trashedAsset.id)
         .execute();
 
-      await expect(sut.getFaceByIdOnLiveAsset(liveFace.id)).resolves.toMatchObject({ id: liveFace.id }); // positive control
-      await expect(sut.getFaceByIdOnLiveAsset(trashedFace.id)).rejects.toThrow();
+      await expect(gallerySut.getFaceByIdOnLiveAsset(liveFace.id)).resolves.toMatchObject({ id: liveFace.id }); // positive control
+      await expect(gallerySut.getFaceByIdOnLiveAsset(trashedFace.id)).rejects.toThrow();
     });
 
     it('T1.3: throws for a face on a locked asset', async () => {
-      const { ctx, sut } = setup();
+      const { ctx, gallerySut } = setup();
       const { user } = await ctx.newUser();
 
       const { asset: lockedAsset } = await ctx.newAsset({ ownerId: user.id, visibility: AssetVisibility.Locked });
       const { assetFace: lockedFace } = await ctx.newAssetFace({ assetId: lockedAsset.id, personGroupId: null });
 
-      await expect(sut.getFaceByIdOnLiveAsset(lockedFace.id)).rejects.toThrow();
+      await expect(gallerySut.getFaceByIdOnLiveAsset(lockedFace.id)).rejects.toThrow();
     });
 
     it('T1.4: still returns a tombstoned face whose asset is live', async () => {
-      const { ctx, sut } = setup();
+      const { ctx, gallerySut } = setup();
       const { user } = await ctx.newUser();
 
       const { asset } = await ctx.newAsset({ ownerId: user.id, visibility: AssetVisibility.Timeline });
@@ -1745,11 +2067,11 @@ describe(PersonRepository.name, () => {
         .where('id', '=', assetFace.id)
         .execute();
 
-      await expect(sut.getFaceByIdOnLiveAsset(assetFace.id)).resolves.toMatchObject({ id: assetFace.id });
+      await expect(gallerySut.getFaceByIdOnLiveAsset(assetFace.id)).resolves.toMatchObject({ id: assetFace.id });
     });
 
     it('T1.5 (pin): getFaceByIdIncludingTombstoned STILL returns a face on a trashed asset', async () => {
-      const { ctx, sut } = setup();
+      const { ctx, gallerySut } = setup();
       const { user } = await ctx.newUser();
 
       const { asset } = await ctx.newAsset({ ownerId: user.id, visibility: AssetVisibility.Timeline });
@@ -1758,7 +2080,9 @@ describe(PersonRepository.name, () => {
 
       // The three shipped crop surfaces must not change. If this ever goes red, the deletedAt filter was
       // added to the wrong method.
-      await expect(sut.getFaceByIdIncludingTombstoned(assetFace.id)).resolves.toMatchObject({ id: assetFace.id });
+      await expect(gallerySut.getFaceByIdIncludingTombstoned(assetFace.id)).resolves.toMatchObject({
+        id: assetFace.id,
+      });
     });
   });
 
@@ -1875,6 +2199,59 @@ describe(PersonRepository.name, () => {
 
       expect(ids).not.toContain(confirmedFace.id); // excluded by personId: null alone
       expect(ids).toContain(controlFace.id); // positive control
+    });
+  });
+
+  // `expectedPersonId` is a compare-and-set, and it is the last thing standing between a space
+  // editor's detach and an owner tag that changed underneath it (#992 §6.3.1): the detach resolves
+  // the owner's person, decides the two are the same human, and only then clears the tag. Without
+  // the guard, anything that re-tagged the face in between is silently overwritten. It had no test
+  // at any layer -- deleting the whole `expectedPersonId` block left the suite green.
+  describe('setFaceOwnerPerson', () => {
+    it('applies the write only when the face still points at the person the caller read', async () => {
+      const { ctx, gallerySut } = setup();
+      const { user } = await ctx.newUser();
+      const { asset } = await ctx.newAsset({ ownerId: user.id });
+      const { person: dad } = await ctx.newPerson({ ownerId: user.id, name: 'Dad' });
+      const { person: other } = await ctx.newPerson({ ownerId: user.id, name: 'Uncle Tom' });
+      const { result: faceId } = await ctx.newAssetFace({ assetId: asset.id, personGroupId: dad.personGroupId });
+
+      const personGroupIdOf = async () =>
+        ctx.database
+          .selectFrom('asset_face')
+          .select('personGroupId')
+          .where('id', '=', faceId)
+          .executeTakeFirstOrThrow()
+          .then((row) => row.personGroupId);
+
+      // The face moved on since the caller read it: the clear must not land.
+      await gallerySut.setFaceOwnerPerson({
+        assetFaceId: faceId,
+        personGroupId: null,
+        expectedPersonGroupId: other.personGroupId,
+      });
+      await expect(personGroupIdOf()).resolves.toBe(dad.personGroupId);
+
+      // Same call, same fixture, correct expectation -- so the refusal above was the guard firing,
+      // not the update being a no-op for some other reason.
+      await gallerySut.setFaceOwnerPerson({
+        assetFaceId: faceId,
+        personGroupId: null,
+        expectedPersonGroupId: dad.personGroupId,
+      });
+      await expect(personGroupIdOf()).resolves.toBeNull();
+
+      // `expectedPersonGroupId: null` is its own case: it means "only if still untagged".
+      await gallerySut.setFaceOwnerPerson({
+        assetFaceId: faceId,
+        personGroupId: other.personGroupId,
+        expectedPersonGroupId: null,
+      });
+      await expect(personGroupIdOf()).resolves.toBe(other.personGroupId);
+
+      // Omitting it writes unconditionally, which is what the attach path relies on.
+      await gallerySut.setFaceOwnerPerson({ assetFaceId: faceId, personGroupId: dad.personGroupId });
+      await expect(personGroupIdOf()).resolves.toBe(dad.personGroupId);
     });
   });
 });

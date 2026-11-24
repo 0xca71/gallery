@@ -1,11 +1,11 @@
-import { AssetTypeEnum, AssetVisibility } from '@immich/sdk';
-import { createFilterState } from '$lib/components/filter-panel/filter-panel';
+import { createFilterState } from '#lib/components/filter-panel/filter-panel.ts';
 import {
   buildAlbumMapMarkerOptions,
   buildMapMarkerOptions,
   buildMapTimeBucketOptions,
   buildMapTimelineOptions,
-} from '$lib/utils/map-filter-options';
+} from '#lib/utils/map-filter-options.ts';
+import { AssetTypeEnum, AssetVisibility } from '@immich/sdk';
 
 describe('buildMapMarkerOptions', () => {
   it('includes custom dates in map marker options', () => {
@@ -301,10 +301,10 @@ describe('buildMapTimelineOptions', () => {
 });
 
 /**
- * #802 — the Map view was missing the "Text" filter section entirely. These cover the option
- * builders forwarding the three text fields the section produces. The map timeline hits
- * TimeBucketDto (which already supports them); markers hit FilteredMapMarkerDto.
- */
+#802 — the Map view was missing the "Text" filter section entirely. These cover the option
+builders forwarding the three text fields the section produces. The map timeline hits
+TimeBucketDto (which already supports them); markers hit FilteredMapMarkerDto.
+*/
 describe('text filters (#802)', () => {
   const textFilters = {
     ...createFilterState(),
@@ -481,7 +481,7 @@ describe('buildAlbumMapMarkerOptions', () => {
 
   it('sends the album scope alone — no spaceId, no withSharedSpaces, no owner scope', () => {
     // The server derives everything else from albumId: it checks AlbumRead, leaves userIds unset,
-    // and computes timelineSpaceIds itself so albumSharedSpaceScope can keep unreachable space
+    // and computes timelineSpaceIds itself so albumConfinedToViewer can keep unreachable space
     // assets out (R4). The client must NOT try to help by adding withSharedSpaces — that flag also
     // widens person-token resolution scope in SharedSpaceService.getFilteredMapMarkers
     // (server/src/services/shared-space.service.ts), which is not what an album query wants.

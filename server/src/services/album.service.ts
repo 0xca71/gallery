@@ -8,21 +8,37 @@ import {
   AlbumsAddAssetsResponseDto,
   CreateAlbumDto,
   GetAlbumsDto,
+  MapAlbumDto,
   UpdateAlbumDto,
   UpdateAlbumUserDto,
   mapAlbum,
 } from 'src/dtos/album.dto.js';
 import { BulkIdErrorReason, BulkIdResponseDto, BulkIdsDto } from 'src/dtos/asset-ids.response.dto.js';
-import { AuthDto } from 'src/dtos/auth.dto.js';
+import { AuthDto, isMetadataHidden } from 'src/dtos/auth.dto.js';
 import { MapMarkerResponseDto } from 'src/dtos/map.dto.js';
-import { AlbumUserRole, JobName, Permission } from 'src/enum.js';
-import { AlbumAssetCount, AlbumInfoOptions } from 'src/repositories/album.repository.js';
+import { AlbumUserRole, Permission } from 'src/enum.js';
+import { albumListMetadataScope, albumMetadataScope } from 'src/gallery/utils/album-metadata-scope.js';
+import { getAlbumResponseOverlay } from 'src/gallery/utils/album-response-overlay.js';
+import {
+  addAlbumAssetContributions,
+  emitAlbumAssetsAdd,
+  removeAlbumAssetContributions,
+  tryContributeDeniedAssets,
+} from 'src/gallery/utils/space-album-contribution.js';
+import { AlbumAssetCount } from 'src/repositories/album.repository.js';
 import { BaseService } from 'src/services/base.service.js';
-import { hasDirectAlbumReadAccess } from 'src/utils/access.js';
 import { addAssets, removeAssets } from 'src/utils/asset.util.js';
 import { asDateTimeString } from 'src/utils/date.js';
 import { findOrFail } from 'src/utils/misc.js';
 import { getPreferences } from 'src/utils/preferences.js';
+
+const mapAlbumMetadata = (metadata?: AlbumAssetCount) => ({
+  startDate: asDateTimeString(metadata?.startDate ?? undefined),
+  endDate: asDateTimeString(metadata?.endDate ?? undefined),
+  assetCount: metadata?.assetCount ?? 0,
+  // lastModifiedAssetTimestamp is only used in mobile app, please remove if not need
+  lastModifiedAssetTimestamp: asDateTimeString(metadata?.lastModifiedAssetTimestamp ?? undefined),
+});
 
 @Injectable()
 export class AlbumService extends BaseService {
@@ -42,8 +58,8 @@ export class AlbumService extends BaseService {
 
   async getNames(auth: AuthDto): Promise<AlbumNameDto[]> {
     const [owned, shared] = await Promise.all([
-      this.albumRepository.getOwnedNames(auth.user.id),
-      this.albumRepository.getSharedNames(auth.user.id),
+      this.spaceAlbumRepository.getOwnedNames(auth.user.id),
+      this.spaceAlbumRepository.getSharedNames(auth.user.id),
     ]);
     return [
       ...owned.map((r) => ({
@@ -77,7 +93,7 @@ export class AlbumService extends BaseService {
     // { [albumId]: assetCount }
     const results = await this.albumRepository.getMetadataForIds(
       albums.map((album) => album.id),
-      { forUserId: auth.user.id },
+      albumListMetadataScope(auth),
     );
     const albumMetadata: Record<string, AlbumAssetCount> = {};
     for (const metadata of results) {
@@ -87,103 +103,42 @@ export class AlbumService extends BaseService {
     return albums.map((album) => ({
       ...mapAlbum(album),
       sharedLinks: undefined,
-      startDate: asDateTimeString(albumMetadata[album.id]?.startDate ?? undefined),
-      endDate: asDateTimeString(albumMetadata[album.id]?.endDate ?? undefined),
-      assetCount: albumMetadata[album.id]?.assetCount ?? 0,
-      // lastModifiedAssetTimestamp is only used in mobile app, please remove if not need
-      lastModifiedAssetTimestamp: asDateTimeString(albumMetadata[album.id]?.lastModifiedAssetTimestamp ?? undefined),
+      ...mapAlbumMetadata(albumMetadata[album.id]),
     }));
   }
 
   async get(auth: AuthDto, id: string): Promise<AlbumResponseDto> {
     await this.requireAccess({ auth, permission: Permission.AlbumRead, ids: [id] });
     await this.albumRepository.updateThumbnails();
-    const album = await this.findOrFail(id, auth.user.id, { withAssets: false });
-    // #1018: for a shared link the count is scoped to the ONE space the link was created from, so
-    // it matches the grid the link renders. A link with no space counts owner rows only, as before —
-    // passing the creator's id unscoped would count contributions from every space they belong to.
-    const [albumMetadataForIds] = await this.albumRepository.getMetadataForIds(
-      [album.id],
-      auth.sharedLink
-        ? auth.sharedLink.spaceId
-          ? { forUserId: auth.sharedLink.userId, spaceId: auth.sharedLink.spaceId }
-          : { forUserId: undefined }
-        : { forUserId: auth.user.id },
-    );
+    const album = await this.findOrFail(id, auth.user.id);
 
     const hasSharedUsers = album.albumUsers && album.albumUsers.length > 1;
     const hasSharedLink = album.sharedLinks && album.sharedLinks.length > 0;
     const isShared = hasSharedUsers || hasSharedLink;
+    const overlay = await getAlbumResponseOverlay(
+      { access: this.accessRepository, sharedSpace: this.sharedSpaceRepository },
+      { auth, id },
+    );
 
-    const mapped = mapAlbum(album);
-
-    // security-8: a caller who reaches the album ONLY through shared-space membership (not the album owner
-    // or a shared album_user) must not see other participants' PII (id / name / role / profile image /
-    // email). Strip albumUsers down to the album owner (display name only, email redacted), matching
-    // getLinkedAlbums; genuine participants and shared-link callers keep the full list.
-    const hasDirectAccess =
-      !!auth.sharedLink || (await hasDirectAlbumReadAccess(this.accessRepository, auth.user.id, id));
-    if (!hasDirectAccess) {
-      const ownerAlbumUser = mapped.albumUsers.find(({ role }) => role === AlbumUserRole.Owner);
-      mapped.albumUsers = ownerAlbumUser ? [ownerAlbumUser] : mapped.albumUsers.slice(0, 1);
-      for (const albumUser of mapped.albumUsers) {
-        albumUser.user.email = '';
-      }
-    }
-
-    // rbac-6: the album OWNER (and only the owner) sees the list of shared spaces this album is
-    // linked into, so they can review + revoke links (a space editor can link an owner's album).
-    // Non-owner callers — including album editors/viewers and space-only readers — get no list.
-    // A shared-link visitor is explicitly excluded even though checkOwnerAccess would return true
-    // for one (shared-link AuthDto.user.id resolves to the link creator/album owner for access
-    // checks) — a public link is not an authenticated owner session and must never expose the
-    // owner-only space-link list to whoever holds the link URL.
-    let isAlbumOwner = false;
-    if (!auth.sharedLink) {
-      const ownerIds = await this.accessRepository.album.checkOwnerAccess(auth.user.id, new Set([id]));
-      isAlbumOwner = ownerIds.has(id);
-    }
-    let sharedSpaceLinks: AlbumResponseDto['sharedSpaceLinks'];
-    if (isAlbumOwner) {
-      const links = await this.sharedSpaceRepository.getAlbumSpaceLinks(id);
-      // Omit the field entirely when the album has no space links, so a plain album's response shape is
-      // unchanged (the field only appears for the owner when there is at least one link to surface).
-      if (links.length > 0) {
-        sharedSpaceLinks = links.map((link) => ({
-          spaceId: link.spaceId,
-          spaceName: link.spaceName,
-          linkedById: link.linkedById,
-          showInTimeline: link.showInTimeline,
-        }));
-      }
-    }
-
-    return {
-      ...mapped,
-      startDate: asDateTimeString(albumMetadataForIds?.startDate ?? undefined),
-      endDate: asDateTimeString(albumMetadataForIds?.endDate ?? undefined),
-      assetCount: albumMetadataForIds?.assetCount ?? 0,
-      lastModifiedAssetTimestamp: asDateTimeString(albumMetadataForIds?.lastModifiedAssetTimestamp ?? undefined),
+    return overlay.apply({
+      ...(await this.mapWithMetadata(album, auth)),
       // L1: contributorCounts exposes contributor userIds + per-user asset counts — the same PII
-      // security-8 already gated the rest of albumUsers behind. A space-only reader (hasDirectAccess
-      // false) must not see it, matching the albumUsers redaction above.
+      // security-8 gates the rest of albumUsers behind, so a space-only reader (hasDirectAccess false)
+      // must not see it; nor may a shared-link viewer.
       contributorCounts:
-        isShared && hasDirectAccess ? await this.albumRepository.getContributorCounts(album.id) : undefined,
-      sharedSpaceLinks,
-    };
+        isShared && overlay.hasDirectAccess && !auth.sharedLink
+          ? await this.albumRepository.getContributorCounts(album.id)
+          : undefined,
+    });
   }
 
   async getMapMarkers(auth: AuthDto, id: string): Promise<MapMarkerResponseDto[]> {
     await this.requireAccess({ auth, permission: Permission.AlbumRead, ids: [id] });
 
-    if (auth.sharedLink && !auth.sharedLink.showExif) {
+    if (isMetadataHidden(auth)) {
       return [];
     }
 
-    // Album membership (verified above via AlbumRead) is the access boundary: every reader of the
-    // album — owner, editor, or viewer — sees pins for all geotagged assets in it, just like the
-    // album grid does. Do not scope by asset owner here; doing so hid the owner's pins from
-    // viewers of a shared album (#656).
     return this.mapRepository.getAlbumMapMarkers(id);
   }
 
@@ -223,16 +178,20 @@ export class AlbumService extends BaseService {
       await this.eventRepository.emit('AlbumInvite', { id: album.id, userId, senderName: auth.user.name });
     }
 
-    return mapAlbum(album);
+    return this.mapWithMetadata(album, auth);
   }
 
   async update(auth: AuthDto, id: string, dto: UpdateAlbumDto): Promise<AlbumResponseDto> {
     await this.requireAccess({ auth, permission: Permission.AlbumUpdate, ids: [id] });
 
-    const album = await this.findOrFail(id, auth.user.id, { withAssets: true });
+    const album = await this.findOrFail(id, auth.user.id);
 
     if (dto.albumThumbnailAssetId) {
-      const results = await this.albumRepository.getAssetIds(id, [dto.albumThumbnailAssetId]);
+      const results = await this.spaceAlbumRepository.getAlbumAssetIdsForViewer(
+        id,
+        [dto.albumThumbnailAssetId],
+        auth.user.id,
+      );
       if (results.size === 0) {
         throw new BadRequestException('Invalid album thumbnail');
       }
@@ -251,7 +210,7 @@ export class AlbumService extends BaseService {
       auth.user.id,
     );
 
-    return mapAlbum({ ...updatedAlbum, assets: album.assets });
+    return this.mapWithMetadata(updatedAlbum, auth);
   }
 
   async delete(auth: AuthDto, id: string): Promise<void> {
@@ -261,28 +220,16 @@ export class AlbumService extends BaseService {
   }
 
   async addAssets(auth: AuthDto, id: string, dto: BulkIdsDto): Promise<BulkIdResponseDto[]> {
-    const album = await this.findOrFail(id, auth.user.id, { withAssets: false });
+    const album = await this.findOrFail(id, auth.user.id);
     await this.requireAccess({ auth, permission: Permission.AlbumAssetCreate, ids: [id] });
 
-    // Ordinary path: assets the caller owns / has AssetShare on land in `album_asset`.
     const results = await addAssets(
       auth,
       { access: this.accessRepository, bulk: this.albumRepository },
       { parentId: id, assetIds: dto.ids, permission: Permission.AssetShare },
     );
 
-    // #764 cross-owner contributions: assets denied above (not owned / no partner share) may still be
-    // added as space bookmarks when the album is space-linked and the caller is a space Editor of the
-    // space the asset is visible through. These go to `album_space_asset`, never `album_asset`, so the
-    // album owner never gains a permanent grant.
-    const contributedIds = await this.tryContributeDeniedAssets(auth, id, results);
-
-    // Only the caller's OWN newly-added assets (real `album_asset` rows) drive the thumbnail default
-    // and the face/sync event — a contribution is a bookmark with no `album_asset` row.
-    const ownedNewAssetIds = results
-      .filter(({ success, id: assetId }) => success && !contributedIds.has(assetId))
-      .map(({ id: assetId }) => assetId);
-    const firstNewAssetId = ownedNewAssetIds[0];
+    const { id: firstNewAssetId } = results.find(({ success }) => success) || {};
     if (firstNewAssetId) {
       await this.albumRepository.update(
         id,
@@ -297,71 +244,19 @@ export class AlbumService extends BaseService {
       const userIds = album.albumUsers.map(({ user }) => user.id);
       const recipientIds = userIds.filter((userId) => userId !== auth.user.id);
       await this.eventRepository.emit('AlbumUpdate', { id, userIds, recipientIds });
-
-      await this.eventRepository.emit('AlbumAssetsAdd', { albumId: id, assetIds: ownedNewAssetIds });
     }
+
+    await addAlbumAssetContributions(
+      {
+        event: this.eventRepository,
+        job: this.jobRepository,
+        sharedSpace: this.sharedSpaceRepository,
+        spaceAlbum: this.spaceAlbumRepository,
+      },
+      { auth, albumId: id, results },
+    );
 
     return results;
-  }
-
-  /**
-   * #764: upgrade `no_permission` results to cross-owner contributions where eligible. Mutates
-   * `results` in place (denied → success, or → duplicate if already contributed) and returns the set
-   * of asset ids that became contributions.
-   */
-  private async tryContributeDeniedAssets(
-    auth: AuthDto,
-    albumId: string,
-    results: BulkIdResponseDto[],
-  ): Promise<Set<string>> {
-    const contributedIds = new Set<string>();
-    const deniedIds = results
-      .filter(({ success, error }) => !success && error === BulkIdErrorReason.NO_PERMISSION)
-      .map(({ id }) => id);
-    if (deniedIds.length === 0) {
-      return contributedIds;
-    }
-
-    const [contributable, alreadyContributed] = await Promise.all([
-      this.sharedSpaceRepository.getContributableAssetSpaces(auth.user.id, albumId, deniedIds),
-      this.albumRepository.getContributedAssetIds(albumId, deniedIds),
-    ]);
-    const spaceByAsset = new Map(contributable.map(({ assetId, spaceId }) => [assetId, spaceId]));
-
-    const toInsert: { albumId: string; assetId: string; spaceId: string; addedById: string }[] = [];
-    for (const result of results) {
-      if (result.success || result.error !== BulkIdErrorReason.NO_PERMISSION) {
-        continue;
-      }
-      if (alreadyContributed.has(result.id)) {
-        result.error = BulkIdErrorReason.DUPLICATE;
-        continue;
-      }
-      const spaceId = spaceByAsset.get(result.id);
-      if (spaceId) {
-        toInsert.push({ albumId, assetId: result.id, spaceId, addedById: auth.user.id });
-        result.success = true;
-        delete result.error;
-        contributedIds.add(result.id);
-      }
-    }
-
-    if (toInsert.length > 0) {
-      await this.albumRepository.addContributedAssets(toInsert);
-      // D3 (#752 P1-7): a contribution's faces must reach space People without waiting for a coarse
-      // reconcile trigger — enqueue the targeted per-asset match, mirroring the space-pool add path
-      // (SharedSpaceService.addAssets). The handler re-guards on space + faceRecognitionEnabled.
-      const spaceIds = [...new Set(toInsert.map(({ spaceId }) => spaceId))];
-      const spaces = await Promise.all(spaceIds.map((spaceId) => this.sharedSpaceRepository.getById(spaceId)));
-      const faceEnabled = new Set(spaces.filter((space) => space?.faceRecognitionEnabled).map((space) => space!.id));
-      const jobs = toInsert
-        .filter(({ spaceId }) => faceEnabled.has(spaceId))
-        .map(({ spaceId, assetId }) => ({ name: JobName.SharedSpaceFaceMatch as const, data: { spaceId, assetId } }));
-      if (jobs.length > 0) {
-        await this.jobRepository.queueAll(jobs);
-      }
-    }
-    return contributedIds;
   }
 
   async addAssetsToAlbums(auth: AuthDto, dto: AlbumsAddAssetsDto): Promise<AlbumsAddAssetsResponseDto> {
@@ -381,20 +276,50 @@ export class AlbumService extends BaseService {
     }
 
     const allowedAssetIds = await this.checkAccess({ auth, permission: Permission.AssetShare, ids: dto.assetIds });
-    if (allowedAssetIds.size === 0) {
-      results.error = BulkIdErrorReason.NO_PERMISSION;
-      return results;
-    }
+    // #764 cross-owner contributions: assets without AssetShare may still land in a space-linked album
+    // as `album_space_asset` bookmarks, exactly as in the single-album `addAssets` path.
+    const deniedAssetIds = [...new Set(dto.assetIds).difference(allowedAssetIds)];
+    // Set once any asset is accepted somewhere (added, contributed, or already present), so a batch that
+    // only hit duplicates reports DUPLICATE rather than NO_PERMISSION.
+    let anyAccepted = allowedAssetIds.size > 0;
 
     const albumAssetValues: { albumId: string; assetId: string }[] = [];
     const events: { id: string; userIds: string[]; recipientIds: string[] }[] = [];
     for (const albumId of allowedAlbumIds) {
+      if (deniedAssetIds.length > 0) {
+        const presentIds = await this.albumRepository.getAssetIds(albumId, deniedAssetIds);
+        const attempts: BulkIdResponseDto[] = deniedAssetIds
+          .filter((assetId) => !presentIds.has(assetId))
+          .map((assetId) => ({ id: assetId, success: false, error: BulkIdErrorReason.NO_PERMISSION }));
+        const contributedIds = await tryContributeDeniedAssets(
+          {
+            event: this.eventRepository,
+            job: this.jobRepository,
+            sharedSpace: this.sharedSpaceRepository,
+            spaceAlbum: this.spaceAlbumRepository,
+          },
+          auth,
+          albumId,
+          attempts,
+        );
+        if (contributedIds.size > 0) {
+          results.error = undefined;
+          results.success = true;
+        }
+        if (presentIds.size > 0 || attempts.some(({ error }) => error !== BulkIdErrorReason.NO_PERMISSION)) {
+          anyAccepted = true;
+        }
+      }
+
+      if (allowedAssetIds.size === 0) {
+        continue;
+      }
       const existingAssetIds = await this.albumRepository.getAssetIds(albumId, [...allowedAssetIds]);
       const notPresentAssetIds = [...allowedAssetIds.difference(existingAssetIds)];
       if (notPresentAssetIds.length === 0) {
         continue;
       }
-      const album = await this.findOrFail(albumId, auth.user.id, { withAssets: false });
+      const album = await this.findOrFail(albumId, auth.user.id);
       results.error = undefined;
       results.success = true;
 
@@ -420,60 +345,27 @@ export class AlbumService extends BaseService {
       await this.eventRepository.emit('AlbumUpdate', event);
     }
 
-    // Best-effort space people sync: albumAssetValues already excludes assets present in the
-    // album (the notPresentAssetIds filter above), so in the normal path these are exactly the
-    // newly-inserted rows. A concurrent insert could make addAssetIdsToAlbums' onConflict-do-nothing
-    // skip one; the downstream SharedSpaceFaceMatch is idempotent and guards on isAssetInSpace, so a
-    // spurious id is harmless. We accept best-effort here rather than plumbing inserted ids back.
-    const addedByAlbum = new Map<string, string[]>();
-    for (const { albumId, assetId } of albumAssetValues) {
-      const ids = addedByAlbum.get(albumId);
-      if (ids) {
-        ids.push(assetId);
-      } else {
-        addedByAlbum.set(albumId, [assetId]);
-      }
-    }
-    for (const [albumId, assetIds] of addedByAlbum) {
-      await this.eventRepository.emit('AlbumAssetsAdd', { albumId, assetIds });
-    }
+    await emitAlbumAssetsAdd(this.eventRepository, albumAssetValues);
 
+    if (!results.success && !anyAccepted) {
+      results.error = BulkIdErrorReason.NO_PERMISSION;
+    }
     return results;
   }
 
   async removeAssets(auth: AuthDto, id: string, dto: BulkIdsDto): Promise<BulkIdResponseDto[]> {
-    // AlbumAssetDelete (#752) = album owner/editor OR space owner/editor of the linked space; a space
-    // Viewer or non-member is refused here (403) before any row is touched — the remove RBAC gate.
     await this.requireAccess({ auth, permission: Permission.AlbumAssetDelete, ids: [id] });
 
-    const album = await this.findOrFail(id, auth.user.id, { withAssets: false });
+    const album = await this.findOrFail(id, auth.user.id);
     const results = await removeAssets(
       auth,
       { access: this.accessRepository, bulk: this.albumRepository },
       { parentId: id, assetIds: dto.ids, canAlwaysRemove: Permission.AlbumDelete },
     );
-    const albumAssetRemovedIds = results.filter(({ success }) => success).map(({ id }) => id);
-
-    // #764: a contribution is never in `album_asset`, so the util reports it NOT_FOUND. The caller
-    // already passed AlbumAssetDelete above, so removing it (deleting the `album_space_asset` row) is
-    // authorized. The underlying asset is untouched.
-    const notFoundIds = results
-      .filter(({ success, error }) => !success && error === BulkIdErrorReason.NOT_FOUND)
-      .map(({ id: assetId }) => assetId);
-    if (notFoundIds.length > 0) {
-      const contributed = await this.albumRepository.getContributedAssetIds(id, notFoundIds);
-      if (contributed.size > 0) {
-        await this.albumRepository.removeContributedAssetIds(id, [...contributed]);
-        for (const result of results) {
-          if (!contributed.has(result.id)) {
-            continue;
-          }
-
-          result.success = true;
-          delete result.error;
-        }
-      }
-    }
+    await removeAlbumAssetContributions(
+      { event: this.eventRepository, spaceAlbum: this.spaceAlbumRepository },
+      { albumId: id, results },
+    );
 
     const removedIds = results.filter(({ success }) => success).map(({ id }) => id);
     if (removedIds.length > 0) {
@@ -487,10 +379,6 @@ export class AlbumService extends BaseService {
         recipientIds: [],
       });
     }
-    // Face/sync cleanup only applies to real album_asset rows, not contributions.
-    if (albumAssetRemovedIds.length > 0) {
-      await this.eventRepository.emit('AlbumAssetsRemove', { albumId: id, assetIds: albumAssetRemovedIds });
-    }
 
     return results;
   }
@@ -498,7 +386,7 @@ export class AlbumService extends BaseService {
   async addUsers(auth: AuthDto, id: string, { albumUsers }: AddUsersDto): Promise<AlbumResponseDto> {
     await this.requireAccess({ auth, permission: Permission.AlbumShare, ids: [id] });
 
-    const album = await this.findOrFail(id, auth.user.id, { withAssets: false });
+    const album = await this.findOrFail(id, auth.user.id);
 
     for (const { userId, role } of albumUsers) {
       if (role === AlbumUserRole.Owner) {
@@ -520,7 +408,7 @@ export class AlbumService extends BaseService {
       await this.eventRepository.emit('AlbumInvite', { id, userId, senderName: auth.user.name });
     }
 
-    return mapAlbum(await this.findOrFail(id, auth.user.id, { withAssets: true }));
+    return this.mapWithMetadata(await this.findOrFail(id, auth.user.id), auth);
   }
 
   async removeUser(auth: AuthDto, id: string, userId: string | 'me'): Promise<void> {
@@ -528,7 +416,7 @@ export class AlbumService extends BaseService {
       userId = auth.user.id;
     }
 
-    const album = await this.findOrFail(id, auth.user.id, { withAssets: false });
+    const album = await this.findOrFail(id, auth.user.id);
 
     const exists = album.albumUsers.find(({ user: { id } }) => id === userId);
     if (!exists) {
@@ -553,7 +441,7 @@ export class AlbumService extends BaseService {
   async updateUser(auth: AuthDto, id: string, userId: string, dto: UpdateAlbumUserDto): Promise<void> {
     await this.requireAccess({ auth, permission: Permission.AlbumShare, ids: [id] });
 
-    const album = await this.findOrFail(id, userId, { withAssets: false });
+    const album = await this.findOrFail(id, userId);
     const owner = album.albumUsers[0];
 
     if (owner.user.id === userId) {
@@ -563,7 +451,12 @@ export class AlbumService extends BaseService {
     await this.albumUserRepository.update({ albumId: id, userId }, { role: dto.role });
   }
 
-  private findOrFail(id: string, authUserId: string, options: AlbumInfoOptions) {
-    return findOrFail(() => this.albumRepository.getById(id, options, authUserId), 'Album');
+  private findOrFail(id: string, authUserId: string) {
+    return findOrFail(() => this.albumRepository.getById(id, authUserId), 'Album');
+  }
+
+  private async mapWithMetadata(album: MapAlbumDto, auth: AuthDto): Promise<AlbumResponseDto> {
+    const [metadata] = await this.albumRepository.getMetadataForIds([album.id], albumMetadataScope(auth));
+    return { ...mapAlbum(album, { auth }), ...mapAlbumMetadata(metadata) };
   }
 }

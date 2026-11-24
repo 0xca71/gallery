@@ -4,6 +4,7 @@ import 'package:fluttertoast/fluttertoast.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:immich_mobile/domain/models/person.model.dart';
 import 'package:immich_mobile/extensions/build_context_extensions.dart';
+import 'package:immich_mobile/extensions/datetime_extensions.dart';
 import 'package:immich_mobile/generated/translations.g.dart';
 import 'package:immich_mobile/providers/infrastructure/people.provider.dart';
 import 'package:immich_mobile/utils/debug_print.dart';
@@ -65,7 +66,7 @@ class _PersonBirthdayEditFormState extends ConsumerState<PersonBirthdayEditForm>
         child: ClipRRect(
           borderRadius: const BorderRadius.all(Radius.circular(16.0)),
           child: ScrollDatePicker(
-            viewType: datePickerColumnOrder(DateFormat.yMd(context.locale.toLanguageTag()).pattern),
+            viewType: datePickerColumnOrder(DateFormat.yMd(resolvedDateTimeLocale()).pattern),
             options: DatePickerOptions(
               backgroundColor: context.colorScheme.surfaceContainerHigh,
               itemExtent: 50,

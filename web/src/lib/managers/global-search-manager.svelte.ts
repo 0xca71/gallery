@@ -2,6 +2,46 @@
 // Upstream's own search UI is carried dormant alongside it (present, verbatim, never mounted):
 // see web/src/lib/components/shared-components/search-bar/DORMANT.md before touching either.
 // Do not import `$lib/managers/search-manager.svelte` — that is upstream's dormant manager.
+import { createFilterState, type FilterState } from '#lib/components/filter-panel/filter-panel.ts';
+import {
+  SEARCH_MODES,
+  buildFullPathSearchTerms,
+  buildFullPathSearchUrl,
+  parsePaletteDraft,
+  parsePaletteScope,
+  type PaletteSearchMode,
+} from '#lib/gallery/search/full-path-search.ts';
+import { authManager } from '#lib/managers/auth-manager.svelte.ts';
+import { featureFlagsManager } from '#lib/managers/feature-flags-manager.svelte.ts';
+import { Route } from '#lib/route.ts';
+import { addEntry, getEntries, makePlaceId, removeEntry, type RecentEntry } from '#lib/stores/cmdk-recent.ts';
+import { getPhotosPersonFilterId, type PhotosPersonFilterReference } from '#lib/utils/photos-filter-options.ts';
+import {
+  buildSearchablePageUrl,
+  getSearchablePageBasePath,
+  getSearchablePageState,
+  type SearchablePageSortOrder,
+} from '#lib/utils/searchable-page-search.ts';
+import {
+  isLiveTypedSearchToken,
+  liveTypedSearchChoiceValue,
+  resolveLiveTypedSearchSuggestions,
+  type LiveTypedSearchChoice,
+  type LiveTypedSearchStatus,
+  type LiveTypedSearchToken,
+} from '#lib/utils/typed-search/typed-search-live-suggestions.ts';
+import { getTypedSearchDisplayText, storeTypedSearchNames } from '#lib/utils/typed-search/typed-search-name-cache.ts';
+import {
+  getActiveTypedSearchToken,
+  getTypedSearchTokenIdentity,
+  parseTypedSearch,
+  rewriteTypedSearchToken,
+  type TypedSearchDisplayToken,
+  type TypedSearchIssue,
+  type TypedSearchParseResult,
+  type TypedSearchTokenSpan,
+} from '#lib/utils/typed-search/typed-search-parser.ts';
+import { resolveTypedSearchFilters, type TypedSearchChoice } from '#lib/utils/typed-search/typed-search-resolver.ts';
 import {
   AssetVisibility,
   getAlbumInfo,
@@ -27,48 +67,18 @@ import { computeCommandScore } from 'bits-ui';
 import { locale as i18nLocale, t, type Translations } from 'svelte-i18n';
 import { SvelteMap, SvelteSet } from 'svelte/reactivity';
 import { get } from 'svelte/store';
-import { browser } from '$app/environment';
+import { browser } from '$app/env';
 import { goto } from '$app/navigation';
 import { page } from '$app/state';
-import type { FilterState } from '$lib/components/filter-panel/filter-panel';
-import { createFilterState } from '$lib/components/filter-panel/filter-panel';
-import { authManager } from '$lib/managers/auth-manager.svelte';
-import { featureFlagsManager } from '$lib/managers/feature-flags-manager.svelte';
-import { Route } from '$lib/route';
-import { addEntry, getEntries, makePlaceId, removeEntry, type RecentEntry } from '$lib/stores/cmdk-recent';
-import { getPhotosPersonFilterId, type PhotosPersonFilterReference } from '$lib/utils/photos-filter-options';
-import {
-  buildSearchablePageUrl,
-  getSearchablePageBasePath,
-  getSearchablePageState,
-  type SearchablePageSortOrder,
-} from '$lib/utils/searchable-page-search';
-import {
-  isLiveTypedSearchToken,
-  liveTypedSearchChoiceValue,
-  resolveLiveTypedSearchSuggestions,
-  type LiveTypedSearchChoice,
-  type LiveTypedSearchStatus,
-  type LiveTypedSearchToken,
-} from '$lib/utils/typed-search/typed-search-live-suggestions';
-import { getTypedSearchDisplayText, storeTypedSearchNames } from '$lib/utils/typed-search/typed-search-name-cache';
-import {
-  getActiveTypedSearchToken,
-  getTypedSearchTokenIdentity,
-  parseTypedSearch,
-  rewriteTypedSearchToken,
-  type TypedSearchDisplayToken,
-  type TypedSearchIssue,
-  type TypedSearchParseResult,
-  type TypedSearchTokenSpan,
-} from '$lib/utils/typed-search/typed-search-parser';
-import { resolveTypedSearchFilters, type TypedSearchChoice } from '$lib/utils/typed-search/typed-search-resolver';
-import { parseScope, personSuggestionsComparator, type ParsedQuery, type Scope } from './cmdk-prefix';
+import { personSuggestionsComparator, type ParsedQuery, type Scope } from './cmdk-prefix';
 import { commandContextManager } from './command-context-manager.svelte';
 import { COMMAND_ITEMS, isAlmostExactCommandMatch, type CommandItem } from './command-items';
-import { isAlmostExactNavMatch, NAVIGATION_ITEMS, type NavigationItem } from './navigation-items';
+import { NAVIGATION_ITEMS, isAlmostExactNavMatch, type NavigationItem } from './navigation-items';
 
-export type SearchMode = 'smart' | 'metadata' | 'description' | 'ocr';
+// SvelteKit 3's page.url is read-only; the URL helpers take a URL. This is a throwaway copy, not reactive state.
+const currentPageUrl = () => new URL(page.url.href);
+
+export type SearchMode = PaletteSearchMode;
 export type SearchPresentation = 'modal' | 'dropdown';
 
 export type ProviderStatus<T = unknown> =
@@ -80,13 +90,13 @@ export type ProviderStatus<T = unknown> =
   | { status: 'empty' };
 
 /**
- * Common shape for entity section items. Each entity DTO (photo / person / place /
- * tag) satisfies this structurally — photos/people/tags have `id`, places have
- * `latitude`/`longitude`. Using this as the Sections generic argument matches the
- * shape `GlobalSearchSection` expects and keeps svelte-check happy; plain
- * `ProviderStatus` (default generic `unknown`) would not satisfy the component's
- * `T extends { id?; latitude?; longitude? }` constraint.
- */
+Common shape for entity section items. Each entity DTO (photo / person / place /
+tag) satisfies this structurally — photos/people/tags have `id`, places have
+`latitude`/`longitude`. Using this as the Sections generic argument matches the
+shape `GlobalSearchSection` expects and keeps svelte-check happy; plain
+`ProviderStatus` (default generic `unknown`) would not satisfy the component's
+`T extends { id?; latitude?; longitude? }` constraint.
+*/
 export type EntityItem = {
   id?: string;
   latitude?: number;
@@ -139,8 +149,9 @@ function selectedChoiceFromLiveChoice(
 }
 
 type TopSearchMatch = { id: 'top-search'; query: string; rawQuery: string };
+type SearchBelowTopMatch = { id: 'top-search-below'; query: string; rawQuery: string };
 
-const VALID_MODES: ReadonlySet<SearchMode> = new Set(['smart', 'metadata', 'description', 'ocr']);
+const VALID_MODES: ReadonlySet<SearchMode> = new Set(SEARCH_MODES);
 // Slice size for the albums section. Kept as a named constant so the buildProviders
 // `topN: 5` and the runAlbums slice cannot drift apart silently.
 const ALBUMS_TOP_N = 5;
@@ -159,10 +170,10 @@ const idle = Object.freeze({ status: 'idle' as const });
 const tagCacheTooLarge = Object.freeze({ status: 'error' as const, message: 'tag_cache_too_large' });
 
 /**
- * Drop `id -> ''` pairs before they reach the typed-search name cache. `active-filters-bar` falls
- * back to rendering the raw id only for a *missing* entry, so caching an empty string renders a
- * blank chip instead.
- */
+Drop `id -> ''` pairs before they reach the typed-search name cache. `active-filters-bar` falls
+back to rendering the raw id only for a *missing* entry, so caching an empty string renders a
+blank chip instead.
+*/
 function withoutEmptyLabels(names?: Map<string, string>): Map<string, string> {
   // Ephemeral map, serialized into sessionStorage by storeTypedSearchNames; nothing reads it
   // reactively, so a plain Map is correct here.
@@ -170,19 +181,19 @@ function withoutEmptyLabels(names?: Map<string, string>): Map<string, string> {
 }
 
 /**
- * The space id of the current page when that page is a space *timeline* (`/spaces/<id>` or
- * `/spaces/<id>/photos`), and only then.
- *
- * Deliberately not a `pathname.startsWith('/spaces/')` test, and not a bare
- * `getSearchablePageBasePath(...).startsWith('/spaces/')` one either: `/spaces/<id>/albums/<aid>`
- * IS a searchable page under `/spaces/`, but it is album-scoped, not space-scoped. Its filter panel
- * speaks the same prefixed person tokens `/photos` does (`person:` / `space-person:`), never the
- * bare space profile id a space timeline forwards as `spacePersonIds`. Handing it a bare id yields
- * a silently empty timeline — the server reads it as a legacy person id the viewer does not own.
- *
- * Hence the segment count: a space timeline base path is `/spaces/<id>` (2) or
- * `/spaces/<id>/photos` (3); anything deeper is a sub-surface with its own scope.
- */
+The space id of the current page when that page is a space *timeline* (`/spaces/<id>` or
+`/spaces/<id>/photos`), and only then.
+
+Deliberately not a `pathname.startsWith('/spaces/')` test, and not a bare
+`getSearchablePageBasePath(...).startsWith('/spaces/')` one either: `/spaces/<id>/albums/<aid>`
+IS a searchable page under `/spaces/`, but it is album-scoped, not space-scoped. Its filter panel
+speaks the same prefixed person tokens `/photos` does (`person:` / `space-person:`), never the
+bare space profile id a space timeline forwards as `spacePersonIds`. Handing it a bare id yields
+a silently empty timeline — the server reads it as a legacy person id the viewer does not own.
+
+Hence the segment count: a space timeline base path is `/spaces/<id>` (2) or
+`/spaces/<id>/photos` (3); anything deeper is a sub-surface with its own scope.
+*/
 function getCurrentSpaceTimelineId(pathname: string): string | undefined {
   const base = getSearchablePageBasePath(pathname);
   if (!base?.startsWith('/spaces/')) {
@@ -315,7 +326,7 @@ export class GlobalSearchManager {
   query = $state('');
   searchSortOrder = $state<SearchablePageSortOrder>('relevance');
   mode = $state<SearchMode>(loadSearchQueryType());
-  parsedQuery = $derived<ParsedQuery>(parseScope(this.query));
+  parsedQuery = $derived<ParsedQuery>(parsePaletteScope(this.query, this.mode));
   scope = $derived<Scope>(this.parsedQuery.scope);
   payload = $derived<string>(this.parsedQuery.payload);
   typedSearchDisplayTokens = $state<TypedSearchDisplayToken[]>([]);
@@ -342,53 +353,53 @@ export class GlobalSearchManager {
   activeItemId = $state<string | null>(null);
   mlHealthy = $state(true);
   /**
-   * Monotonic counter bumped on every mid-session mutation of the cmdk-recent
-   * store (e.g. `removeRecent`). The component's `recentEntries` $derived reads
-   * it so deleting a highlighted entry re-evaluates the derived in the same
-   * tick — without it, the DOM would show the deleted row until the palette
-   * closed and reopened. The counter value itself is not meaningful; its role
-   * is purely to register a reactive dependency on mutations the cmdk-recent
-   * store cannot signal on its own (plain functions, not a Svelte store).
-   */
+  Monotonic counter bumped on every mid-session mutation of the cmdk-recent
+  store (e.g. `removeRecent`). The component's `recentEntries` $derived reads
+  it so deleting a highlighted entry re-evaluates the derived in the same
+  tick — without it, the DOM would show the deleted row until the palette
+  closed and reopened. The counter value itself is not meaningful; its role
+  is purely to register a reactive dependency on mutations the cmdk-recent
+  store cannot signal on its own (plain functions, not a Svelte store).
+  */
   recentsRevision = $state(0);
   /**
-   * True while any provider in the current batch (or a mode-switch re-run) is in flight.
-   * Drives the progress stripe on the palette header.
-   */
+  True while any provider in the current batch (or a mode-switch re-run) is in flight.
+  Drives the progress stripe on the palette header.
+  */
   batchInFlight = $state(false);
   /**
-   * Set of row ids whose activation is currently in flight. Prevents double-Enter on
-   * the same row while an async activation handler (e.g. album/space navigate) is
-   * still resolving. Entries added at activation start and removed when the handler
-   * settles (or the palette closes).
-   */
+  Set of row ids whose activation is currently in flight. Prevents double-Enter on
+  the same row while an async activation handler (e.g. album/space navigate) is
+  still resolving. Entries added at activation start and removed when the handler
+  settles (or the palette closes).
+  */
   activationInFlight: SvelteSet<string> = $state(new SvelteSet());
   /**
-   * Per-command single-flight guard. Independent of `activationInFlight` (which
-   * tracks entity row activations). Prevents a rapid double-Enter from firing
-   * Upload's file picker twice or opening two Create-Album modals.
-   *
-   * Plain `Set` (not `SvelteSet`) because no UI subscribes to this — it's read
-   * only inside `activate('command')` for the synchronous has/add check.
-   */
+  Per-command single-flight guard. Independent of `activationInFlight` (which
+  tracks entity row activations). Prevents a rapid double-Enter from firing
+  Upload's file picker twice or opening two Create-Album modals.
+  
+  Plain `Set` (not `SvelteSet`) because no UI subscribes to this — it's read
+  only inside `activate('command')` for the synchronous has/add check.
+  */
   // eslint-disable-next-line svelte/prefer-svelte-reactivity
   private commandInFlight: Set<string> = new Set();
 
   private clearQueryOnNextModalOpen = false;
   /**
-   * Id of the row currently showing the 200 ms "pending" affordance (subtle spinner
-   * on the row) while its activation handler is resolving. Null when no activation is
-   * pending. Separate from `activationInFlight` because the affordance is delayed —
-   * only shown when the handler takes longer than 200 ms — while the double-Enter
-   * guard is immediate.
-   */
+  Id of the row currently showing the 200 ms "pending" affordance (subtle spinner
+  on the row) while its activation handler is resolving. Null when no activation is
+  pending. Separate from `activationInFlight` because the affordance is delayed —
+  only shown when the handler takes longer than 200 ms — while the double-Enter
+  guard is immediate.
+  */
   pendingActivation: string | null = $state(null);
   /**
-   * Id of the command currently awaiting second-Enter confirmation (v1.4 destructive
-   * commands). Null otherwise. Cleared by `cancelConfirm` (query change, selection
-   * change, Escape, palette close, 3s timeout) or by the second Enter that fires the
-   * command.
-   */
+  Id of the command currently awaiting second-Enter confirmation (v1.4 destructive
+  commands). Null otherwise. Cleared by `cancelConfirm` (query change, selection
+  change, Escape, palette close, 3s timeout) or by the second Enter that fires the
+  command.
+  */
   pendingConfirmId: string | null = $state(null);
   private confirmTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -400,26 +411,26 @@ export class GlobalSearchManager {
   private liveTypedSearchController: AbortController | null = null;
   private liveTypedSearchRequestId = 0;
   /**
-   * Aborted on `close()`, replaced with a fresh controller on `open()`. Scoped to the
-   * open-session lifetime — activation-dispatch and catalog fetches (later tasks) bind
-   * to `closeSignal` so closing the palette cancels their long-lived work without
-   * disrupting the per-keystroke `batchController` fan-out.
-   */
+  Aborted on `close()`, replaced with a fresh controller on `open()`. Scoped to the
+  open-session lifetime — activation-dispatch and catalog fetches (later tasks) bind
+  to `closeSignal` so closing the palette cancels their long-lived work without
+  disrupting the per-keystroke `batchController` fan-out.
+  */
   private closeController = new AbortController();
   get closeSignal() {
     return this.closeController.signal;
   }
   /**
-   * Count of providers currently in flight. runBatch resets this at entry so a stale
-   * batch's decrements cannot corrupt the new batch's bookkeeping (onSettle checks
-   * `batch !== this.batchController` before decrementing — see the stale-batch guard).
-   */
+  Count of providers currently in flight. runBatch resets this at entry so a stale
+  batch's decrements cannot corrupt the new batch's bookkeeping (onSettle checks
+  `batch !== this.batchController` before decrementing — see the stale-batch guard).
+  */
   private inFlightCounter = 0;
   /**
-   * When the current batchInFlight window started (performance.now()). Set by runBatch
-   * at debounce-fire time, not setQuery time — the debounce would eat most of the
-   * component-side 200ms grace window otherwise.
-   */
+  When the current batchInFlight window started (performance.now()). Set by runBatch
+  at debounce-fire time, not setQuery time — the debounce would eat most of the
+  component-side 200ms grace window otherwise.
+  */
   private _batchInFlightStartedAt = 0;
   get batchInFlightStartedAt() {
     return this._batchInFlightStartedAt;
@@ -433,11 +444,11 @@ export class GlobalSearchManager {
   private searchablePageFiltersProvider?: () => FilterState | undefined;
 
   /**
-   * Catalogs fetched lazily on first provider run and shared for the remainder of the
-   * open session. Bound to `closeSignal` so closing the palette cancels in-flight work;
-   * the promise fields are reset on `open()` so a prior rejected fetch does not
-   * short-circuit the next session's retry.
-   */
+  Catalogs fetched lazily on first provider run and shared for the remainder of the
+  open session. Bound to `closeSignal` so closing the palette cancels in-flight work;
+  the promise fields are reset on `open()` so a prior rejected fetch does not
+  short-circuit the next session's retry.
+  */
   albumsCache: AlbumNameDto[] | undefined = $state(undefined);
   spacesCache: SharedSpaceResponseDto[] | undefined = $state(undefined);
   peopleSuggestionsCache: PersonResponseDto[] | undefined = $state(undefined);
@@ -446,19 +457,19 @@ export class GlobalSearchManager {
   private peoplePromise: Promise<void> | undefined;
 
   /**
-   * Locale-keyed memo cache for navigation item search strings.
-   * Keys: locale code (e.g. 'en'). Values: Map<navItemId, searchableString> where
-   * searchableString is `${label} ${description}`. Rebuilt on locale change.
-   */
+  Locale-keyed memo cache for navigation item search strings.
+  Keys: locale code (e.g. 'en'). Values: Map<navItemId, searchableString> where
+  searchableString is `${label} ${description}`. Rebuilt on locale change.
+  */
   // SvelteMap used per the svelte/prefer-svelte-reactivity lint rule. This is a
   // non-reactive memoization cache — the reactivity machinery isn't needed here, but
   // using the Svelte-aware type keeps the rule happy and has negligible overhead.
   private navigationSearchCache: SvelteMap<string, SvelteMap<string, string>> = new SvelteMap();
   /**
-   * Locale-keyed memo cache for command item search strings. Mirrors
-   * `navigationSearchCache` — rebuilt on locale change, invalidated via the
-   * locale subscribe in the constructor.
-   */
+  Locale-keyed memo cache for command item search strings. Mirrors
+  `navigationSearchCache` — rebuilt on locale change, invalidated via the
+  locale subscribe in the constructor.
+  */
   private commandSearchCache: SvelteMap<string, SvelteMap<string, string>> = new SvelteMap();
   private localeUnsubscribe?: () => void;
 
@@ -492,10 +503,10 @@ export class GlobalSearchManager {
   }
 
   /**
-   * Build or fetch the memoized search-string table for the current locale. Called
-   * synchronously from runNavigationProvider. O(1) cache hit; O(NAVIGATION_ITEMS.length)
-   * rebuild on locale change or first call.
-   */
+  Build or fetch the memoized search-string table for the current locale. Called
+  synchronously from runNavigationProvider. O(1) cache hit; O(NAVIGATION_ITEMS.length)
+  rebuild on locale change or first call.
+  */
   private getNavigationSearchStrings(): SvelteMap<string, string> {
     const currentLocale = (get(i18nLocale) ?? 'en') as string;
     const cached = this.navigationSearchCache.get(currentLocale);
@@ -517,10 +528,10 @@ export class GlobalSearchManager {
   }
 
   /**
-   * Build or fetch the memoized search-string table for command items in the
-   * current locale. Mirrors `getNavigationSearchStrings` — O(1) cache hit,
-   * O(COMMAND_ITEMS.length) rebuild on locale change or first call.
-   */
+  Build or fetch the memoized search-string table for command items in the
+  current locale. Mirrors `getNavigationSearchStrings` — O(1) cache hit,
+  O(COMMAND_ITEMS.length) rebuild on locale change or first call.
+  */
   private getCommandSearchStrings(): SvelteMap<string, string> {
     const currentLocale = (get(i18nLocale) ?? 'en') as string;
     const cached = this.commandSearchCache.get(currentLocale);
@@ -539,23 +550,23 @@ export class GlobalSearchManager {
   }
 
   /**
-   * Shared admin/feature-flag filter + fuzzy-score pass for navigation AND command items.
-   * Two thin wrappers (`runNavigationProvider` / `runCommandsProvider`) slice the result
-   * into their respective sections. Keeps the scoring pass and the scope semantics in a
-   * single place so the two providers cannot drift.
-   *
-   * Scope semantics (identical for both output arrays):
-   *   - 'people' | 'tags' | 'collections' — both arrays empty.
-   *   - 'all' + empty payload — both arrays empty (no results on bare palette).
-   *   - 'nav' + empty payload — bare `>`: return ALL eligible items sorted alphabetically
-   *     by translated label (no slice, no scoring).
-   *   - 'all' or 'nav' + non-empty payload — fuzzy search payload over eligible items.
-   */
+  Shared admin/feature-flag filter + fuzzy-score pass for navigation AND command items.
+  Two thin wrappers (`runNavigationProvider` / `runCommandsProvider`) slice the result
+  into their respective sections. Keeps the scoring pass and the scope semantics in a
+  single place so the two providers cannot drift.
+  
+  Scope semantics (identical for both output arrays):
+    - 'people' | 'tags' | 'collections' — both arrays empty.
+    - 'all' + empty payload — both arrays empty (no results on bare palette).
+    - 'nav' + empty payload — bare `>`: return ALL eligible items sorted alphabetically
+      by translated label (no slice, no scoring).
+    - 'all' or 'nav' + non-empty payload — fuzzy search payload over eligible items.
+  */
   private filterNavAndCommands(
     payload: string,
     scope: Scope,
   ): { commands: CommandItem[]; navigation: NavigationItem[] } {
-    if (scope !== 'all' && scope !== 'nav') {
+    if (this.mode === 'fullPath' || (scope !== 'all' && scope !== 'nav')) {
       return { commands: [], navigation: [] };
     }
     if (scope === 'all' && payload === '') {
@@ -571,7 +582,7 @@ export class GlobalSearchManager {
       if (item.adminOnly && !isAdmin) {
         continue;
       }
-      const itemFlagEnabled = item.featureFlag ? flags?.[item.featureFlag] : true;
+      const itemFlagEnabled = !item.featureFlag || flags?.[item.featureFlag];
       if (!itemFlagEnabled) {
         continue;
       }
@@ -584,7 +595,7 @@ export class GlobalSearchManager {
       if (item.adminOnly && !isAdmin) {
         continue;
       }
-      const itemFlagEnabled = item.featureFlag ? flags?.[item.featureFlag] : true;
+      const itemFlagEnabled = !item.featureFlag || flags?.[item.featureFlag];
       if (!itemFlagEnabled) {
         continue;
       }
@@ -652,10 +663,10 @@ export class GlobalSearchManager {
   }
 
   /**
-   * Synchronously filter NAVIGATION_ITEMS for a payload under a given scope. Thin wrapper
-   * around `filterNavAndCommands` that slices the navigation array to `providers.navigation.topN`.
-   * Runs on every keystroke off the main path — bypasses the 150 ms debounce.
-   */
+  Synchronously filter NAVIGATION_ITEMS for a payload under a given scope. Thin wrapper
+  around `filterNavAndCommands` that slices the navigation array to `providers.navigation.topN`.
+  Runs on every keystroke off the main path — bypasses the 150 ms debounce.
+  */
   private runNavigationProvider(payload: string, scope: Scope): ProviderStatus<NavigationItem> {
     const { navigation } = this.filterNavAndCommands(payload, scope);
     if (navigation.length === 0) {
@@ -672,11 +683,11 @@ export class GlobalSearchManager {
   }
 
   /**
-   * Synchronously filter COMMAND_ITEMS for a payload under a given scope. Thin wrapper
-   * around `filterNavAndCommands` that slices to `providers.commands.topN` and omits
-   * any command that has already been promoted to the top-result slot so the row does
-   * not render in both places (same dedup the component applies for nav).
-   */
+  Synchronously filter COMMAND_ITEMS for a payload under a given scope. Thin wrapper
+  around `filterNavAndCommands` that slices to `providers.commands.topN` and omits
+  any command that has already been promoted to the top-result slot so the row does
+  not render in both places (same dedup the component applies for nav).
+  */
   private runCommandsProvider(
     payload: string,
     scope: Scope,
@@ -700,7 +711,7 @@ export class GlobalSearchManager {
   open(presentation: SearchPresentation = 'modal') {
     this.isOpen = true;
     this.presentation = presentation;
-    const currentPageSearchState = getSearchablePageState(page.url);
+    const currentPageSearchState = getSearchablePageState(currentPageUrl());
     const typedDisplayText = currentPageSearchState.isSearchable
       ? getTypedSearchDisplayText(page.url.pathname + page.url.search)
       : undefined;
@@ -742,30 +753,30 @@ export class GlobalSearchManager {
   }
 
   /**
-   * Re-check the photo rows in RECENT against the server and drop the ones it no longer
-   * hands back. Recents live in localStorage and carry the filename, so without this a
-   * photo that has since moved into the locked folder (or been deleted) keeps its
-   * filename on the palette's cold surface until the user removes the row by hand
-   * (#869). The thumbnail already 400s, so the row rendered as a blank tile with a
-   * readable name.
-   *
-   * Two things drop a row:
-   *
-   *  - The server refuses it. 400/403/404 mirror `activateAlbum`'s stale-entry branch —
-   *    Gallery's `requireAccess` answers 400 (BadRequestException) for both "row missing"
-   *    and "no access", so it sits alongside the canonical 404/403. This is the deleted-
-   *    asset and lapsed-PIN case.
-   *  - It resolves but sits in the locked folder. Moving a photo there requires an
-   *    elevated session (`asset.service.ts` `requireElevatedPermission`), so the caller
-   *    can still resolve it for the rest of the PIN window — a refusal-only check would
-   *    leave the row up for 15+ minutes right after the user locked it. Gating on the
-   *    visibility instead also matches the palette's searches, which pin Timeline, so a
-   *    locked photo is not reachable from the palette by any route.
-   *
-   * A network failure leaves history intact rather than erasing it on a dropped
-   * connection, and an abort (palette closed mid-flight) is a no-op because the next open
-   * re-runs the check.
-   */
+  Re-check the photo rows in RECENT against the server and drop the ones it no longer
+  hands back. Recents live in localStorage and carry the filename, so without this a
+  photo that has since moved into the locked folder (or been deleted) keeps its
+  filename on the palette's cold surface until the user removes the row by hand
+  (#869). The thumbnail already 400s, so the row rendered as a blank tile with a
+  readable name.
+  
+  Two things drop a row:
+  
+   - The server refuses it. 400/403/404 mirror `activateAlbum`'s stale-entry branch —
+     Gallery's `requireAccess` answers 400 (BadRequestException) for both "row missing"
+     and "no access", so it sits alongside the canonical 404/403. This is the deleted-
+     asset and lapsed-PIN case.
+   - It resolves but sits in the locked folder. Moving a photo there requires an
+     elevated session (`asset.service.ts` `requireElevatedPermission`), so the caller
+     can still resolve it for the rest of the PIN window — a refusal-only check would
+     leave the row up for 15+ minutes right after the user locked it. Gating on the
+     visibility instead also matches the palette's searches, which pin Timeline, so a
+     locked photo is not reachable from the palette by any route.
+  
+  A network failure leaves history intact rather than erasing it on a dropped
+  connection, and an abort (palette closed mid-flight) is a no-op because the next open
+  re-runs the check.
+  */
   async validatePhotoRecents() {
     const photos = getEntries().filter(
       (entry): entry is Extract<RecentEntry, { kind: 'photo' }> => entry.kind === 'photo',
@@ -811,10 +822,10 @@ export class GlobalSearchManager {
   }
 
   /**
-   * Fetch (and memoize) the albums catalog for the current open session. Callers
-   * should `await` this before scoring so the cache is populated. Safe to call
-   * concurrently — all callers join the same in-flight promise.
-   */
+  Fetch (and memoize) the albums catalog for the current open session. Callers
+  should `await` this before scoring so the cache is populated. Safe to call
+  concurrently — all callers join the same in-flight promise.
+  */
   async ensureAlbumsCache(): Promise<void> {
     if (this.albumsCache !== undefined) {
       return;
@@ -826,12 +837,12 @@ export class GlobalSearchManager {
   }
 
   /**
-   * Fetch `GET /albums/names` and dedupe the concatenated owned+shared response by
-   * album id, preferring the `shared: true` record when both variants are present.
-   * On AbortError (palette closed mid-fetch) the section status stays untouched so
-   * reopening the palette is a clean slate; other errors flip the section to
-   * `'error'` and rethrow so the caller sees the failure.
-   */
+  Fetch `GET /albums/names` and dedupe the concatenated owned+shared response by
+  album id, preferring the `shared: true` record when both variants are present.
+  On AbortError (palette closed mid-fetch) the section status stays untouched so
+  reopening the palette is a clean slate; other errors flip the section to
+  `'error'` and rethrow so the caller sees the failure.
+  */
   private async fetchAlbumsCatalog(): Promise<void> {
     try {
       const response = await getAlbumNames({ signal: this.closeSignal });
@@ -857,9 +868,9 @@ export class GlobalSearchManager {
   }
 
   /**
-   * Fetch (and memoize) the shared-spaces catalog for the current open session.
-   * Mirrors `ensureAlbumsCache()` — callers join a shared in-flight promise.
-   */
+  Fetch (and memoize) the shared-spaces catalog for the current open session.
+  Mirrors `ensureAlbumsCache()` — callers join a shared in-flight promise.
+  */
   async ensureSpacesCache(): Promise<void> {
     if (this.spacesCache !== undefined) {
       return;
@@ -883,10 +894,10 @@ export class GlobalSearchManager {
   }
 
   /**
-   * Fetch (and memoize) the bare-`@` suggestions list for the current open session.
-   * Mirrors `ensureAlbumsCache()` / `ensureSpacesCache()` — callers join a shared
-   * in-flight promise so rapid retype cycles never start a second fetch.
-   */
+  Fetch (and memoize) the bare-`@` suggestions list for the current open session.
+  Mirrors `ensureAlbumsCache()` / `ensureSpacesCache()` — callers join a shared
+  in-flight promise so rapid retype cycles never start a second fetch.
+  */
   async ensurePeopleSuggestionsCache(): Promise<void> {
     if (this.peopleSuggestionsCache !== undefined) {
       return;
@@ -941,26 +952,26 @@ export class GlobalSearchManager {
   }
 
   /**
-   * Resolve an album id through the SDK, write a fresh RECENT entry, and navigate.
-   * All guards live here so every Enter-on-row path — fresh result, RECENT, almost-
-   * exact nav promotion — routes through a single handler with uniform semantics.
-   *
-   * Guards:
-   *  - Double-Enter: a second call for the same key is a no-op while the first is
-   *    still resolving. Cleared in `finally` so retry after settlement works.
-   *  - Escape-during-resolve: activation binds to `closeSignal`, so `close()` aborts
-   *    the fetch and the post-await `aborted` check short-circuits the navigate.
-   *  - Batch rotation does NOT affect activation. The per-keystroke
-   *    `batchController` owns the fan-out providers; activation survives typing.
-   *  - 400 / 404 / 403: treat as "stale cache" — toast + purge the RECENT (no-op
-   *    if absent) so the next open does not re-show a dead row. Gallery's server
-   *    `requireAccess` middleware returns 400 (BadRequestException) for both
-   *    "row missing" and "no access", so 400 sits alongside the canonical 404/403.
-   *  - 401 and other statuses propagate unchanged to the global SDK auth
-   *    interceptor (redirect-to-login lives there, not here).
-   *  - Pending affordance: the 200 ms `pendingActivation` flag is cleared in
-   *    `finally` regardless of which branch settled the activation.
-   */
+  Resolve an album id through the SDK, write a fresh RECENT entry, and navigate.
+  All guards live here so every Enter-on-row path — fresh result, RECENT, almost-
+  exact nav promotion — routes through a single handler with uniform semantics.
+  
+  Guards:
+   - Double-Enter: a second call for the same key is a no-op while the first is
+     still resolving. Cleared in `finally` so retry after settlement works.
+   - Escape-during-resolve: activation binds to `closeSignal`, so `close()` aborts
+     the fetch and the post-await `aborted` check short-circuits the navigate.
+   - Batch rotation does NOT affect activation. The per-keystroke
+     `batchController` owns the fan-out providers; activation survives typing.
+   - 400 / 404 / 403: treat as "stale cache" — toast + purge the RECENT (no-op
+     if absent) so the next open does not re-show a dead row. Gallery's server
+     `requireAccess` middleware returns 400 (BadRequestException) for both
+     "row missing" and "no access", so 400 sits alongside the canonical 404/403.
+   - 401 and other statuses propagate unchanged to the global SDK auth
+     interceptor (redirect-to-login lives there, not here).
+   - Pending affordance: the 200 ms `pendingActivation` flag is cleared in
+     `finally` regardless of which branch settled the activation.
+  */
   async activateAlbum(id: string) {
     const key = `album:${id}`;
     if (this.activationInFlight.has(key)) {
@@ -1013,27 +1024,27 @@ export class GlobalSearchManager {
   }
 
   /**
-   * Resolve a space id through the SDK, write a fresh RECENT entry, and navigate.
-   * Mirrors `activateAlbum` — same guard set, just swapped for the space-shaped
-   * SDK call, route helper, and recent entry. The design doc explicitly defers
-   * factoring the two into a generic helper until a future YAGNI follow-up.
-   *
-   * Guards:
-   *  - Double-Enter: a second call for the same key is a no-op while the first is
-   *    still resolving. Cleared in `finally` so retry after settlement works.
-   *  - Escape-during-resolve: activation binds to `closeSignal`, so `close()` aborts
-   *    the fetch and the post-await `aborted` check short-circuits the navigate.
-   *  - Batch rotation does NOT affect activation. The per-keystroke
-   *    `batchController` owns the fan-out providers; activation survives typing.
-   *  - 400 / 404 / 403: treat as "stale cache" — toast + purge the RECENT (no-op
-   *    if absent) so the next open does not re-show a dead row. Gallery's server
-   *    `requireAccess` middleware returns 400 (BadRequestException) for both
-   *    "row missing" and "no access", so 400 sits alongside the canonical 404/403.
-   *  - 401 and other statuses propagate unchanged to the global SDK auth
-   *    interceptor (redirect-to-login lives there, not here).
-   *  - Pending affordance: the 200 ms `pendingActivation` flag is cleared in
-   *    `finally` regardless of which branch settled the activation.
-   */
+  Resolve a space id through the SDK, write a fresh RECENT entry, and navigate.
+  Mirrors `activateAlbum` — same guard set, just swapped for the space-shaped
+  SDK call, route helper, and recent entry. The design doc explicitly defers
+  factoring the two into a generic helper until a future YAGNI follow-up.
+  
+  Guards:
+   - Double-Enter: a second call for the same key is a no-op while the first is
+     still resolving. Cleared in `finally` so retry after settlement works.
+   - Escape-during-resolve: activation binds to `closeSignal`, so `close()` aborts
+     the fetch and the post-await `aborted` check short-circuits the navigate.
+   - Batch rotation does NOT affect activation. The per-keystroke
+     `batchController` owns the fan-out providers; activation survives typing.
+   - 400 / 404 / 403: treat as "stale cache" — toast + purge the RECENT (no-op
+     if absent) so the next open does not re-show a dead row. Gallery's server
+     `requireAccess` middleware returns 400 (BadRequestException) for both
+     "row missing" and "no access", so 400 sits alongside the canonical 404/403.
+   - 401 and other statuses propagate unchanged to the global SDK auth
+     interceptor (redirect-to-login lives there, not here).
+   - Pending affordance: the 200 ms `pendingActivation` flag is cleared in
+     `finally` regardless of which branch settled the activation.
+  */
   async activateSpace(id: string) {
     const key = `space:${id}`;
     if (this.activationInFlight.has(key)) {
@@ -1082,10 +1093,10 @@ export class GlobalSearchManager {
   }
 
   /**
-   * Arm the destructive-confirm state machine. Private — only `activate('command')`
-   * calls this when a command with `destructive: true` is fired the first time.
-   * Sets pending and schedules a 3s auto-cancel guarded against stale timers.
-   */
+  Arm the destructive-confirm state machine. Private — only `activate('command')`
+  calls this when a command with `destructive: true` is fired the first time.
+  Sets pending and schedules a 3s auto-cancel guarded against stale timers.
+  */
   private startConfirm(cmdId: string) {
     this.pendingConfirmId = cmdId;
     if (this.confirmTimer !== null) {
@@ -1100,9 +1111,9 @@ export class GlobalSearchManager {
   }
 
   /**
-   * Clear any armed destructive-confirm. Public — called from setQuery, setActiveItem,
-   * `close()`, and the Escape handler in `global-search.svelte`.
-   */
+  Clear any armed destructive-confirm. Public — called from setQuery, setActiveItem,
+  `close()`, and the Escape handler in `global-search.svelte`.
+  */
   cancelConfirm() {
     if (this.confirmTimer !== null) {
       clearTimeout(this.confirmTimer);
@@ -1265,15 +1276,15 @@ export class GlobalSearchManager {
   }
 
   /**
-   * Build a lightweight ActiveItem from a RecentEntry. Recent entries only store the
-   * minimum fields needed for row rendering (id, label, a thumbnail hint), not the
-   * full API DTO — so the resulting preview payload is intentionally sparse. The per-
-   * kind preview components tolerate missing fields via optional chaining.
-   *
-   *   - photo/person/place/tag → return a `{ kind, data }` pair suitable for their
-   *     existing preview components.
-   *   - query/navigate → no preview (nothing interesting to show beyond the row itself).
-   */
+  Build a lightweight ActiveItem from a RecentEntry. Recent entries only store the
+  minimum fields needed for row rendering (id, label, a thumbnail hint), not the
+  full API DTO — so the resulting preview payload is intentionally sparse. The per-
+  kind preview components tolerate missing fields via optional chaining.
+  
+    - photo/person/place/tag → return a `{ kind, data }` pair suitable for their
+      existing preview components.
+    - query/navigate → no preview (nothing interesting to show beyond the row itself).
+  */
   private activeItemFromRecent(entry: RecentEntry): ActiveItem | null {
     switch (entry.kind) {
       case 'photo': {
@@ -1371,6 +1382,7 @@ export class GlobalSearchManager {
     };
     for (const key of order) {
       const s = this.sections[key];
+      // eslint-disable-next-line unicorn/prefer-continue
       if (s.status === 'ok' && s.items.length > 0) {
         const first = s.items[0] as { id?: string; latitude?: number; longitude?: number };
         if (first.id !== undefined) {
@@ -1389,13 +1401,13 @@ export class GlobalSearchManager {
   }
 
   /**
-   * Navigate to a NavigationItem route. If the target's pathname matches the current
-   * pathname (only query params differ), SvelteKit's client-side `goto` updates the
-   * URL without re-running the page component — URL-backed component state such as
-   * `SettingAccordionState` in the system-settings page would then be stuck on its
-   * stale initial value. Fall back to a full browser navigation in that case so
-   * every component remounts with the fresh URL and re-reads its query params.
-   */
+  Navigate to a NavigationItem route. If the target's pathname matches the current
+  pathname (only query params differ), SvelteKit's client-side `goto` updates the
+  URL without re-running the page component — URL-backed component state such as
+  `SettingAccordionState` in the system-settings page would then be stuck on its
+  stale initial value. Fall back to a full browser navigation in that case so
+  every component remounts with the fresh URL and re-reads its query params.
+  */
   private navigateNav(route: string) {
     if (!browser) {
       return;
@@ -1416,7 +1428,7 @@ export class GlobalSearchManager {
   }
 
   parseTypedSearchDraft(text = this.query) {
-    const parsed = parseTypedSearch(text, { mode: 'draft' });
+    const parsed = parsePaletteDraft(text, this.mode);
     this.applyTypedSearchParsedState(parsed);
     this.updateActiveTypedSearchToken();
     return parsed;
@@ -1568,7 +1580,7 @@ export class GlobalSearchManager {
       this.scheduleLiveTypedSearchSuggestions();
       return;
     }
-    const parsed = parseTypedSearch(this.query, { mode: 'draft' });
+    const parsed = parsePaletteDraft(this.query, this.mode);
     const token = getActiveTypedSearchToken(parsed, this.typedSearchCaret);
     const previousToken = this.activeTypedSearchToken;
     const nextToken = isLiveTypedSearchToken(token) && token.issue?.code !== 'unterminated-quote' ? token : undefined;
@@ -1634,7 +1646,7 @@ export class GlobalSearchManager {
   }
 
   private buildSearchDestination(text: string, filters?: FilterState): string {
-    const searchablePageUrl = buildSearchablePageUrl(page.url, text, this.searchSortOrder, filters);
+    const searchablePageUrl = buildSearchablePageUrl(currentPageUrl(), text, this.searchSortOrder, filters);
     if (searchablePageUrl) {
       return searchablePageUrl;
     }
@@ -1642,36 +1654,36 @@ export class GlobalSearchManager {
     if (page.url.pathname.startsWith('/map') && !hasSerializableFilters(filters)) {
       // Ephemeral serialization for navigation only; no reactive state is retained.
       // eslint-disable-next-line svelte/prefer-svelte-reactivity
-      const params = new URLSearchParams(page.url.searchParams);
+      const params = new URLSearchParams(page.url.search);
       params.set('q', text);
       return `/map?${params.toString()}`;
     }
 
     // Ephemeral URL object for destination construction only; no reactive state is retained.
     // eslint-disable-next-line svelte/prefer-svelte-reactivity
-    return buildSearchablePageUrl(new URL('/photos', page.url), text, this.searchSortOrder, filters) ?? '/photos';
+    return buildSearchablePageUrl(new URL('/photos', page.url.href), text, this.searchSortOrder, filters) ?? '/photos';
   }
 
   /**
-   * Single funnel for "palette result -> filter the surface you're on".
-   *
-   * Every row that maps onto a filter-panel filter (tag, person, place) and every field-search
-   * mode routes through here so they cannot drift apart. The rule: AND the new filter into
-   * whatever the current searchable page is already filtered by and stay put; if the current page
-   * is not searchable, fall back to /photos.
-   *
-   * `target` overrides the base page for the case where the current surface *cannot express* the
-   * filter (a space-scoped person id means nothing on /photos and vice versa). Passing it also
-   * drops the current surface's filters: leaving the surface leaves its filter state behind,
-   * because those ids are scoped to the surface we are leaving.
-   *
-   * `buildSearchDestination` deliberately does NOT use this — it owns the smart-search `/map?q=`
-   * special case, which would silently drop a filter if inherited here.
-   *
-   * `names` seeds the typed-search name cache so a freshly added chip reads "Alice" rather than a
-   * raw uuid. Passing it at all — even with empty maps — writes an entry; omitting it writes
-   * nothing, which is what the field modes want, as their chips carry their own text.
-   */
+  Single funnel for "palette result -> filter the surface you're on".
+  
+  Every row that maps onto a filter-panel filter (tag, person, place) and every field-search
+  mode routes through here so they cannot drift apart. The rule: AND the new filter into
+  whatever the current searchable page is already filtered by and stay put; if the current page
+  is not searchable, fall back to /photos.
+  
+  `target` overrides the base page for the case where the current surface *cannot express* the
+  filter (a space-scoped person id means nothing on /photos and vice versa). Passing it also
+  drops the current surface's filters: leaving the surface leaves its filter state behind,
+  because those ids are scoped to the surface we are leaving.
+  
+  `buildSearchDestination` deliberately does NOT use this — it owns the smart-search `/map?q=`
+  special case, which would silently drop a filter if inherited here.
+  
+  `names` seeds the typed-search name cache so a freshly added chip reads "Alice" rather than a
+  raw uuid. Passing it at all — even with empty maps — writes an entry; omitting it writes
+  nothing, which is what the field modes want, as their chips carry their own text.
+  */
   private navigateToFilteredResults(options: {
     applyFilter: (filters: FilterState) => FilterState;
     target?: URL;
@@ -1683,8 +1695,8 @@ export class GlobalSearchManager {
     const filters = options.applyFilter({ ...current });
     // Ephemeral URL object for destination construction only; no reactive state is retained.
     // eslint-disable-next-line svelte/prefer-svelte-reactivity
-    const fallback = new URL('/photos', page.url);
-    const base = options.target ?? (getSearchablePageBasePath(page.url.pathname) ? page.url : fallback);
+    const fallback = new URL('/photos', page.url.href);
+    const base = options.target ?? (getSearchablePageBasePath(page.url.pathname) ? currentPageUrl() : fallback);
     const destination = buildSearchablePageUrl(base, '', this.searchSortOrder, filters) ?? '/photos';
     if (options.names) {
       storeTypedSearchNames(destination, {
@@ -1696,11 +1708,11 @@ export class GlobalSearchManager {
   }
 
   /**
-   * Navigate the current searchable page (or `/photos`) to a full result set filtered by the
-   * active field-search mode. The current filters are preserved and the one text field is
-   * AND-ed in, so "See all" / Enter from a field mode lands on the filterable timeline rather
-   * than dropping the mode into a smart `?q=` search.
-   */
+  Navigate the current searchable page (or `/photos`) to a full result set filtered by the
+  active field-search mode. The current filters are preserved and the one text field is
+  AND-ed in. "See all" / Enter lands on the filterable timeline, or on metadata results
+  for full paths, which the timeline API cannot filter.
+  */
   private navigateToFieldResults(text: string, mode: SearchMode): void {
     const trimmed = text.trim();
     if (!trimmed) {
@@ -1708,6 +1720,10 @@ export class GlobalSearchManager {
     }
     if (mode === 'smart') {
       // Unreachable: navigateToFieldResults is only called for field modes.
+      return;
+    }
+    if (mode === 'fullPath') {
+      void goto(buildFullPathSearchUrl(trimmed, currentPageUrl(), this.searchablePageFiltersProvider?.()));
       return;
     }
     this.navigateToFilteredResults({
@@ -1728,13 +1744,13 @@ export class GlobalSearchManager {
   }
 
   /**
-   * Navigate the current searchable page (or `/photos`) to the timeline filtered by `tagId`.
-   * Tag rows used to open the deprecated `/search?query=` page, which ignores the filter panel
-   * and rendered nothing for a tag the palette had just suggested (#894). Routing through the
-   * searchable-page URL AND-s the tag into whatever the surface is already filtered by, so the
-   * user stays where they were with one more filter chip. The tag name is handed to the
-   * typed-search name cache so that chip reads "beach" instead of a raw uuid.
-   */
+  Navigate the current searchable page (or `/photos`) to the timeline filtered by `tagId`.
+  Tag rows used to open the deprecated `/search?query=` page, which ignores the filter panel
+  and rendered nothing for a tag the palette had just suggested (#894). Routing through the
+  searchable-page URL AND-s the tag into whatever the surface is already filtered by, so the
+  user stays where they were with one more filter chip. The tag name is handed to the
+  typed-search name cache so that chip reads "beach" instead of a raw uuid.
+  */
   private navigateToTagResults(tagId: string, tagName: string): void {
     this.navigateToFilteredResults({
       applyFilter: (filters) => ({
@@ -1749,17 +1765,17 @@ export class GlobalSearchManager {
   }
 
   /**
-   * Navigate to the current surface filtered by `person`.
-   *
-   * The filter-id encoding is scope-dependent, and getting it wrong yields a silently empty
-   * timeline: a space timeline forwards `personIds` to the API as `spacePersonIds` — bare profile
-   * ids scoped to that space (space-filter-options.ts) — while /photos and /recently-added forward
-   * them prefixed, `person:` / `space-person:` (photos-filter-options.ts). So a space person can
-   * only filter in place on its OWN space; every other combination targets /photos with the
-   * prefixed id. This mirrors the scope split that `getPersonFilterId(person, scope)` in the
-   * typed-search resolver already makes — but not its unprefixed-id fallback: that resolver
-   * prefixes a bare id with `person:`, while `getPhotosPersonFilterId` here returns it bare.
-   */
+  Navigate to the current surface filtered by `person`.
+  
+  The filter-id encoding is scope-dependent, and getting it wrong yields a silently empty
+  timeline: a space timeline forwards `personIds` to the API as `spacePersonIds` — bare profile
+  ids scoped to that space (space-filter-options.ts) — while /photos and /recently-added forward
+  them prefixed, `person:` / `space-person:` (photos-filter-options.ts). So a space person can
+  only filter in place on its OWN space; every other combination targets /photos with the
+  prefixed id. This mirrors the scope split that `getPersonFilterId(person, scope)` in the
+  typed-search resolver already makes — but not its unprefixed-id fallback: that resolver
+  prefixes a bare id with `person:`, while `getPhotosPersonFilterId` here returns it bare.
+  */
   private navigateToPersonResults(person: PhotosPersonFilterReference & { name?: string }): void {
     const spaceId = getCurrentSpaceTimelineId(page.url.pathname);
     const profile = person.primaryProfile;
@@ -1767,8 +1783,9 @@ export class GlobalSearchManager {
       spaceId !== undefined && profile?.type === 'space-person' && profile.spaceId === spaceId ? profile.id : undefined;
     const filterId = spaceProfileId ?? getPhotosPersonFilterId(person);
     // Ephemeral URL object for destination construction only; no reactive state is retained.
-    // eslint-disable-next-line svelte/prefer-svelte-reactivity
-    const target = spaceId !== undefined && spaceProfileId === undefined ? new URL('/photos', page.url) : undefined;
+    const target =
+      // eslint-disable-next-line svelte/prefer-svelte-reactivity
+      spaceId !== undefined && spaceProfileId === undefined ? new URL('/photos', page.url.href) : undefined;
     this.navigateToFilteredResults({
       target,
       applyFilter: (filters) => ({
@@ -1783,17 +1800,17 @@ export class GlobalSearchManager {
   }
 
   /**
-   * Navigate to the current surface filtered by `place`.
-   *
-   * PlacesResponseDto carries name / lat / lng / admin1name / admin2name. Of those only `name`
-   * maps onto a searchable-page param (`city`) — there is no `state` filter. place-preview.svelte
-   * searches by both `city: place.name` and `state: place.admin1name`, so for two same-named
-   * cities in different states the destination is a deliberate superset of what the preview showed.
-   *
-   * /map is the exception: it is a place's own contextual surface, and it is not a searchable
-   * page, so the filter path would bounce the user off the map they were reading. A nameless
-   * place cannot produce a city filter at all, so it recentres too.
-   */
+  Navigate to the current surface filtered by `place`.
+  
+  PlacesResponseDto carries name / lat / lng / admin1name / admin2name. Of those only `name`
+  maps onto a searchable-page param (`city`) — there is no `state` filter. place-preview.svelte
+  searches by both `city: place.name` and `state: place.admin1name`, so for two same-named
+  cities in different states the destination is a deliberate superset of what the preview showed.
+  
+  /map is the exception: it is a place's own contextual surface, and it is not a searchable
+  page, so the filter path would bounce the user off the map they were reading. A nameless
+  place cannot produce a city filter at all, so it recentres too.
+  */
   private navigateToPlaceResults(place: { name?: string; latitude: number; longitude: number }): void {
     const city = place.name?.trim();
     if (!city || page.url.pathname.startsWith('/map')) {
@@ -1809,18 +1826,14 @@ export class GlobalSearchManager {
   async applySearchSort(sortOrder: SearchablePageSortOrder, text = this.query) {
     this.searchSortOrder = sortOrder;
 
-    const nextUrl = buildSearchablePageUrl(page.url, text, sortOrder, this.searchablePageFiltersProvider?.());
+    const nextUrl = buildSearchablePageUrl(currentPageUrl(), text, sortOrder, this.searchablePageFiltersProvider?.());
     if (!nextUrl || nextUrl === page.url.pathname + page.url.search) {
       return;
     }
 
     this.keepOpenOnNextNavigate = this.isOpen;
     try {
-      await goto(nextUrl, {
-        replaceState: true,
-        keepFocus: true,
-        noScroll: true,
-      });
+      await goto(nextUrl, { replace: true, reset: false });
     } catch (error) {
       this.keepOpenOnNextNavigate = false;
       throw error;
@@ -1840,7 +1853,7 @@ export class GlobalSearchManager {
   async activateSearch(text: string): Promise<void> {
     const trimmed = text.trim();
     if (!trimmed) {
-      const searchablePageUrl = buildSearchablePageUrl(page.url, '');
+      const searchablePageUrl = buildSearchablePageUrl(currentPageUrl(), '');
       if (searchablePageUrl && searchablePageUrl !== page.url.pathname + page.url.search) {
         this.query = '';
         this.searchSortOrder = 'relevance';
@@ -1850,9 +1863,9 @@ export class GlobalSearchManager {
       return;
     }
 
-    // Field-search modes (filename / description / OCR) bypass typed-search parsing and route to
-    // the filtered timeline so the selected mode is honoured instead of becoming a smart search.
-    if (['metadata', 'description', 'ocr'].includes(this.mode)) {
+    // Field-search modes bypass typed-search parsing and keep their selected predicate
+    // through navigation (timeline filters, or metadata results for full paths).
+    if (['metadata', 'description', 'ocr', 'fullPath'].includes(this.mode)) {
       addEntry({
         kind: 'query',
         id: `query:${trimmed.toLowerCase()}`,
@@ -2045,7 +2058,7 @@ export class GlobalSearchManager {
         this.close();
         return;
       }
-      const liveNavFlagEnabled = liveNavItem.featureFlag ? flags?.[liveNavItem.featureFlag] : true;
+      const liveNavFlagEnabled = !liveNavItem.featureFlag || flags?.[liveNavItem.featureFlag];
       if (!liveNavFlagEnabled) {
         console.warn('[cmdk] purging stale recent — feature flag disabled', entry.id);
         removeEntry(entry.id);
@@ -2121,11 +2134,11 @@ export class GlobalSearchManager {
   }
 
   /**
-   * Removes a recent entry from the cmdk-recent store and re-homes the highlight
-   * if the caller deleted the currently-active row. Called from Delete/Backspace
-   * key handling and the per-row X button. No-op on unknown ids so a stale cursor
-   * from an out-of-date view does not accidentally bump the revision.
-   */
+  Removes a recent entry from the cmdk-recent store and re-homes the highlight
+  if the caller deleted the currently-active row. Called from Delete/Backspace
+  key handling and the per-row X button. No-op on unknown ids so a stale cursor
+  from an out-of-date view does not accidentally bump the revision.
+  */
   removeRecent(id: string) {
     const before = getEntries();
     if (before.every((e) => e.id !== id)) {
@@ -2147,6 +2160,7 @@ export class GlobalSearchManager {
     if (newMode === this.mode) {
       return;
     }
+    const previousMode = this.mode;
     this.mode = newMode;
     if (browser) {
       try {
@@ -2154,6 +2168,11 @@ export class GlobalSearchManager {
       } catch {
         // ignore — privacy mode
       }
+    }
+
+    if (newMode === 'fullPath' || previousMode === 'fullPath') {
+      this.setQuery(this.query, true);
+      return;
     }
 
     // Scope short-circuit: photos isn't dispatched under any prefix, so a mode
@@ -2271,25 +2290,25 @@ export class GlobalSearchManager {
   }
 
   /**
-   * Top navigation result — the single most confident nav-item promotion for
-   * the current query. Null when the query is empty or when no item's label
-   * passes the almost-exact gate. The palette renders this above photos/
-   * places/etc. so power users who know the page they want jump straight to
-   * it without scrolling past content results.
-   *
-   * Scans the FULL catalog (filtered by admin + feature flags), not just
-   * whatever `sections.navigation` currently holds — cmdk's fuzzy scorer
-   * discards items with weak char-overlap even when a compound query contains
-   * the literal label word (e.g. `auto-classification` vs `Classification
-   * Settings`), and the almost-exact rule is strict enough that scanning the
-   * unfiltered catalog is still safe.
-   */
+  Top navigation result — the single most confident nav-item promotion for
+  the current query. Null when the query is empty or when no item's label
+  passes the almost-exact gate. The palette renders this above photos/
+  places/etc. so power users who know the page they want jump straight to
+  it without scrolling past content results.
+  
+  Scans the FULL catalog (filtered by admin + feature flags), not just
+  whatever `sections.navigation` currently holds — cmdk's fuzzy scorer
+  discards items with weak char-overlap even when a compound query contains
+  the literal label word (e.g. `auto-classification` vs `Classification
+  Settings`), and the almost-exact rule is strict enough that scanning the
+  unfiltered catalog is still safe.
+  */
   topNavigationMatch = $derived.by<NavigationItem | null>(() => {
     // Top-result promotion is an unscoped feature only — the render path in
     // global-search.svelte gates on `scope === 'all'`. Computing a match under
     // `>` / `@` / `#` / `/` serves no purpose and (for commands) would dedup
     // the promoted item out of its own section, leaving nothing visible.
-    if (this.scope !== 'all') {
+    if (this.scope !== 'all' || this.mode === 'fullPath') {
       return null;
     }
     if (this.typedSearchDisplayTokens.length > 0) {
@@ -2312,7 +2331,7 @@ export class GlobalSearchManager {
       if (item.adminOnly && !isAdmin) {
         continue;
       }
-      const itemFlagEnabled = item.featureFlag ? flags?.[item.featureFlag] : true;
+      const itemFlagEnabled = !item.featureFlag || flags?.[item.featureFlag];
       if (!itemFlagEnabled) {
         continue;
       }
@@ -2340,16 +2359,32 @@ export class GlobalSearchManager {
   });
 
   /**
-   * Top command result — the single most confident command-item promotion for
-   * the current query. Null when the query is empty or when no command's label
-   * passes the almost-exact gate. Checked BEFORE `topNavigationMatch` so a
-   * command like "theme" wins over a same-name nav destination.
-   */
+  The free-text search row listed directly under a promoted command or navigation match, so a query that
+  names a command ("sign", "theme", "face") can still be searched for (#1155). The promoted match keeps the
+  top slot and Enter; this row is one ArrowDown away. Null whenever `topSearchMatch` owns the top slot.
+  */
+  searchBelowTopMatch = $derived.by<SearchBelowTopMatch | null>(() => {
+    const query = this.query.trim();
+    if (this.scope !== 'all' || query.length === 0) {
+      return null;
+    }
+    if (this.topCommandMatch === null && this.topNavigationMatch === null) {
+      return null;
+    }
+    return { id: 'top-search-below', query: this.typedSearchPlainQuery || query, rawQuery: query };
+  });
+
+  /**
+  Top command result — the single most confident command-item promotion for
+  the current query. Null when the query is empty or when no command's label
+  passes the almost-exact gate. Checked BEFORE `topNavigationMatch` so a
+  command like "theme" wins over a same-name nav destination.
+  */
   topCommandMatch = $derived.by<CommandItem | null>(() => {
     // See the scope gate in topNavigationMatch. Under `>` scope the command
     // section itself lists matching commands — promoting + deduping here would
     // make the section render empty, so only promote under unscoped 'all'.
-    if (this.scope !== 'all') {
+    if (this.scope !== 'all' || this.mode === 'fullPath') {
       return null;
     }
     if (this.typedSearchDisplayTokens.length > 0) {
@@ -2369,7 +2404,7 @@ export class GlobalSearchManager {
       if (item.adminOnly && !isAdmin) {
         continue;
       }
-      const itemFlagEnabled = item.featureFlag ? flags?.[item.featureFlag] : true;
+      const itemFlagEnabled = !item.featureFlag || flags?.[item.featureFlag];
       if (!itemFlagEnabled) {
         continue;
       }
@@ -2451,12 +2486,12 @@ export class GlobalSearchManager {
     return scopeCue || counts;
   });
 
-  setQuery(text: string) {
+  setQuery(text: string, force = false) {
     // In production setQuery only fires through global-search.svelte's $effect, which
     // is only mounted while the palette is open. Calling this method on a closed
     // manager is safe — sections mutate but no side effects escape — but should be
     // considered an implementation detail of the component, not a public entry point.
-    if (this.query === text) {
+    if (this.query === text && !force) {
       return;
     }
     if (this.pendingConfirmId !== null) {
@@ -2668,24 +2703,24 @@ export class GlobalSearchManager {
   }
 
   /**
-   * Filter / rank / slice the in-memory albums catalog for `rawQuery` and write the
-   * result into `sections.albums`. Called by the albums provider entry in
-   * `buildProviders()` — runBatch dispatches the albums key to that provider, which
-   * delegates here, so this is the sole writer for the albums section.
-   *
-   * Scoring rules (all case-insensitive, query is trimmed):
-   *   - name.startsWith(query) → score 2
-   *   - name.includes(query)    → score 1
-   *   - else                    → filtered out
-   * Ties break alphabetically by `albumName`. Slice to top 5; `total` reports the
-   * full pre-slice match count so the palette can render a "+N more" affordance.
-   *
-   * Bare-prefix branch: `rawQuery === ''` dispatches from runBatch when the user
-   * types a bare `/`. Returns the top `ALBUMS_TOP_N` sorted by `endDate ?? ''`
-   * desc. AlbumNameDto has no `updatedAt`; `endDate` — the most recent photo in
-   * the album — is the closest activity proxy. The minQueryLength gate now lives
-   * upstream in runBatch, so no `query.length < 2` early-return here.
-   */
+  Filter / rank / slice the in-memory albums catalog for `rawQuery` and write the
+  result into `sections.albums`. Called by the albums provider entry in
+  `buildProviders()` — runBatch dispatches the albums key to that provider, which
+  delegates here, so this is the sole writer for the albums section.
+  
+  Scoring rules (all case-insensitive, query is trimmed):
+    - name.startsWith(query) → score 2
+    - name.includes(query)    → score 1
+    - else                    → filtered out
+  Ties break alphabetically by `albumName`. Slice to top 5; `total` reports the
+  full pre-slice match count so the palette can render a "+N more" affordance.
+  
+  Bare-prefix branch: `rawQuery === ''` dispatches from runBatch when the user
+  types a bare `/`. Returns the top `ALBUMS_TOP_N` sorted by `endDate ?? ''`
+  desc. AlbumNameDto has no `updatedAt`; `endDate` — the most recent photo in
+  the album — is the closest activity proxy. The minQueryLength gate now lives
+  upstream in runBatch, so no `query.length < 2` early-return here.
+  */
   async runAlbums(rawQuery: string): Promise<void> {
     const query = rawQuery.trim().toLowerCase();
     await this.ensureAlbumsCache();
@@ -2730,26 +2765,26 @@ export class GlobalSearchManager {
   }
 
   /**
-   * Filter / rank / slice the in-memory shared-spaces catalog for `rawQuery` and
-   * write the result into `sections.spaces`. Mirrors `runAlbums` — matches on
-   * `space.name` (not `albumName`), single source so no owned/shared dedupe. The
-   * spaces provider entry in `buildProviders()` dispatches here; runBatch routes
-   * the spaces key through that provider, so this is the sole writer for the
-   * spaces section.
-   *
-   * Scoring rules (all case-insensitive, query is trimmed):
-   *   - name.startsWith(query) → score 2
-   *   - name.includes(query)    → score 1
-   *   - else                    → filtered out
-   * Ties break alphabetically by `name`. Slice to top 5; `total` reports the full
-   * pre-slice match count so the palette can render a "+N more" affordance.
-   *
-   * Bare-prefix branch: `rawQuery === ''` dispatches from runBatch when the user
-   * types a bare `/`. Returns the top `SPACES_TOP_N` sorted by
-   * `(lastActivityAt ?? createdAt)` desc — falls back to creation date when the
-   * space has never been touched. The minQueryLength gate now lives upstream in
-   * runBatch, so no `query.length < 2` early-return here.
-   */
+  Filter / rank / slice the in-memory shared-spaces catalog for `rawQuery` and
+  write the result into `sections.spaces`. Mirrors `runAlbums` — matches on
+  `space.name` (not `albumName`), single source so no owned/shared dedupe. The
+  spaces provider entry in `buildProviders()` dispatches here; runBatch routes
+  the spaces key through that provider, so this is the sole writer for the
+  spaces section.
+  
+  Scoring rules (all case-insensitive, query is trimmed):
+    - name.startsWith(query) → score 2
+    - name.includes(query)    → score 1
+    - else                    → filtered out
+  Ties break alphabetically by `name`. Slice to top 5; `total` reports the full
+  pre-slice match count so the palette can render a "+N more" affordance.
+  
+  Bare-prefix branch: `rawQuery === ''` dispatches from runBatch when the user
+  types a bare `/`. Returns the top `SPACES_TOP_N` sorted by
+  `(lastActivityAt ?? createdAt)` desc — falls back to creation date when the
+  space has never been touched. The minQueryLength gate now lives upstream in
+  runBatch, so no `query.length < 2` early-return here.
+  */
   async runSpaces(rawQuery: string): Promise<void> {
     const query = rawQuery.trim().toLowerCase();
     await this.ensureSpacesCache();
@@ -2869,6 +2904,8 @@ export class GlobalSearchManager {
             ...(mode === 'metadata' && { originalFileName: query }),
             ...(mode === 'description' && { description: query }),
             ...(mode === 'ocr' && { ocr: query }),
+            ...(mode === 'fullPath' &&
+              buildFullPathSearchTerms(query, currentPageUrl(), this.searchablePageFiltersProvider?.())),
           };
           const response = await searchAssets({ metadataSearchDto }, { signal });
           const items = response.assets.items;

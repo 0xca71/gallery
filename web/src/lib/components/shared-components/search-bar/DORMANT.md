@@ -16,9 +16,8 @@ directory). Rather than delete their files every rebase — which turns each ups
 a batch of delete/modify conflicts, and silently admits any *newly added* file — we keep this surface
 byte-identical to `upstream/main` so it auto-merges, and simply never mount it.
 
-This mirrors the server-side policy: grep `UPSTREAM SEARCH V3 — DORMANT` in `server/src`, where
-upstream's unfinished V3 query builder likewise sits present-but-unwired while the fork's live search
-runs on `searchAssetBuilderLegacy`.
+The server is different: it runs upstream's search V3 for structured requests, with Gallery's scope
+hooks, next to the flat endpoints on `searchAssetBuilderLegacy`. Only this UI stays unmounted.
 
 ## The invariants
 
@@ -37,13 +36,15 @@ runs on `searchAssetBuilderLegacy`.
    In particular, upstream's `#30279` added `searchManager.setQuery(terms)` calls to
    `web/src/routes/(user)/search/…/+page.svelte`. Those were removed during the batch-124 rebase: that
    page is a **live fork surface** and must not depend on the dormant manager.
+   The one expected hit is upstream's own `web/src/routes/(user)/search/…/page.spec.ts` (since
+   v3.4.0-rc.3), which drives this search bar. It is kept as upstream wrote it with its cases
+   `test.skip`ped, so it still merges; do not mount the dormant bar to make it pass.
 3. **`i18n/en.json` keys for this UI are also dormant.** They are upstream's; they do not need the
    nine-locale fork translation pass, because no fork surface renders them.
 
 ## When this ends
 
-Upstream search V3 is still unfinished — as of this writing `searchAssetBuilderLegacy` still exists and
-`searchMetadataV3` / `searchStatisticsV3` are wired to no controller or service. When upstream finishes
-V3 and switches its own UI onto it, revisit whether Gallery converges on upstream's search or keeps the
-palette + filter panel. That is a product decision, not a rebase decision — see the per-batch
-product-direction gate in the `rebase-upstream-report` skill.
+The server already answers structured V3 requests. When upstream switches its own UI onto V3, revisit
+whether Gallery converges on upstream's search or keeps the palette + filter panel. That is a product
+decision, not a rebase decision; see the per-batch product-direction gate in the `rebase-upstream-report`
+skill.

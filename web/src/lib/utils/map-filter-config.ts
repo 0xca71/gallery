@@ -1,18 +1,17 @@
 import {
-  AssetTypeEnum,
-  getFilterSuggestions,
-  getSearchSuggestions,
-  SearchSuggestionType,
-  type FilterSuggestionsPersonDto,
-} from '@immich/sdk';
-import {
   ALL_FILTER_SECTIONS,
   buildFilterContext,
   type FilterPanelConfig,
   type FilterState,
-} from '$lib/components/filter-panel/filter-panel';
-import { createUrl } from '$lib/utils';
-import { getPhotosPersonFilterId, getPhotosPersonFilterThumbnailUrl } from '$lib/utils/photos-filter-options';
+} from '#lib/components/filter-panel/filter-panel.ts';
+import { getPhotosPersonFilterId, getPhotosPersonFilterThumbnailUrl } from '#lib/utils/photos-filter-options.ts';
+import {
+  AssetTypeEnum,
+  SearchSuggestionType,
+  getFilterSuggestions,
+  getSearchSuggestions,
+  type FilterSuggestionsPersonDto,
+} from '@immich/sdk';
 
 function mapSuggestions(response: Awaited<ReturnType<typeof getFilterSuggestions>>, spaceId?: string) {
   return {
@@ -22,9 +21,7 @@ function mapSuggestions(response: Awaited<ReturnType<typeof getFilterSuggestions
     people: response.people.map((p: FilterSuggestionsPersonDto) => ({
       id: spaceId ? p.id : getPhotosPersonFilterId(p),
       name: p.name,
-      thumbnailUrl: spaceId
-        ? createUrl(`/shared-spaces/${spaceId}/people/${p.primaryProfile?.id ?? p.id}/thumbnail`)
-        : getPhotosPersonFilterThumbnailUrl(p),
+      thumbnailUrl: getPhotosPersonFilterThumbnailUrl(p, spaceId),
     })),
     ratings: response.ratings,
     mediaTypes: response.mediaTypes,
@@ -56,8 +53,8 @@ export function buildMapFilterConfig(spaceId?: string): FilterPanelConfig {
             ? AssetTypeEnum.Image
             : AssetTypeEnum.Video,
       isFavorite: filters.isFavorite,
-      isNotInAlbum: filters.isNotInAlbum === true ? true : undefined,
-      isInAlbum: filters.isInAlbum === true ? true : undefined,
+      isNotInAlbum: filters.isNotInAlbum === true || undefined,
+      isInAlbum: filters.isInAlbum === true || undefined,
       takenAfter: context?.takenAfter,
       takenBefore: context?.takenBefore,
       ...(spaceId ? { spaceId } : { withSharedSpaces: true }),
@@ -66,20 +63,12 @@ export function buildMapFilterConfig(spaceId?: string): FilterPanelConfig {
   };
 
   return {
-    locationScopeKey: () => JSON.stringify(['map', spaceId]),
     sections: [...ALL_FILTER_SECTIONS],
     suggestionsProvider,
     // #910: the baseline is the same call with the filter arguments dropped, keeping only scope.
     baselineProvider: async () =>
       mapSuggestions(await getFilterSuggestions({ ...(spaceId ? { spaceId } : { withSharedSpaces: true }) }), spaceId),
     providers: {
-      states: (country: string, context) =>
-        getSearchSuggestions({
-          $type: SearchSuggestionType.State,
-          country,
-          ...(spaceId ? { spaceId } : { withSharedSpaces: true }),
-          ...context,
-        }),
       cities: (country: string, context) =>
         getSearchSuggestions({
           $type: SearchSuggestionType.City,

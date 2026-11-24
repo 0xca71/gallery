@@ -15,26 +15,25 @@ import {
 } from '@nestjs/common';
 import { ApiExcludeEndpoint, ApiTags } from '@nestjs/swagger';
 import type { NextFunction, Response } from 'express';
-import type { AuthDto } from 'src/dtos/auth.dto.js';
 import { Endpoint, HistoryBuilder } from 'src/decorators.js';
-import { BulkIdResponseDto, BulkIdsDto } from 'src/dtos/asset-ids.response.dto.js';
+import { BulkIdResponseDto } from 'src/dtos/asset-ids.response.dto.js';
+import type { AuthDto } from 'src/dtos/auth.dto.js';
 import {
   AssetFaceUpdateDto,
-  DetachScopedPersonDto,
   MergePersonDto,
-  MergeScopedPeopleDto,
-  PeopleFaceStatisticsResponseDto,
+  PeopleDeleteDto,
   PeopleResponseDto,
-  PeopleStatisticsResponseDto,
   PeopleUpdateDto,
+  PeopleUsersUpsertDto,
   PersonCreateDto,
-  PersonFacePageQueryDto,
-  PersonFacePageResponseDto,
+  PersonDeleteDto,
   PersonResponseDto,
   PersonSearchDto,
   PersonStatisticsResponseDto,
   PersonUpdateDto,
-  RepresentativeFaceUpdateDto,
+  PersonUsersDeleteDto,
+  PersonUsersResponseDto,
+  PersonUsersSearchDto,
 } from 'src/dtos/person.dto.js';
 import { ApiTag, Permission } from 'src/enum.js';
 import { Auth, Authenticated, FileResponse } from 'src/middleware/auth.guard.js';
@@ -94,105 +93,41 @@ export class PersonController {
     description: 'Bulk delete a list of people at once.',
     history: new HistoryBuilder().added('v1').beta('v1').stable('v2'),
   })
-  deletePeople(@Auth() auth: AuthDto, @Body() dto: BulkIdsDto): Promise<void> {
+  deletePeople(@Auth() auth: AuthDto, @Body() dto: PeopleDeleteDto): Promise<void> {
     return this.service.deleteAll(auth, dto);
   }
 
-  @Post('same-person')
-  @Authenticated({ permission: Permission.PersonMerge })
-  @HttpCode(HttpStatus.NO_CONTENT)
-  @Endpoint({
-    summary: 'Merge scoped people by identity',
-    description: 'Mark personal and space people as the same person without exposing raw face identity IDs.',
-    history: new HistoryBuilder().added('v2').stable('v2'),
-  })
-  mergeScopedPeople(@Auth() auth: AuthDto, @Body() dto: MergeScopedPeopleDto): Promise<void> {
-    return this.service.mergeScopedPeople(auth, dto);
-  }
-
-  @Post('detach-profile')
-  @Authenticated({ permission: Permission.PersonMerge })
-  @HttpCode(HttpStatus.NO_CONTENT)
-  @Endpoint({
-    summary: 'Detach a scoped person profile',
-    description: 'Separate one personal or space person profile from a grouped person identity.',
-    history: new HistoryBuilder().added('v2').stable('v2'),
-  })
-  detachScopedPerson(@Auth() auth: AuthDto, @Body() dto: DetachScopedPersonDto): Promise<void> {
-    return this.service.detachScopedPerson(auth, dto);
-  }
-
-  @Get('statistics')
+  @Get('users')
   @Authenticated({ permission: Permission.PersonRead })
   @Endpoint({
-    summary: 'Get people statistics',
-    description: 'Retrieve people and detected-face counts for the authenticated user people scope.',
-    history: new HistoryBuilder().added('v2').stable('v2'),
+    summary: 'Get people access',
+    description: 'Retrieve a list of users and the people to which they have been given access',
+    history: new HistoryBuilder().added('v3.3.0').beta('v3.3.0'),
   })
-  getPeopleStatistics(@Auth() auth: AuthDto, @Query() options: PersonSearchDto): Promise<PeopleStatisticsResponseDto> {
-    return this.service.getPeopleStatistics(auth, options);
+  getUsersForPeople(@Auth() auth: AuthDto, @Query() dto: PersonUsersSearchDto): Promise<PersonUsersResponseDto> {
+    return this.service.getUsersForPeople(auth, dto);
   }
 
-  @Get('face-statistics')
-  @Authenticated({ permission: Permission.PersonRead })
-  @Endpoint({
-    summary: 'Get people face statistics',
-    description: 'Retrieve detailed detected-face counts for the authenticated user people scope.',
-    history: new HistoryBuilder().added('v2').stable('v2'),
-  })
-  getPeopleFaceStatistics(
-    @Auth() auth: AuthDto,
-    @Query() options: PersonSearchDto,
-  ): Promise<PeopleFaceStatisticsResponseDto> {
-    return this.service.getPeopleFaceStatistics(auth, options);
-  }
-
-  @Get(':id/faces')
-  @Authenticated({ permission: Permission.PersonRead })
-  @Endpoint({
-    summary: 'Get person faces',
-    description: 'Retrieve detected face crops for a person.',
-    history: new HistoryBuilder().added('v2').stable('v2'),
-  })
-  getPersonFaces(
-    @Auth() auth: AuthDto,
-    @Param() { id }: UUIDParamDto,
-    @Query() dto: PersonFacePageQueryDto,
-  ): Promise<PersonFacePageResponseDto> {
-    return this.service.getFacesForPicker(auth, id, dto);
-  }
-
-  @Get(':id/faces/:faceId/thumbnail')
-  @FileResponse()
-  @Authenticated({ permission: Permission.PersonRead })
-  @Endpoint({
-    summary: 'Get person face thumbnail',
-    description: 'Retrieve an exact face-crop thumbnail for a person.',
-    history: new HistoryBuilder().added('v2').stable('v2'),
-  })
-  async getPersonFaceThumbnail(
-    @Res() res: Response,
-    @Next() next: NextFunction,
-    @Auth() auth: AuthDto,
-    @Param('id') id: string,
-    @Param('faceId') faceId: string,
-  ) {
-    await sendFile(res, next, () => this.service.getFaceThumbnail(auth, id, faceId), this.logger);
-  }
-
-  @Put(':id/representative-face')
+  @Put('users')
   @Authenticated({ permission: Permission.PersonUpdate })
   @Endpoint({
-    summary: 'Update representative face',
-    description: 'Update the exact face crop used as the person thumbnail.',
-    history: new HistoryBuilder().added('v2').stable('v2'),
+    summary: 'Upsert user access',
+    description: 'Give users access to people',
+    history: new HistoryBuilder().added('v3.3.0').beta('v3.3.0'),
   })
-  updateRepresentativeFace(
-    @Auth() auth: AuthDto,
-    @Param() { id }: UUIDParamDto,
-    @Body() dto: RepresentativeFaceUpdateDto,
-  ): Promise<PersonResponseDto> {
-    return this.service.updateRepresentativeFace(auth, id, dto);
+  upsertPeopleUsers(@Auth() auth: AuthDto, @Body() dto: PeopleUsersUpsertDto): Promise<void> {
+    return this.service.upsertPeopleUsers(auth, dto);
+  }
+
+  @Delete('users')
+  @Authenticated({ permission: Permission.PersonDelete })
+  @Endpoint({
+    summary: 'Remove users from people',
+    description: 'Remove user access to people',
+    history: new HistoryBuilder().added('v3.3.0').beta('v3.3.0'),
+  })
+  removeUsersFromPeople(@Auth() auth: AuthDto, @Body() dto: PersonUsersDeleteDto): Promise<void> {
+    return this.service.removeUsersFromPeople(auth, dto);
   }
 
   @Get(':id')
@@ -211,11 +146,7 @@ export class PersonController {
   @Endpoint({
     summary: 'Update person',
     description: 'Update an individual person.',
-    history: new HistoryBuilder()
-      .added('v1')
-      .beta('v1')
-      .stable('v2')
-      .deprecated('v3', { replacementId: 'updatePerson' }),
+    history: new HistoryBuilder().added('v1').beta('v1').stable('v2').v3PatchMigration(),
   })
   updatePerson(
     @Auth() auth: AuthDto,
@@ -244,8 +175,8 @@ export class PersonController {
     description: 'Delete an individual person.',
     history: new HistoryBuilder().added('v1').beta('v1').stable('v2'),
   })
-  deletePerson(@Auth() auth: AuthDto, @Param() { id }: UUIDParamDto): Promise<void> {
-    return this.service.delete(auth, id);
+  deletePerson(@Auth() auth: AuthDto, @Param() { id }: UUIDParamDto, @Body() dto: PersonDeleteDto): Promise<void> {
+    return this.service.delete(auth, id, dto);
   }
 
   @Get(':id/statistics')

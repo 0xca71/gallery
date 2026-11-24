@@ -1,9 +1,10 @@
 <script lang="ts">
-  import { page } from '$app/state';
-  import { createFilterState } from '$lib/components/filter-panel/filter-panel';
-  import { Route } from '$lib/route';
-  import { getSearchablePageFilterState, getSearchablePageState } from '$lib/utils/searchable-page-search';
+  import { createFilterState } from '#lib/components/filter-panel/filter-panel.ts';
+  import { featureFlagsManager } from '#lib/managers/feature-flags-manager.svelte.ts';
+  import { Route } from '#lib/route.ts';
+  import { getSearchablePageFilterState, getSearchablePageState } from '#lib/utils/searchable-page-search.ts';
   import { t } from 'svelte-i18n';
+  import { page } from '$app/state';
 
   interface Props {
     spaceId: string;
@@ -47,8 +48,8 @@
     photosActive
       ? Route.map({
           spaceId,
-          query: getSearchablePageState(page.url).query,
-          filters: { ...createFilterState(), ...getSearchablePageFilterState(page.url) },
+          query: getSearchablePageState(new URL(page.url.href)).query,
+          filters: { ...createFilterState(), ...getSearchablePageFilterState(new URL(page.url.href)) },
         })
       : Route.map({ spaceId }),
   );
@@ -82,13 +83,16 @@
               active: path.startsWith(`${base}/libraries`),
             }
           : undefined,
-        {
-          key: 'map',
-          label: $t('map'),
-          href: mapHref,
-          external: true,
-          active: false,
-        },
+        // #1046 — with the map feature off, /map redirects to /photos and would bounce the user out.
+        featureFlagsManager.value.map
+          ? {
+              key: 'map',
+              label: $t('map'),
+              href: mapHref,
+              external: true,
+              active: false,
+            }
+          : undefined,
         {
           key: 'members',
           label: $t('members'),

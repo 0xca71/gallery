@@ -1,13 +1,12 @@
 <script lang="ts">
-  import { clickOutside } from '$lib/actions/click-outside';
+  import { clickOutside } from '#lib/actions/click-outside.ts';
   import {
     getCachedPeopleFaceStatistics,
     setCachedPeopleFaceStatistics,
-  } from '$lib/components/people/people-face-statistics-info-cache';
-  import { locale } from '$lib/stores/preferences.store';
-  import { generateId } from '$lib/utils/generate-id';
-  import { IconButton } from '@immich/ui';
+  } from '#lib/components/people/people-face-statistics-info-cache.ts';
+  import { locale } from '#lib/stores/preferences.store.ts';
   import type { PeopleFaceStatisticsResponseDto } from '@immich/sdk';
+  import { IconButton } from '@immich/ui';
   import { mdiInformationOutline } from '@mdi/js';
   import { tick } from 'svelte';
   import { t } from 'svelte-i18n';
@@ -30,7 +29,8 @@
 
   const panelWidth = 288;
   const panelMargin = 8;
-  const detailsId = `people-face-statistics-details-${generateId()}`;
+  const uid = $props.id();
+  const detailsId = `people-face-statistics-details-${uid}`;
 
   const formatNumber = (value: number) => value.toLocaleString($locale);
 

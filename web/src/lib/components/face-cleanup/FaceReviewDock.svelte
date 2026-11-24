@@ -3,7 +3,7 @@
   import { mdiInformationOutline } from '@mdi/js';
   import type { Snippet } from 'svelte';
   import { t } from 'svelte-i18n';
-  import { effectKeyFor, FACE_ACTIONS, type FaceActionId, type FaceReviewMode } from './face-actions';
+  import { FACE_ACTIONS, effectKeyFor, type FaceActionId, type FaceReviewMode } from './face-actions';
 
   // The ONE footer dock for both review modes. It used to be two near-identical copies that drifted (different
   // radii, paddings, text sizes, and an (i) button in guided only) — see design §1.3.
@@ -26,8 +26,8 @@
     onHelp: () => void;
     onClear: () => void;
     /** Everything left of Apply while nothing is selected. Guided renders a tally, a rest-of-cluster chip and a
-     *  blocked reason; manual renders four tally chips. One snippet, not a tally/apply pair, because guided's
-     *  blocked reason sits BETWEEN the tally and the button and would have nowhere to live in a two-way split. */
+    blocked reason; manual renders four tally chips. One snippet, not a tally/apply pair, because guided's
+    blocked reason sits BETWEEN the tally and the button and would have nowhere to live in a two-way split. */
     summary: Snippet;
     apply: Snippet;
   }
@@ -96,7 +96,7 @@
           <span class="h-6 w-px bg-white/15"></span>
 
           {#each actions as action (action.id)}
-            {@const meta = FACE_ACTIONS[action.id]}
+            {const meta = $derived(FACE_ACTIONS[action.id])}
             <button
               type="button"
               class={`${actionBtn} ${toneClass(meta.tone)}`}

@@ -4,6 +4,7 @@ import 'package:immich_mobile/providers/gallery_nav/gallery_tab_enum.dart';
 import 'package:immich_mobile/routing/router.dart';
 
 class GalleryNavDestination {
+  // ignore: unused-code
   final GalleryTabEnum tab;
   final String labelKey;
   final IconData idleIcon;
@@ -42,8 +43,6 @@ class GalleryNavDestination {
           // The existing `spaces` key, already translated everywhere — not a
           // new `nav_spaces`, which would ship English-only.
           labelKey: 'spaces',
-          // Same pair the legacy tab shell uses for its own Spaces tab
-          // (tab_shell.page.dart:41-42).
           idleIcon: Icons.workspaces_outlined,
           activeIcon: Icons.workspaces,
           routeBuilder: _spacesRoute,

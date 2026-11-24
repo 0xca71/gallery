@@ -3,11 +3,12 @@ import { JOBS_ASSET_PAGINATION_SIZE } from 'src/constants.js';
 import { OnJob } from 'src/decorators.js';
 import { AuthDto } from 'src/dtos/auth.dto.js';
 import { PersonFaceSuggestionPageQueryDto, PersonFaceSuggestionPageResponseDto } from 'src/dtos/person.dto.js';
-import { JobName, JobStatus, Permission, QueueName } from 'src/enum.js';
+import { JobName, JobStatus, Permission, QueueName, SystemMetadataKey } from 'src/enum.js';
 import { PersonId } from 'src/repositories/person.repository.js';
 import { BaseService } from 'src/services/base.service.js';
 import { JobItem, type JobOf } from 'src/types.js';
 import { asDateTimeString } from 'src/utils/date.js';
+import { isSuggestionScanTarget } from 'src/utils/face-repair.js';
 import { isFaceSuggestionEnabled } from 'src/utils/misc.js';
 import { spaceVisibleAssetVisibilities } from 'src/utils/shared-space-album-scope.js';
 
@@ -15,18 +16,18 @@ const PERSON_SUGGESTION_EMBEDDING_SAMPLE = 20;
 const PERSON_SUGGESTION_NUM_RESULTS = 100;
 
 /**
- * Slice 13 (fork isolation): the fork's face-suggestion engine, extracted out of `person.service.ts`
- * — the same isolation `face-repair.service.ts`, `classification.service.ts` and
- * `shared-space.service.ts` already get. This code never interleaves with upstream `PersonService`
- * logic, so keeping it here means an upstream rebase touching `person.service.ts` never conflicts
- * with it. Mechanical move only: every route path, DTO and job name is unchanged, and the OpenAPI
- * output is byte-identical to before the move (verified by the zero-diff gate in the slice 13 commit).
- *
- * `person.service.ts` keeps only the genuine in-place hooks this engine needs from upstream code
- * paths it cannot own outright: verdict clearing in `reassignFaces`/`reassignFacesById`, the re-scan
- * queue in `update()`, the backfill-completion queue in `handleFaceIdentityBackfill`, and the
- * bootstrap sweep (`queueInitialFaceSuggestionSweep`, `onConfigValidate`, `onConfigUpdate`).
- */
+Slice 13 (fork isolation): the fork's face-suggestion engine, extracted out of `person.service.ts`
+— the same isolation `face-repair.service.ts`, `classification.service.ts` and
+`shared-space.service.ts` already get. This code never interleaves with upstream `PersonService`
+logic, so keeping it here means an upstream rebase touching `person.service.ts` never conflicts
+with it. Mechanical move only: every route path, DTO and job name is unchanged, and the OpenAPI
+output is byte-identical to before the move (verified by the zero-diff gate in the slice 13 commit).
+
+`person.service.ts` keeps only the in-place hook this engine needs from upstream code it cannot
+own outright: the re-scan queue in `update()`. The backfill-completion queue
+(`handleFaceIdentityBackfill`) and the bootstrap sweep (`queueInitialFaceSuggestionSweep`,
+`onConfigValidate`, `onConfigUpdate`) live in `src/gallery/services/face-identity-maintenance.service.ts`.
+*/
 @Injectable()
 export class FaceSuggestionService extends BaseService {
   private async findOrFail(id: string) {
@@ -49,10 +50,12 @@ export class FaceSuggestionService extends BaseService {
     for (const { ownerId, personGroupId } of changeFeaturePhoto) {
       const assetFace = await this.personRepository.getRandomFace(personGroupId);
 
-      if (assetFace) {
-        await this.personRepository.update({ ownerId, personGroupId, faceAssetId: assetFace.id });
-        jobs.push({ name: JobName.PersonGenerateThumbnail, data: { ownerId, personGroupId } });
+      if (!assetFace) {
+        continue;
       }
+
+      await this.personRepository.update({ ownerId, personGroupId, faceAssetId: assetFace.id });
+      jobs.push({ name: JobName.PersonGenerateThumbnail, data: { ownerId, personGroupId } });
     }
 
     await this.jobRepository.queueAll(jobs);
@@ -98,13 +101,8 @@ export class FaceSuggestionService extends BaseService {
     };
   }
 
-  // D14/Slice 9: claim -> reassign -> resolveAssignedFace -> identity-relink is one atomic unit — a crash or
-  // failure mid-chain must never leave the face reassigned without its manual identity link (a torn write),
-  // the same defect class executeRepair's per-route transaction (A1) already closes for the cleanup engine.
-  // Reads (access checks, person/face lookups) happen BEFORE the transaction opens; only the writes are
-  // wrapped. This intentionally does NOT delegate to reassignFacesById (the public method, used autocommit
-  // by its OTHER callers, e.g. the face-editor reassign endpoint) — confirm gets its own trx-wrapped write
-  // chain so that method's signature/behaviour for those callers is untouched.
+  // D14/Slice 9: the claim and the assignment are one atomic unit, so a failure mid-chain rolls the claim back
+  // too. Reads (access checks, person/face lookups) happen BEFORE the transaction opens.
   //
   // Slice 3 (S3.9): the feature gate runs FIRST, before the access checks, matching the space twin
   // (confirmSpacePersonFaceSuggestion) — a disabled feature is a cheap no-op rather than paying for an
@@ -148,25 +146,9 @@ export class FaceSuggestionService extends BaseService {
         return claimed;
       }
 
-      await this.personRepository.reassignFace(face.id, personId, trx);
-      // Drains every OTHER target's still-pending row for this now-assigned face (edge 12).
-      await this.facePersonVerdictRepository.resolveAssignedFace(face.id, trx);
-      // Inlined (rather than the private replaceFaceIdentity wrapper) so every write here threads the SAME
-      // trx explicitly.
-      const identity = await this.faceIdentityRepository.ensurePersonIdentity(personId, trx);
-      await this.faceIdentityRepository.replaceFaceIdentity(
-        { assetFaceId: face.id, identityId: identity.id, source: 'manual' },
-        trx,
-      );
-      // Slice 8 (F15): confirming this suggestion states a fact ("this face IS this person") that
-      // contradicts any durable rejected/ignored row for this SAME target. In practice claimPending's own
-      // eligibility gate (a few lines up) already refuses the claim whenever such a row exists — it applies
-      // the identical personId/identityId match to decide the row is even pending — so this call is
-      // defense-in-depth against that gate ever being relaxed independently, not something a fresh confirm
-      // can currently observe deleting a row. Scoped to this target only — see clearNegativeForTarget.
-      await this.facePersonVerdictRepository.clearNegativeForTarget(
-        { personGroupId: personId, identityId: identity.id },
-        [face.id],
+      // Also drains every OTHER target's still-pending row for this now-assigned face (edge 12).
+      await this.faceAssignmentService.assignFaces(
+        { personGroupId: personId, faceIds: [face.id], strength: 'manual' },
         trx,
       );
       return claimed;
@@ -176,7 +158,7 @@ export class FaceSuggestionService extends BaseService {
     }
 
     // Feature-photo refresh is display-only (a job enqueue + a non-identity person column), so it stays
-    // OUTSIDE the transaction — mirrors reassignFacesById's own placement of this step.
+    // OUTSIDE the transaction, as in reassignFacesById.
     if (person.faceAssetId === null) {
       await this.createNewFeaturePhoto([person]);
     }
@@ -246,18 +228,21 @@ export class FaceSuggestionService extends BaseService {
     const suggestionMaxDistance = suggestions.maxDistance;
 
     const person = await this.personRepository.getByGroupIdOnly(id);
-    if (!person || person.name === '' || person.isHidden || person.type !== 'person') {
+    if (!person || !isSuggestionScanTarget(person)) {
       return JobStatus.Skipped;
     }
 
-    const embeddings = await this.personRepository.getAssignedFaceEmbeddings(id, PERSON_SUGGESTION_EMBEDDING_SAMPLE);
+    const embeddings = await this.galleryPersonRepository.getAssignedFaceEmbeddings(
+      id,
+      PERSON_SUGGESTION_EMBEDDING_SAMPLE,
+    );
     if (embeddings.length === 0) {
       return JobStatus.Skipped;
     }
 
     const bestByFace = new Map<string, number>();
     for (const { embedding } of embeddings) {
-      const matches = await this.searchRepository.searchFaces({
+      const matches = await this.faceSearchRepository.searchFaces({
         userIds: [person.ownerId],
         embedding,
         hasPerson: false,
@@ -279,19 +264,40 @@ export class FaceSuggestionService extends BaseService {
     // D3: exclude candidates a human has already settled — a manually-linked face (owner-agnostic), or a
     // face a human has already said "not this person/identity" about, in ANY scope that shares the target's
     // identity. The candidate set is bounded to this scan's own results (never an unscoped read).
-    const candidateFaceIds = bestByFace.keys().toArray();
-    const { manualLinkedFaceIds, negativeFaceTargets } =
-      await this.faceVerdictService.getFaceSettlementInputs(candidateFaceIds);
-    const targetTokens = new Set([`person:${id}`, ...(person.identityId ? [`identity:${person.identityId}`] : [])]);
-    for (const faceId of candidateFaceIds) {
-      const negatives = negativeFaceTargets.get(faceId);
-      if (manualLinkedFaceIds.has(faceId) || (negatives && [...negatives].some((token) => targetTokens.has(token)))) {
-        bestByFace.delete(faceId);
-      }
+    const settled = await this.faceAssignmentService.getSettledFaceIds(bestByFace.keys().toArray(), {
+      personGroupId: id,
+      identityId: person.identityId,
+    });
+    for (const faceId of settled) {
+      bestByFace.delete(faceId);
     }
 
     const rows = [...bestByFace].map(([assetFaceId, distance]) => ({ personGroupId: id, assetFaceId, distance }));
     await this.facePersonVerdictRepository.upsertPending(rows);
+    return JobStatus.Success;
+  }
+
+  @OnJob({ name: JobName.FaceSuggestionMaintenance, queue: QueueName.PeopleBackfill })
+  async handleFaceSuggestionMaintenance(): Promise<JobStatus> {
+    const { machineLearning } = await this.getConfig({ withCache: false });
+    if (!isFaceSuggestionEnabled(machineLearning)) {
+      return JobStatus.Skipped;
+    }
+
+    await this.jobRepository.queueAll([
+      { name: JobName.PersonSuggestionScanQueueAll, data: {} },
+      { name: JobName.SpacePersonSuggestionScanQueueAll, data: {} },
+    ]);
+
+    // The one-shot boot sweep's marker (FaceIdentityMaintenanceService.queueInitialFaceSuggestionSweep) is
+    // written HERE, not where the job is queued, so it records "a sweep ran" rather than "a sweep was queued".
+    // This job is attempts:1 / removeOnFail:true, so a marker burnt at queue time would survive a run that
+    // failed and vanished. Only the success path may claim the slot — the `Skipped` return above deliberately does not,
+    // so an admin running this by hand while the feature is off doesn't consume the boot sweep. Setting it
+    // on a manual run once the feature IS on is correct and intentional: a full sweep genuinely happened.
+    await this.systemMetadataRepository.set(SystemMetadataKey.FaceSuggestionDefaultOnState, {
+      sweptAt: new Date().toISOString(),
+    });
     return JobStatus.Success;
   }
 
@@ -303,12 +309,14 @@ export class FaceSuggestionService extends BaseService {
     }
 
     let jobs: { name: JobName.PersonSuggestionScan; data: { id: string } }[] = [];
-    for await (const person of this.personRepository.getScannablePeopleWithUnassignedFaces()) {
+    for await (const person of this.galleryPersonRepository.getScannablePeopleWithUnassignedFaces()) {
       jobs.push({ name: JobName.PersonSuggestionScan, data: { id: person.personGroupId } });
-      if (jobs.length === JOBS_ASSET_PAGINATION_SIZE) {
-        await this.jobRepository.queueAll(jobs);
-        jobs = [];
+      if (jobs.length !== JOBS_ASSET_PAGINATION_SIZE) {
+        continue;
       }
+
+      await this.jobRepository.queueAll(jobs);
+      jobs = [];
     }
     await this.jobRepository.queueAll(jobs);
     return JobStatus.Success;
@@ -324,7 +332,7 @@ export class FaceSuggestionService extends BaseService {
     const suggestionMaxDistance = suggestions.maxDistance;
 
     const person = await this.sharedSpaceRepository.getPersonById(id);
-    if (!person || person.name.trim() === '' || person.isHidden || person.type !== 'person') {
+    if (!person || !isSuggestionScanTarget(person)) {
       return JobStatus.Skipped;
     }
 
@@ -343,7 +351,7 @@ export class FaceSuggestionService extends BaseService {
 
     const bestByFace = new Map<string, number>();
     for (const { embedding } of embeddings) {
-      const matches = await this.searchRepository.searchFaces({
+      const matches = await this.faceSearchRepository.searchFaces({
         spaceId: person.spaceId,
         embedding,
         hasPerson: false,
@@ -374,18 +382,12 @@ export class FaceSuggestionService extends BaseService {
 
     // D3: same exclusion as the personal scan — a manually-linked face (owner-agnostic), or a face a human
     // has already said "not this person/identity" about, in ANY scope that shares the target's identity.
-    const candidateFaceIds = bestByFace.keys().toArray();
-    const { manualLinkedFaceIds, negativeFaceTargets } =
-      await this.faceVerdictService.getFaceSettlementInputs(candidateFaceIds);
-    const targetTokens = new Set([
-      `space-person:${id}`,
-      ...(person.identityId ? [`identity:${person.identityId}`] : []),
-    ]);
-    for (const faceId of candidateFaceIds) {
-      const negatives = negativeFaceTargets.get(faceId);
-      if (manualLinkedFaceIds.has(faceId) || (negatives && [...negatives].some((token) => targetTokens.has(token)))) {
-        bestByFace.delete(faceId);
-      }
+    const settled = await this.faceAssignmentService.getSettledFaceIds(bestByFace.keys().toArray(), {
+      spacePersonId: id,
+      identityId: person.identityId,
+    });
+    for (const faceId of settled) {
+      bestByFace.delete(faceId);
     }
 
     const rows = [...bestByFace].map(([assetFaceId, distance]) => ({
@@ -409,10 +411,12 @@ export class FaceSuggestionService extends BaseService {
     let jobs: { name: JobName.SpacePersonSuggestionScan; data: { id: string } }[] = [];
     for await (const person of this.sharedSpaceRepository.getScannableSpacePeopleWithUnassignedFaces()) {
       jobs.push({ name: JobName.SpacePersonSuggestionScan, data: { id: person.id } });
-      if (jobs.length === JOBS_ASSET_PAGINATION_SIZE) {
-        await this.jobRepository.queueAll(jobs);
-        jobs = [];
+      if (jobs.length !== JOBS_ASSET_PAGINATION_SIZE) {
+        continue;
       }
+
+      await this.jobRepository.queueAll(jobs);
+      jobs = [];
     }
     await this.jobRepository.queueAll(jobs);
     return JobStatus.Success;

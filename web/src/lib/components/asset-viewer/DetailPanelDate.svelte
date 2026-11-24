@@ -1,8 +1,8 @@
 <script lang="ts">
-  import AssetChangeDateModal from '$lib/modals/AssetChangeDateModal.svelte';
-  import { locale } from '$lib/stores/preferences.store';
-  import { applyContextualFilter } from '$lib/utils/filter-target';
-  import { fromISODateTime, fromISODateTimeUTC, toTimelineAsset } from '$lib/utils/timeline-util';
+  import AssetChangeDateModal from '#lib/modals/AssetChangeDateModal.svelte';
+  import { locale } from '#lib/stores/preferences.store.ts';
+  import { applyContextualFilter } from '#lib/utils/filter-target.ts';
+  import { fromISODateTime, fromISODateTimeUTC, toTimelineAsset } from '#lib/utils/timeline-util.ts';
   import { type AssetResponseDto } from '@immich/sdk';
   import { Icon, IconButton, modalManager } from '@immich/ui';
   import { mdiCalendar, mdiPencil } from '@mdi/js';
@@ -11,9 +11,9 @@
   type Props = {
     asset: AssetResponseDto;
     /**
-     * R3 — was re-derived locally from authManager; every other DetailPanel child takes it as a
-     * prop, and only the parent knows about a shared link (where authManager.user THROWS).
-     */
+    R3 — was re-derived locally from authManager; every other DetailPanel child takes it as a
+    prop, and only the parent knows about a shared link (where authManager.user THROWS).
+    */
     isOwner: boolean;
     /** R4/E2 — false on a shared link. */
     canFilter?: boolean;
@@ -58,9 +58,8 @@
       <div>
         <p>
           {#if canFilter && day}
-            {@const label = dateTime.toLocaleString(
-              { month: 'short', day: 'numeric', year: 'numeric' },
-              { locale: $locale },
+            {const label = $derived(
+              dateTime.toLocaleString({ month: 'short', day: 'numeric', year: 'numeric' }, { locale: $locale }),
             )}
             <button
               type="button"

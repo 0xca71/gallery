@@ -1,16 +1,16 @@
+import { createAlbum } from '#lib/gallery/album/album-add.ts';
+import { applyTakeoutMetadata } from '#lib/gallery/import/takeout-metadata.ts';
+import type { ImportOptions } from '#lib/managers/import-manager.svelte.ts';
+import { uploadRequest } from '#lib/utils.ts';
+import { hashFile } from '#lib/utils/file-uploader.ts';
+import type { TakeoutMediaItem } from '#lib/utils/google-takeout-parser.ts';
 import {
   AssetMediaStatus,
   AssetUploadAction,
-  AssetVisibility,
   checkBulkUpload,
   getBaseUrl,
-  updateAsset,
   type AssetMediaResponseDto,
 } from '@immich/sdk';
-import type { ImportOptions } from '$lib/managers/import-manager.svelte';
-import { uploadRequest } from '$lib/utils';
-import { createAlbum } from '$lib/utils/album-utils';
-import type { TakeoutMediaItem } from '$lib/utils/google-takeout-parser';
 
 export interface UploadResult {
   assetId: string;
@@ -18,13 +18,8 @@ export interface UploadResult {
   error?: string;
 }
 
-async function computeSha1(file: File): Promise<string> {
-  const bytes = await file.arrayBuffer();
-  const hash = await crypto.subtle.digest('SHA-1', bytes);
-  return Array.from(new Uint8Array(hash), (b) => b.toString(16).padStart(2, '0')).join('');
-}
-
 export async function uploadTakeoutItem(item: TakeoutMediaItem, options: ImportOptions): Promise<UploadResult> {
+  let assetId = '';
   try {
     const fileCreatedAt = item.metadata?.dateTaken
       ? item.metadata.dateTaken.toISOString()
@@ -32,19 +27,23 @@ export async function uploadTakeoutItem(item: TakeoutMediaItem, options: ImportO
     const file = await item.getFile();
 
     // Duplicate check
-    if (options.skipDuplicates && crypto?.subtle) {
+    if (options.skipDuplicates) {
       try {
-        const checksum = await computeSha1(file);
+        const checksum = await hashFile(file);
         const {
           results: [checkResult],
         } = await checkBulkUpload({
           assetBulkUploadCheckDto: { assets: [{ id: item.name, checksum }] },
         });
         if (checkResult.action === AssetUploadAction.Reject && checkResult.assetId) {
-          return { assetId: checkResult.assetId, status: 'duplicate' };
+          assetId = checkResult.assetId;
         }
       } catch (error) {
         console.error('Error checking duplicate', error);
+      }
+      if (assetId) {
+        await applyTakeoutMetadata(assetId, item, options, true);
+        return { assetId, status: 'duplicate' };
       }
     }
 
@@ -64,40 +63,13 @@ export async function uploadTakeoutItem(item: TakeoutMediaItem, options: ImportO
       data: formData,
     });
 
-    const assetId = response.data.id;
-
-    if (response.data.status === AssetMediaStatus.Duplicate) {
-      return { assetId, status: 'duplicate' };
-    }
-
-    // Post-upload metadata update
-    const updateDto: Record<string, unknown> = {};
-
-    if (item.metadata?.latitude !== undefined && item.metadata?.longitude !== undefined) {
-      updateDto.latitude = item.metadata.latitude;
-      updateDto.longitude = item.metadata.longitude;
-    }
-
-    if (options.importDescriptions && item.metadata?.description) {
-      updateDto.description = item.metadata.description;
-    }
-
-    if (options.importArchived && item.metadata?.isArchived) {
-      updateDto.visibility = AssetVisibility.Archive;
-    }
-
-    if (item.metadata?.dateTaken) {
-      updateDto.dateTimeOriginal = item.metadata.dateTaken.toISOString();
-    }
-
-    if (Object.keys(updateDto).length > 0) {
-      await updateAsset({ id: assetId, updateAssetDto: updateDto });
-    }
-
-    return { assetId, status: 'imported' };
+    assetId = response.data.id;
+    const isDuplicate = response.data.status === AssetMediaStatus.Duplicate;
+    await applyTakeoutMetadata(assetId, item, options, isDuplicate);
+    return { assetId, status: isDuplicate ? 'duplicate' : 'imported' };
   } catch (error) {
     return {
-      assetId: '',
+      assetId,
       status: 'error',
       error: error instanceof Error ? error.message : String(error),
     };

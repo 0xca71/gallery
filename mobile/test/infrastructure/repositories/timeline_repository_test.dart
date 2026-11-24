@@ -1,4 +1,4 @@
-// Reactivity regression tests for TimelineRepository.sharedSpace.
+// Reactivity regression tests for SharedSpaceTimelineRepository.sharedSpace.
 //
 // The bug we're guarding against: a `.watch()` stream whose query references
 // a table only via an `isInQuery` / EXISTS subquery can silently fail to
@@ -47,7 +47,7 @@ Future<void> _waitFor(bool Function() predicate, {Duration timeout = const Durat
 
 void main() {
   late Drift db;
-  late TimelineRepository sut;
+  late SharedSpaceTimelineRepository sut;
 
   setUpAll(() async {
     // truncateDate() uses intl's DateFormat which requires locale data.
@@ -56,7 +56,7 @@ void main() {
 
   setUp(() {
     db = Drift(DatabaseConnection(NativeDatabase.memory(), closeStreamsSynchronously: true));
-    sut = TimelineRepository(db);
+    sut = SharedSpaceTimelineRepository(TimelineRepository(db));
   });
 
   tearDown(() async {
@@ -140,7 +140,7 @@ void main() {
     return sut.video(userIds, currentUserId, GroupAssetsBy.day).assetSource(0, 100);
   }
 
-  group('TimelineRepository.video() visibility matrix', () {
+  group('SharedSpaceTimelineRepository.video() visibility matrix', () {
     test('1. owner asset visible', () async {
       await insertUser('viewer');
       await insertVideo('a1', 'viewer');
@@ -450,7 +450,7 @@ void main() {
     });
   });
 
-  group('TimelineRepository.place()', () {
+  group('SharedSpaceTimelineRepository.place()', () {
     Future<void> insertExif(String assetId, String? city) =>
         db.into(db.remoteExifEntity).insert(RemoteExifEntityCompanion.insert(assetId: assetId, city: Value(city)));
 
@@ -536,7 +536,7 @@ void main() {
     });
   });
 
-  group('TimelineRepository.map() bucket sheet', () {
+  group('SharedSpaceTimelineRepository.map() bucket sheet', () {
     LatLngBounds globeBounds() => LatLngBounds(southwest: const LatLng(-89, -179), northeast: const LatLng(89, 179));
 
     LatLngBounds europeBounds() => LatLngBounds(southwest: const LatLng(35, -10), northeast: const LatLng(70, 40));
@@ -1026,6 +1026,78 @@ void main() {
     await sub.cancel();
   });
 
+  // The favorite and space-album buckets reach their scope tables only through the joins they
+  // hand upstream's `_watchRemoteBucket`, in both the grouped and the ungrouped (none) count.
+  group('joined bucket streams re-emit when a joined table changes', () {
+    int total(List<Bucket> buckets) => buckets.fold<int>(0, (sum, b) => sum + b.assetCount);
+
+    Future<void> expectReemits(Stream<List<Bucket>> stream, Future<void> Function() mutate) async {
+      final emissions = <int>[];
+      final sub = stream.listen((buckets) => emissions.add(total(buckets)));
+      await _waitFor(() => emissions.isNotEmpty);
+      expect(emissions.last, 1);
+      await mutate();
+      await _waitFor(() => emissions.length >= 2);
+      expect(emissions.last, 0);
+      await sub.cancel();
+    }
+
+    Future<void> seedSharedFavorite() async {
+      await insertUser('owner');
+      await insertUser('viewer');
+      await insertVideo('a1', 'owner', type: AssetType.image);
+      await (db.update(
+        db.remoteAssetEntity,
+      )..where((t) => t.id.equals('a1'))).write(const RemoteAssetEntityCompanion(isFavorite: Value(true)));
+      await insertSpace('s1', 'owner');
+      await insertMember('s1', 'viewer');
+      await linkAssetToSpace('s1', 'a1');
+    }
+
+    Future<void> removeViewerFromSpace() =>
+        (db.delete(db.sharedSpaceMemberEntity)..where((t) => t.userId.equals('viewer'))).go();
+
+    test('favorite() day buckets re-emit when the viewer leaves the space', () async {
+      await seedSharedFavorite();
+      await expectReemits(sut.favorite('viewer', GroupAssetsBy.day).bucketSource(), removeViewerFromSpace);
+    });
+
+    test('favorite() none count re-emits when the viewer leaves the space', () async {
+      await seedSharedFavorite();
+      await expectReemits(sut.favorite('viewer', GroupAssetsBy.none).bucketSource(), removeViewerFromSpace);
+    });
+
+    Future<void> seedSpaceAlbum() async {
+      await insertUser('owner');
+      await insertVideo('a1', 'owner', type: AssetType.image);
+      await insertSpace('s1', 'owner');
+      await linkAlbumToSpace('s1', 'album-1', 'a1');
+    }
+
+    Future<void> removeFromAlbum() =>
+        (db.delete(db.sharedSpaceAlbumAssetEntity)..where((t) => t.assetId.equals('a1'))).go();
+
+    test('spaceAlbum() day buckets re-emit when the asset leaves the album', () async {
+      await seedSpaceAlbum();
+      await expectReemits(sut.spaceAlbum('s1', 'album-1', GroupAssetsBy.day).bucketSource(), removeFromAlbum);
+    });
+
+    test('spaceAlbum() none count re-emits when the asset leaves the album', () async {
+      await seedSpaceAlbum();
+      await expectReemits(sut.spaceAlbum('s1', 'album-1', GroupAssetsBy.none).bucketSource(), removeFromAlbum);
+    });
+
+    test('sharedSpace() none count re-emits when the album link hides the album', () async {
+      await seedSpaceAlbum();
+      await expectReemits(
+        sut.sharedSpace('s1', GroupAssetsBy.none).bucketSource(),
+        () => (db.update(db.sharedSpaceAlbumLinkEntity)..where((t) => t.albumId.equals('album-1'))).write(
+          const SharedSpaceAlbumLinkEntityCompanion(showInTimeline: Value(false)),
+        ),
+      );
+    });
+  });
+
   // ---------------------------------------------------------------------------
   // fromAssetStream grouped buckets (Slice 1 — data layer)
   // ---------------------------------------------------------------------------
@@ -1045,7 +1117,7 @@ void main() {
     isEdited: false,
   );
 
-  group('TimelineRepository.fromAssetStream() grouped buckets', () {
+  group('SharedSpaceTimelineRepository.fromAssetStream() grouped buckets', () {
     // Four test assets spanning three months / two years (all in local time).
     late List<BaseAsset> assets;
 
@@ -1268,7 +1340,7 @@ void main() {
     });
   });
 
-  group('TimelineRepository.sharedSpacePerson()', () {
+  group('SharedSpaceTimelineRepository.sharedSpacePerson()', () {
     // Parity gap sibling of #727 (per-photo faces) and #737 (People page): a Space-shared
     // person's DETAIL timeline.
     //
@@ -1290,6 +1362,10 @@ void main() {
       await insertMember('s1', 'viewer', showInTimeline: true);
       await linkAssetToSpace('s1', 'a1');
       await linkAssetToSpace('s1', 'a2');
+    });
+
+    test('is a space timeline: every photo is in the space, so tiles carry no space badge', () {
+      expect(sut.sharedSpacePerson(['a1'], GroupAssetsBy.day).origin, TimelineOrigin.remoteSpace);
     });
 
     test('renders the resolved asset ids even though the viewer does not own them', () async {
@@ -1324,7 +1400,7 @@ void main() {
     });
   });
 
-  group('TimelineRepository.sharedSpacePerson() archive inclusion (L12)', () {
+  group('SharedSpaceTimelineRepository.sharedSpacePerson() archive inclusion (L12)', () {
     // The space-person timeline's visibility filter historically allowed only
     // AssetVisibility.timeline, the 7th site commit 9185ff58e2 missed when it fixed the
     // other 6 (video/place/map/sharedSpace watch+get). The server (getPersonAssetIds)

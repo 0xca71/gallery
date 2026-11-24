@@ -1,21 +1,20 @@
 <script lang="ts">
-  import { AlbumViewMode, SortOrder } from '$lib/stores/preferences.store';
-  import { SpaceAlbumGroupBy, spaceAlbumViewSettings } from '$lib/stores/space-album-view-settings.store';
+  import { AlbumViewMode, SortOrder } from '#lib/stores/preferences.store.ts';
+  import { SpaceAlbumGroupBy, spaceAlbumViewSettings } from '#lib/stores/space-album-view-settings.store.ts';
+  import { collapseAllAlbumGroups, expandAllAlbumGroups } from '#lib/utils/album-utils.ts';
   import {
-    collapseAllSpaceAlbumGroups,
-    expandAllSpaceAlbumGroups,
     findSpaceGroupOptionMetadata,
     getSelectedSpaceAlbumGroupOption,
     spaceGroupOptionsMetadata,
     type SpaceAlbumGroupOptionMetadata,
-  } from '$lib/utils/space-album-grouping';
+  } from '#lib/utils/space-album-grouping.ts';
   import {
+    findSpaceAlbumSortOptionMetadata,
+    getSpaceAlbumSortLabels,
+    spaceAlbumSortOptionsMetadata,
     type SpaceAlbumSortByValue,
     type SpaceAlbumSortOptionMetadata,
-    SpaceAlbumSortBy,
-    findSpaceAlbumSortOptionMetadata,
-    spaceAlbumSortOptionsMetadata,
-  } from '$lib/utils/space-album-sort';
+  } from '#lib/utils/space-album-sort.ts';
   import { Button, Icon, Text } from '@immich/ui';
   import {
     mdiArrowDownThin,
@@ -106,15 +105,7 @@
   );
   let isGrouped = $derived(getSelectedSpaceAlbumGroupOption($spaceAlbumViewSettings) !== SpaceAlbumGroupBy.None);
 
-  let albumSortByNames: Record<SpaceAlbumSortByValue, string> = $derived({
-    [SpaceAlbumSortBy.Title]: $t('sort_title'),
-    [SpaceAlbumSortBy.ItemCount]: $t('sort_items'),
-    [SpaceAlbumSortBy.DateModified]: $t('sort_modified'),
-    [SpaceAlbumSortBy.DateCreated]: $t('sort_created'),
-    [SpaceAlbumSortBy.MostRecentPhoto]: $t('sort_recent'),
-    [SpaceAlbumSortBy.OldestPhoto]: $t('sort_oldest'),
-    [SpaceAlbumSortBy.RecentlyLinked]: $t('sort_recently_linked'),
-  });
+  let albumSortByNames: Record<SpaceAlbumSortByValue, string> = $derived(getSpaceAlbumSortLabels($t));
 
   let spaceGroupByNames: Record<SpaceAlbumGroupBy, string> = $derived({
     [SpaceAlbumGroupBy.None]: $t('group_no'),
@@ -222,7 +213,7 @@
         aria-label={$t('expand_all')}
         class="flex items-center rounded-lg p-1.5 text-sm hover:bg-gray-100 dark:hover:bg-gray-800"
         data-testid="space-albums-expand-all"
-        onclick={() => expandAllSpaceAlbumGroups()}
+        onclick={() => expandAllAlbumGroups(spaceAlbumViewSettings)}
       >
         <Icon icon={mdiUnfoldMoreHorizontal} size="18" />
       </button>
@@ -232,7 +223,7 @@
         aria-label={$t('collapse_all')}
         class="flex items-center rounded-lg p-1.5 text-sm hover:bg-gray-100 dark:hover:bg-gray-800"
         data-testid="space-albums-collapse-all"
-        onclick={() => collapseAllSpaceAlbumGroups(groupIds)}
+        onclick={() => collapseAllAlbumGroups(groupIds, spaceAlbumViewSettings)}
       >
         <Icon icon={mdiUnfoldLessHorizontal} size="18" />
       </button>

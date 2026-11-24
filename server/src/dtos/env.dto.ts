@@ -1,5 +1,6 @@
 import z from 'zod';
 import { ImmichEnvironmentSchema, LogFormatSchema, LogLevelSchema } from 'src/enum.js';
+import { GalleryStorageEnvExtension } from 'src/gallery/dtos/env.dto.js';
 import { IsIPRange } from 'src/validation.js';
 
 // TODO import from sql-tools once the swagger plugin supports external enums
@@ -14,10 +15,10 @@ enum DatabaseSslMode {
 const DatabaseSslModeSchema = z.enum(DatabaseSslMode).describe('Database SSL mode').meta({ id: 'DatabaseSslMode' });
 const absolutePath = z.string().regex(/^\//, 'Must be an absolute path').optional();
 /**
- * Treat certain strings as booleans and coerce them to boolean
- * Ideal for environment variables that are strings but should be treated as booleans
- * @docs https://zod.dev/api?id=stringbool
- */
+Treat certain strings as booleans and coerce them to boolean
+Ideal for environment variables that are strings but should be treated as booleans
+@docs https://zod.dev/api?id=stringbool
+*/
 const stringBool = z.stringbool();
 
 const trustedProxiesSchema = z
@@ -37,13 +38,6 @@ const trustedProxiesSchema = z
 export const EnvSchema = z
   .object({
     IMMICH_API_METRICS_PORT: z.coerce.number().int().optional(),
-    IMMICH_BACKUP_S3_ENABLED: stringBool.optional(),
-    IMMICH_BACKUP_S3_ENDPOINT: z.string().optional(),
-    IMMICH_BACKUP_S3_BUCKET: z.string().optional(),
-    IMMICH_BACKUP_S3_REGION: z.string().optional(),
-    IMMICH_BACKUP_S3_ACCESS_KEY_ID: z.string().optional(),
-    IMMICH_BACKUP_S3_SECRET_ACCESS_KEY: z.string().optional(),
-    IMMICH_BACKUP_S3_PREFIX: z.string().optional(),
     IMMICH_BUILD_DATA: z.string().optional(),
     IMMICH_BUILD: z.string().optional(),
     IMMICH_BUILD_URL: z.string().optional(),
@@ -57,14 +51,7 @@ export const EnvSchema = z
     IMMICH_LOG_LEVEL: LogLevelSchema.optional(),
     IMMICH_LOG_FORMAT: LogFormatSchema.optional(),
     IMMICH_MEDIA_LOCATION: absolutePath,
-    IMMICH_STORAGE_BACKEND: z.enum(['disk', 's3']).optional(),
-    IMMICH_S3_BUCKET: z.string().optional(),
-    IMMICH_S3_REGION: z.string().optional(),
-    IMMICH_S3_ENDPOINT: z.string().optional(),
-    IMMICH_S3_ACCESS_KEY_ID: z.string().optional(),
-    IMMICH_S3_SECRET_ACCESS_KEY: z.string().optional(),
-    IMMICH_S3_PRESIGNED_URL_EXPIRY: z.coerce.number().int().optional(),
-    IMMICH_S3_SERVE_MODE: z.enum(['redirect', 'proxy']).optional(),
+    ...GalleryStorageEnvExtension,
     IMMICH_MICROSERVICES_METRICS_PORT: z.coerce.number().int().optional(),
     IMMICH_ALLOW_EXTERNAL_PLUGINS: stringBool.optional(),
     IMMICH_PLUGINS_INSTALL_FOLDER: absolutePath,
@@ -82,7 +69,6 @@ export const EnvSchema = z
     IMMICH_THIRD_PARTY_SUPPORT_URL: z.string().optional(),
     IMMICH_ALLOW_SETUP: stringBool.optional(),
     IMMICH_PEOPLE_STATISTICS_ENABLED: stringBool.optional(),
-    IMMICH_WEB_DELETE_TOAST_THRESHOLD: z.coerce.number().int().min(0).optional(),
     IMMICH_TRUSTED_PROXIES: trustedProxiesSchema,
     IMMICH_WORKERS_INCLUDE: z.string().optional(),
     IMMICH_WORKERS_EXCLUDE: z.string().optional(),

@@ -6,7 +6,9 @@ import 'package:drift/drift.dart';
 import 'package:drift/src/runtime/executor/stream_queries.dart' show StreamQueryStore;
 import 'package:drift_sqlite_async/drift_sqlite_async.dart';
 import 'package:flutter/foundation.dart';
+import 'package:immich_mobile/data/db/main/dao/ocr.dart';
 import 'package:immich_mobile/data/db/main/dao/person.dart';
+import 'package:immich_mobile/data/db/main/dao/user_metadata.dart';
 import 'package:immich_mobile/data/db/main/database.drift.dart';
 import 'package:immich_mobile/data/db/main/database.steps.dart';
 import 'package:immich_mobile/data/db/main/table/app/settings.dart';
@@ -45,12 +47,12 @@ import 'package:immich_mobile/data/db/main/table/user/auth_user.dart';
 import 'package:immich_mobile/data/db/main/table/user/metadata.dart';
 import 'package:immich_mobile/data/db/main/table/user/partner.dart';
 import 'package:immich_mobile/data/db/main/table/user/user.dart';
+import 'package:immich_mobile/gallery/data/heal_date_time_columns.dart';
 import 'package:immich_mobile/infrastructure/repositories/backup.repository.dart';
 import 'package:immich_mobile/infrastructure/repositories/local_album.repository.dart';
 import 'package:immich_mobile/infrastructure/repositories/local_asset.repository.dart';
 import 'package:immich_mobile/infrastructure/repositories/map.repository.dart';
 import 'package:immich_mobile/infrastructure/repositories/memory.repository.dart';
-import 'package:immich_mobile/infrastructure/repositories/ocr.repository.dart';
 import 'package:immich_mobile/infrastructure/repositories/partner.repository.dart';
 import 'package:immich_mobile/infrastructure/repositories/remote_album.repository.dart';
 import 'package:immich_mobile/infrastructure/repositories/remote_asset.repository.dart';
@@ -62,7 +64,6 @@ import 'package:immich_mobile/infrastructure/repositories/sync_stream.repository
 import 'package:immich_mobile/infrastructure/repositories/timeline.repository.dart';
 import 'package:immich_mobile/infrastructure/repositories/trashed_local_asset.repository.dart';
 import 'package:immich_mobile/infrastructure/repositories/user.repository.dart';
-import 'package:immich_mobile/infrastructure/repositories/user_metadata.repository.dart';
 import 'package:logging/logging.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
@@ -107,7 +108,11 @@ import 'package:sqlite_async/sqlite_async.dart';
     SettingsEntity,
     AssetOcrEntity,
   ],
-  include: {'package:immich_mobile/data/db/main/query/merged_asset.drift'},
+  include: {
+    'package:immich_mobile/data/db/main/query/merged_asset.drift',
+    // gallery-fork: the main timeline with Space membership.
+    'package:immich_mobile/data/db/main/query/shared_space_timeline.drift',
+  },
   daos: [
     AuthUserRepository,
     BackupRepository,
@@ -135,6 +140,7 @@ import 'package:sqlite_async/sqlite_async.dart';
 class Drift extends $Drift {
   final SqliteConnectionPool? _updatePool;
 
+  @visibleForTesting
   Drift(super.executor) : _updatePool = null;
 
   Drift.sqlite(SqliteConnection db, SqliteConnectionPool updatePool)
@@ -144,7 +150,7 @@ class Drift extends $Drift {
   @override
   Future<void> close() async {
     await super.close();
-    _updatePool?.close();
+    await _updatePool?.close();
   }
 
   Future<void> reset() async {
@@ -182,7 +188,7 @@ class Drift extends $Drift {
   }
 
   @override
-  int get schemaVersion => 38;
+  int get schemaVersion => 42;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -191,9 +197,15 @@ class Drift extends $Drift {
       await customStatement('PRAGMA foreign_keys = OFF');
 
       try {
-        await transaction(
-          () => m.runMigrationSteps(
-            from: from,
+        await transaction(() async {
+          // Re-read the current version inside the transaction to avoid race between different connections.
+          final current = (await customSelect('PRAGMA user_version').getSingle()).read<int>('user_version');
+          if (current >= to) {
+            return;
+          }
+
+          await m.runMigrationSteps(
+            from: current,
             to: to,
             steps: migrationSteps(
               from1To2: (m, v2) async {
@@ -439,9 +451,38 @@ class Drift extends $Drift {
                   TableMigration(v38.sharedSpaceAlbumLinkEntity, newColumns: [v38.sharedSpaceAlbumLinkEntity.folderId]),
                 );
               },
+              // Upstream immich-31577 added local_asset.previous_checksum at its drift v32,
+              // which collides with the fork's v32 (the created_at index). Renumbered here to
+              // v39 — the next version after the fork's v38 — because installed clients already
+              // ran the fork's v32-v38 and must not re-run them under new numbers.
+              from38To39: (m, v39) async {
+                await m.addColumn(v39.localAssetEntity, v39.localAssetEntity.previousChecksum);
+              },
+              // Upstream immich-31615 removed the asset_face FK constraints at its drift v33,
+              // and immich-30490 healed out-of-range datetimes at its v34. Both collide with the
+              // fork's shipped v33/v34, so they are renumbered here to v40 and v41.
+              from39To40: (m, v40) async {
+                await m.alterTable(TableMigration(v40.assetFaceEntity));
+              },
+              from40To41: (m, v41) async {
+                await _healV33DateTimes(this);
+              },
+              // Upstream immich-30262 added the group_date columns at its drift v35, which collides with
+              // the fork's shipped v35, so it is renumbered here to v42.
+              from41To42: (m, v42) async {
+                await m.addColumn(v42.remoteAssetEntity, v42.remoteAssetEntity.groupDate);
+                await m.addColumn(v42.localAssetEntity, v42.localAssetEntity.groupDate);
+                await m.createIndex(v42.idxRemoteAssetGroup);
+                await m.createIndex(v42.idxLocalAssetGroup);
+              },
             ),
-          ),
-        );
+          );
+
+          // This prevents a drift between the current connection and other connections in the pool,
+          // which is waiting for the transaction to finish. Drift updates this outside of the transaction,
+          // so doing it inside the transaction ensures that all connections are in sync.
+          await customStatement('PRAGMA user_version = $to');
+        });
 
         if (kDebugMode) {
           // Fail if the migration broke foreign keys
@@ -463,6 +504,44 @@ class Drift extends $Drift {
       await customStatement('PRAGMA temp_store = MEMORY');
     },
   );
+}
+
+// every datetime column of the v33 schema, hardcoded: the heal runs once at v33->v34,
+// so the set must not follow later schema changes
+const _v33DateTimeColumns = <String, List<String>>{
+  'auth_user_entity': ['profile_changed_at'],
+  'user_entity': ['profile_changed_at'],
+  'local_album_entity': ['updated_at'],
+  'local_asset_entity': ['created_at', 'updated_at', 'adjustment_time'],
+  'remote_asset_entity': ['created_at', 'updated_at', 'local_date_time', 'deleted_at', 'uploaded_at'],
+  'trashed_local_asset_entity': ['created_at', 'updated_at'],
+  'remote_exif_entity': ['date_time_original'],
+  'remote_album_entity': ['created_at', 'updated_at'],
+  'remote_asset_cloud_id_entity': ['created_at', 'adjustment_time'],
+  'memory_entity': ['created_at', 'updated_at', 'deleted_at', 'memory_at', 'seen_at', 'show_at', 'hide_at'],
+  'stack_entity': ['created_at', 'updated_at'],
+  'person_entity': ['created_at', 'updated_at', 'birth_date'],
+  'asset_face_entity': ['deleted_at'],
+  'settings': ['updated_at'],
+  ...galleryV33DateTimeColumns,
+};
+
+// Rewrites datetime text sqlite date functions cannot handle: signed extended
+// years and year 0000 (pre-clamp syncs), plus anything later than the safe
+// midnight ceiling, which re-overflows sqlite under 'localtime' east of UTC.
+// One statement per table: each column heals only when its own value is out of range
+Future<void> _healV33DateTimes(GeneratedDatabase db) async {
+  const floor = '0001-01-01T00:00:00.000Z';
+  const ceiling = '9999-12-31T00:00:00.000Z';
+  for (final MapEntry(key: table, value: columns) in _v33DateTimeColumns.entries) {
+    String low(String c) => "substr($c, 1, 1) = '-' OR substr($c, 1, 4) = '0000'";
+    String high(String c) => "substr($c, 1, 1) = '+' OR $c > '$ceiling'";
+    final assignments = columns.map(
+      (c) => "$c = CASE WHEN ${low(c)} THEN '$floor' WHEN ${high(c)} THEN '$ceiling' ELSE $c END",
+    );
+    final outOfRange = columns.map((c) => '${low(c)} OR ${high(c)}');
+    await db.customStatement('UPDATE $table SET ${assignments.join(', ')} WHERE ${outOfRange.join(' OR ')}');
+  }
 }
 
 // ignore: invalid_use_of_internal_member

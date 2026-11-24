@@ -2,7 +2,7 @@
   <br/>  
   <a href="https://opensource.org/license/agpl-v3"><img src="https://img.shields.io/badge/License-AGPL_v3-blue.svg?color=3F51B5&style=for-the-badge&label=License&logoColor=000000&labelColor=ececec" alt="License: AGPLv3"></a>
   <a href="https://discord.gg/cxBfbuxyG4">
-    <img src="https://img.shields.io/discord/1480633426376921239.svg?label=Discord&logo=Discord&style=for-the-badge&logoColor=000000&labelColor=ececec" atl="Discord"/>
+    <img src="https://img.shields.io/discord/1480633426376921239.svg?label=Discord&logo=Discord&style=for-the-badge&logoColor=000000&labelColor=ececec" alt="Discord"/>
   </a>
   <br/>  
   <br/>   
@@ -36,6 +36,7 @@
   <a href="README_uk_UA.md">Українська</a>
   <a href="README_ru_RU.md">Русский</a>
   <a href="README_bg_BG.md">Български</a>
+  <a href="README_pl_PL.md">Polski</a>
   <a href="README_pt_BR.md">Português Brasileiro</a>
   <a href="README_sv_SE.md">Svenska</a>
   <a href="README_ar_JO.md">العربية</a>

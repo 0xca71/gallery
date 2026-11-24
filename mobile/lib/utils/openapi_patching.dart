@@ -21,18 +21,26 @@ final Map<String, Map<String, Object?>> openApiPatches = {
     'folders': FoldersResponse(enabled: false, sidebarWeb: false).toJson(),
     'memories': MemoriesResponse(enabled: true, duration: 5, sidebarWeb: false).toJson(),
     'ratings': RatingsResponse(enabled: false).toJson(),
-    'people': PeopleResponse(enabled: true, sidebarWeb: false).toJson(),
+    'people': PeopleResponse(enabled: true, sidebarWeb: false, updateStrategy: PersonUpdateStrategy.everyone).toJson(),
     'tags': TagsResponse(enabled: false, sidebarWeb: false).toJson(),
     'sharedLinks': SharedLinksResponse(enabled: true, sidebarWeb: false).toJson(),
     'cast': CastResponse(gCastEnabled: false).toJson(),
     'albums': {'defaultAssetOrder': 'desc'},
     'recentlyAdded': RecentlyAddedResponse(sidebarWeb: false).toJson(),
   },
+  'PublicConfigDto': {
+    'map': PublicConfigMapDto(
+      enabled: true,
+      lightStyle: 'https://tiles.immich.cloud/v1/style/light.json',
+      darkStyle: 'https://tiles.immich.cloud/v1/style/dark.json',
+    ).toJson(),
+    'ffmpeg': PublicConfigFFmpegDto(realtime: PublicConfigFFmpegRealtimeDto(enabled: false)).toJson(),
+    'passkey': {'enabled': false},
+  },
   'ServerConfigDto': {
     'mapLightStyleUrl': 'https://tiles.openfreemap.org/styles/positron',
     'mapDarkStyleUrl': 'https://tiles.openfreemap.org/styles/dark',
     'minFaces': 3,
-    'webDeleteToastThreshold': 20,
   },
   'UserResponseDto': {'profileChangedAt': _now},
   'AssetResponseDto': {'visibility': 'timeline', 'createdAt': _now, 'isEdited': false},
@@ -40,12 +48,35 @@ final Map<String, Map<String, Object?>> openApiPatches = {
   'LoginResponseDto': {'isOnboarded': false},
   'SyncUserV1': {'profileChangedAt': _now, 'hasProfileImage': false},
   'SyncAssetV1': {'isEdited': false},
-  'ServerFeaturesDto': {'ocr': false, 'realtimeTranscoding': false},
+  'ServerFeaturesDto': {
+    'ocr': false,
+    'realtimeTranscoding': false,
+    'backups': false,
+    'peopleStatistics': false,
+    'smartSearchHasCutoff': false,
+    's3Storage': false,
+  },
+  // A raw map rather than the generated DTO: `enabled` is nullable there, and these are the
+  // server-side defaults an older server would have behaved as (backups stay on local disk).
+  'AdminConfigDatabaseBackupDto': {
+    's3': const {'enabled': false},
+  },
   'SearchAssetResponseDto': {'nextCursor': null},
-  'MemoriesResponse': {'duration': 5, 'sidebarWeb': false},
+  'MemoriesResponse': {'duration': 5, 'sidebarWeb': false, 'types': const <String, bool>{}},
+  'PeopleResponse': {'updateStrategy': 'everyone'},
+  'PersonResponseDto': {'otherPeople': const [], 'sharedBy': const [], 'sharedWith': const []},
+  'ServerVersionResponseDto': {'featureLevel': 0},
   'WorkflowResponseDto': {'logging': false},
+  'AdminConfigDto': {
+    'passkey': {'enabled': false, 'domain': null, 'additionalDomains': const []},
+  },
+  'UserConfigDto': {
+    'notifications': UserConfigNotificationsDto(smtp: UserConfigSmtpDto(enabled: false)).toJson(),
+    'passkey': {'enabled': false},
+  },
 };
 
+// ignore: unused-code
 void upgradeDto(dynamic value, String targetType) {
   if (value is! Map) {
     return;

@@ -1,48 +1,43 @@
 <script lang="ts">
   import { Icon } from '@immich/ui';
-  import { browser } from '$app/environment';
-  import { SvelteSet } from 'svelte/reactivity';
-  import { t } from 'svelte-i18n';
   import { mdiClose, mdiTune } from '@mdi/js';
-  import { untrack } from 'svelte';
-  import type {
-    FilterPanelConfig,
-    FilterSection as FilterSectionType,
-    FilterState,
-    FilterSuggestionsResponse,
-    PersonOption,
-    TagOption,
-  } from './filter-panel';
+  import { untrack, type Snippet } from 'svelte';
+  import { t } from 'svelte-i18n';
+  import { SvelteSet } from 'svelte/reactivity';
+  import { browser } from '$app/env';
+  import AlbumsFilter from './albums-filter.svelte';
+  import CameraFilter from './camera-filter.svelte';
+  import FavoritesFilter from './favorites-filter.svelte';
+  import { getSectionAvailability, type SectionAvailability } from './filter-availability';
   import {
     ALL_FILTER_SECTIONS,
+    PRE_LEDGER_FILTER_SECTIONS,
     buildFilterContext,
     createFilterState,
     getActiveFilterCount,
     loadFilterCollapsed,
-    PRE_LEDGER_FILTER_SECTIONS,
     saveFilterCollapsed,
+    type FilterPanelConfig,
+    type FilterSection as FilterSectionType,
+    type FilterState,
+    type FilterSuggestionsResponse,
+    type PersonOption,
+    type TagOption,
   } from './filter-panel';
-  import { getSectionAvailability, type SectionAvailability } from './filter-availability';
-  import FilterSection from './filter-section.svelte';
   import FilterSectionMenu from './filter-section-menu.svelte';
-  import TemporalPicker from './temporal-picker.svelte';
-  import PeopleFilter from './people-filter.svelte';
+  import FilterSection from './filter-section.svelte';
   import LocationFilter from './location-filter.svelte';
-  import CameraFilter from './camera-filter.svelte';
-  import TagsFilter from './tags-filter.svelte';
-  import RatingFilter from './rating-filter.svelte';
   import MediaTypeFilter from './media-type-filter.svelte';
-  import FavoritesFilter from './favorites-filter.svelte';
-  import AlbumsFilter from './albums-filter.svelte';
+  import PeopleFilter from './people-filter.svelte';
+  import RatingFilter from './rating-filter.svelte';
+  import TagsFilter from './tags-filter.svelte';
+  import TemporalPicker from './temporal-picker.svelte';
   import TextFilter from './text-filter.svelte';
 
   interface Props {
     config: FilterPanelConfig;
     timeBuckets: Array<{ timeBucket: string; count: number }>;
     filters?: FilterState;
-    /** Sort order for the temporal picker's year cards. Kept separate from filter state so callers
-     * can opt into the surface's browse order without changing generic filter-panel behavior. */
-    temporalSortOrder?: FilterState['sortOrder'];
     personNames?: Map<string, string>;
     tagNames?: Map<string, string>;
     onFiltersChange?: (filters: FilterState) => void;
@@ -55,13 +50,14 @@
     // reclaims the horizontal space (used on timeline pages). When false, the built-in collapsed
     // button is shown (default; used e.g. by the map's filter drawer).
     externalToggle?: boolean;
+    /** A surface's own block above the sections (the Photos library view, #1038); not one of the sections. */
+    top?: Snippet;
   }
 
   let {
     config,
     timeBuckets,
     filters = $bindable(createFilterState()),
-    temporalSortOrder = 'asc',
     personNames,
     tagNames,
     onFiltersChange,
@@ -70,11 +66,12 @@
     persistCollapsed = true,
     collapsed = $bindable(),
     externalToggle = false,
+    top,
   }: Props = $props();
 
   // Respect persistCollapsed for the initial value when the parent doesn't control `collapsed`.
   if (collapsed === undefined) {
-    collapsed = persistCollapsed ? loadFilterCollapsed() : false;
+    collapsed = persistCollapsed && loadFilterCollapsed();
   }
 
   const providers = config.providers ?? {};
@@ -403,12 +400,12 @@
   type StoredSectionSet = string[] | { selected?: string[]; known?: string[] };
 
   /**
-   * The stored record behind a section set. It is scoped to the browser, not to the surface:
-   * album detail and the album asset picker share a storage key but offer different section
-   * lists, so entries this surface does not render are carried through untouched rather than
-   * intersected away — otherwise the shorter surface forgets them and the longer one keeps
-   * treating them as brand new (#797).
-   */
+  The stored record behind a section set. It is scoped to the browser, not to the surface:
+  album detail and the album asset picker share a storage key but offer different section
+  lists, so entries this surface does not render are carried through untouched rather than
+  intersected away — otherwise the shorter surface forgets them and the longer one keeps
+  treating them as brand new (#797).
+  */
   interface SectionLedger {
     selected: FilterSectionType[];
     known: FilterSectionType[];
@@ -800,6 +797,7 @@
         </div>
 
         <div class="pt-4">
+          {@render top?.()}
           {#each renderableSections as section (section)}
             {#if visibleSections.has(section)}
               <!-- The "(0)" / disable gate answers "has a CROSS-SECTION filter narrowed the panel?",
@@ -839,7 +837,6 @@
                     dateBefore={filters.dateBefore}
                     selectedYear={filters.selectedYear}
                     selectedMonth={filters.selectedMonth}
-                    sortOrder={temporalSortOrder}
                     onCustomRangeChange={handleCustomDateRangeChange}
                     onYearSelect={handleYearSelect}
                     onMonthSelect={handleMonthSelect}
@@ -859,8 +856,6 @@
                     selectedCountry={filters.country}
                     selectedState={filters.state}
                     context={locationFilterContext}
-                    scopeKey={config.locationScopeKey?.()}
-                    onStateFetch={providers.states}
                     onCityFetch={async (country, ctx) => {
                       if (providers.cities) {
                         return providers.cities(country, ctx);
@@ -915,8 +910,8 @@
                     onChange={(value) => {
                       updateFilters({
                         ...filters,
-                        isInAlbum: value === 'has' ? true : undefined,
-                        isNotInAlbum: value === 'none' ? true : undefined,
+                        isInAlbum: value === 'has' || undefined,
+                        isNotInAlbum: value === 'none' || undefined,
                       });
                     }}
                   />

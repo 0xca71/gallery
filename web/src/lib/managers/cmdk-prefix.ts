@@ -1,5 +1,5 @@
+import { comparePeopleByFavoriteAndName } from '#lib/utils/people-utils.ts';
 import type { PersonResponseDto } from '@immich/sdk';
-import { comparePeopleByFavoriteAndName } from '$lib/utils/people-utils';
 
 export type Scope = 'all' | 'people' | 'tags' | 'collections' | 'nav';
 export type ParsedQuery = { scope: Scope; payload: string };
@@ -24,9 +24,9 @@ export function parseScope(rawText: string): ParsedQuery {
 }
 
 /**
- * Sort comparator for the bare-`@` suggestions list.
- * Keys (in priority order): favorite first, named people alpha, unnamed people, id alpha.
- */
+Sort comparator for the bare-`@` suggestions list.
+Keys (in priority order): favorite first, named people alpha, unnamed people, id alpha.
+*/
 export function personSuggestionsComparator(a: PersonResponseDto, b: PersonResponseDto): number {
   return comparePeopleByFavoriteAndName(a, b);
 }

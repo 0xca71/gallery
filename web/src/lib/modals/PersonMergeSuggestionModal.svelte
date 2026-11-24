@@ -3,10 +3,10 @@
     createCrossOwnerMergeHandlers,
     runMergeWithCrossOwnerConfirmation,
     runScopedMergeWithCrossOwnerConfirmation,
-  } from '$lib/utils/cross-owner-merge';
-  import { getGlobalPersonThumbnailUrl } from '$lib/utils/global-person-route';
-  import { handleError } from '$lib/utils/handle-error';
-  import { isSpaceScopedPerson, toScopedPersonRef } from '$lib/utils/scoped-person-ref';
+  } from '#lib/utils/cross-owner-merge.ts';
+  import { getGlobalPersonThumbnailUrl } from '#lib/utils/global-person-route.ts';
+  import { handleError } from '#lib/utils/handle-error.ts';
+  import { isSpaceScopedPerson, toScopedPersonRef } from '#lib/utils/scoped-person-ref.ts';
   import { mergePersonLegacy, type PersonResponseDto } from '@immich/sdk';
   import { FormModal, Icon, IconButton, toastManager } from '@immich/ui';
   import { mdiArrowLeft, mdiCallMerge, mdiSwapHorizontal } from '@mdi/js';

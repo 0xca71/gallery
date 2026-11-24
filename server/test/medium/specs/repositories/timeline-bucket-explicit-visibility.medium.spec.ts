@@ -1,24 +1,25 @@
 /**
- * Fix A — Timeline bucket explicit-`visibility` bypass (content leak regression lock).
- *
- * The leak: `getTimeBuckets` / `getTimeBucket` / `getTimeBucketCovers` gate visibility
- * through `withDefaultVisibility` ONLY when `options.visibility === undefined`. When the
- * caller passes an explicit `visibility` (e.g. `visibility=HIDDEN` or `visibility=LOCKED`),
- * the top-level filter becomes `asset.visibility = <requested>` and the space-membership
- * branches (`spaceId`, `timelineSpaceIds`, `spacePersonIds`) carry NO independent visibility
- * gate — so `visibility=HIDDEN AND spaceReachable` surfaces OTHER members' Hidden/Locked
- * in-space assets (id + thumbhash + EXIF/GPS).
- *
- * The fix mirrors `searchAssetBuilder`: every space branch ANDs an independent
- * `eb.or([ ownerId ∈ userIds, spaceVisibilityGate(eb) ])` so an explicit `visibility=HIDDEN`
- * can only surface the CALLER'S OWN hidden rows, never other members'.
- *
- * These tests exercise the repository directly (bypassing the service-level guards) because
- * the leak is in the repository query itself — the primary defense must hold there.
- */
+Fix A — Timeline bucket explicit-`visibility` bypass (content leak regression lock).
+
+The leak: `getTimeBuckets` / `getTimeBucket` / `getTimeBucketCovers` gate visibility
+through `withDefaultVisibility` ONLY when `options.visibility === undefined`. When the
+caller passes an explicit `visibility` (e.g. `visibility=HIDDEN` or `visibility=LOCKED`),
+the top-level filter becomes `asset.visibility = <requested>` and the space-membership
+branches (`spaceId`, `timelineSpaceIds`, `spacePersonIds`) carry NO independent visibility
+gate — so `visibility=HIDDEN AND spaceReachable` surfaces OTHER members' Hidden/Locked
+in-space assets (id + thumbhash + EXIF/GPS).
+
+The fix mirrors `searchAssetBuilder`: every space branch ANDs an independent
+`eb.or([ ownerId ∈ userIds, spaceVisibilityGate(eb) ])` so an explicit `visibility=HIDDEN`
+can only surface the CALLER'S OWN hidden rows, never other members'.
+
+These tests exercise the repository directly (bypassing the service-level guards) because
+the leak is in the repository query itself — the primary defense must hold there.
+*/
 
 import { Kysely } from 'kysely';
 import { AssetVisibility, TimeBucketSize } from 'src/enum.js';
+import { GalleryAssetRepository } from 'src/gallery/repositories/gallery-asset.repository.js';
 import { AssetRepository, TimeBucketOptions } from 'src/repositories/asset.repository.js';
 import { LoggingRepository } from 'src/repositories/logging.repository.js';
 import { SharedSpaceRepository } from 'src/repositories/shared-space.repository.js';
@@ -39,6 +40,7 @@ const setup = () => {
   return {
     ctx,
     assetRepo: ctx.get(AssetRepository),
+    galleryAssetRepo: ctx.get(GalleryAssetRepository),
     spaceRepo: ctx.get(SharedSpaceRepository),
   };
 };
@@ -76,6 +78,7 @@ const countBuckets = (buckets: Array<{ count: number }>) => buckets.reduce((sum,
 // getTimeBucket returns a pre-jsonified `{ assets: string }` — parse the id array out of it.
 const bucketAssetIds = async (
   assetRepo: AssetRepository,
+  // eslint-disable-next-line unicorn/no-unnecessary-parameters
   timeBucket: string,
   options: TimeBucketOptions,
   authUserId: string,
@@ -122,7 +125,7 @@ const seedSpacePerson = async (
 
 describe('timeline bucket explicit-visibility — spaceId browse (no userIds)', () => {
   it("visibility=HIDDEN does NOT surface another member's Hidden in-space assets (direct/library/album)", async () => {
-    const { assetRepo, spaceRepo, ctx } = setup();
+    const { assetRepo, galleryAssetRepo, spaceRepo, ctx } = setup();
     const { user: owner } = await ctx.newUser();
     const { user: viewer } = await ctx.newUser();
     const { space } = await ctx.newSharedSpace({ createdById: owner.id });
@@ -160,7 +163,7 @@ describe('timeline bucket explicit-visibility — spaceId browse (no userIds)', 
     expect(ids.has(hiAlbum)).toBe(false);
 
     // getTimeBucketCovers — no cover produced
-    const covers = await assetRepo.getTimeBucketCovers({ ...opts, timeBuckets: [BUCKET] });
+    const covers = await galleryAssetRepo.getTimeBucketCovers({ ...opts, timeBuckets: [BUCKET] });
     const coverIds = new Set(covers.map((c) => c.representativeAssetId));
     expect(coverIds.has(hiDirect)).toBe(false);
     expect(coverIds.has(hiLib)).toBe(false);
@@ -210,7 +213,7 @@ describe('timeline bucket explicit-visibility — spaceId browse (no userIds)', 
 
 describe('timeline bucket explicit-visibility — withSharedSpaces (timelineSpaceIds)', () => {
   it("visibility=HIDDEN does NOT surface another member's Hidden in-space asset", async () => {
-    const { assetRepo, spaceRepo, ctx } = setup();
+    const { assetRepo, galleryAssetRepo, spaceRepo, ctx } = setup();
     const { user: owner } = await ctx.newUser();
     const { user: viewer } = await ctx.newUser();
     const { space } = await ctx.newSharedSpace({ createdById: owner.id });
@@ -239,7 +242,7 @@ describe('timeline bucket explicit-visibility — withSharedSpaces (timelineSpac
     expect(ids.has(hiDirect)).toBe(false);
     expect(ids.has(hiAlbum)).toBe(false);
 
-    const covers = await assetRepo.getTimeBucketCovers({ ...opts, timeBuckets: [BUCKET] });
+    const covers = await galleryAssetRepo.getTimeBucketCovers({ ...opts, timeBuckets: [BUCKET] });
     const coverIds = new Set(covers.map((c) => c.representativeAssetId));
     expect(coverIds.has(hiDirect)).toBe(false);
     expect(coverIds.has(hiAlbum)).toBe(false);
@@ -434,15 +437,15 @@ describe('timeline bucket explicit-visibility — albumId arm', () => {
 });
 
 /**
- * immich-30739 widened the person-scoped timeline so a viewer also sees the person's faces on assets
- * shared with them through an album. The fork carried the branch but tested `options.personId`,
- * which timeline.service normalises away into `personIds` before options reach the repository — so
- * the branch was unreachable and the feature silently did nothing.
- *
- * The second half was an asymmetry: getTimeBuckets passed the viewer, getTimeBucket did not, so the
- * scrubber counts and the bucket contents were computed under different rules. The file's own
- * comment promises they cannot drift.
- */
+immich-30739 widened the person-scoped timeline so a viewer also sees the person's faces on assets
+shared with them through an album. The fork carried the branch but tested `options.personId`,
+which timeline.service normalises away into `personIds` before options reach the repository — so
+the branch was unreachable and the feature silently did nothing.
+
+The second half was an asymmetry: getTimeBuckets passed the viewer, getTimeBucket did not, so the
+scrubber counts and the bucket contents were computed under different rules. The file's own
+comment promises they cannot drift.
+*/
 const seedAlbumSharedPerson = async () => {
   const { ctx, assetRepo } = setup();
   const { user: owner } = await ctx.newUser();

@@ -6,33 +6,32 @@ import 'package:flutter/services.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:immich_mobile/domain/models/album/album.model.dart';
 import 'package:immich_mobile/domain/models/asset/base_asset.model.dart';
+import 'package:immich_mobile/domain/models/server_capability.model.dart';
 import 'package:immich_mobile/extensions/build_context_extensions.dart';
+import 'package:immich_mobile/gallery/remote_album/remote_album_gallery.dart';
+import 'package:immich_mobile/gallery/search/search_scope.dart';
 import 'package:immich_mobile/generated/translations.g.dart';
 import 'package:immich_mobile/presentation/widgets/album/pending_uploads_banner.widget.dart';
 import 'package:immich_mobile/presentation/widgets/bottom_sheet/remote_album_bottom_sheet.widget.dart';
 import 'package:immich_mobile/presentation/widgets/remote_album/album_option.widget.dart';
-import 'package:immich_mobile/presentation/widgets/remote_album/space_link_picker.widget.dart';
 import 'package:immich_mobile/presentation/widgets/timeline/timeline.widget.dart';
 import 'package:immich_mobile/presentation/widgets/timeline/timeline_route_scope.dart';
 import 'package:immich_mobile/providers/infrastructure/album.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/current_album.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/remote_album.provider.dart';
-import 'package:immich_mobile/providers/infrastructure/space_album_actions.dart';
 import 'package:immich_mobile/providers/infrastructure/timeline.provider.dart';
+import 'package:immich_mobile/providers/server_info.provider.dart';
+import 'package:immich_mobile/providers/shared_space.provider.dart';
 import 'package:immich_mobile/providers/user.provider.dart';
 import 'package:immich_mobile/routing/router.dart';
-import 'package:immich_mobile/widgets/common/date_time_picker.dart';
 import 'package:immich_mobile/widgets/common/immich_toast.dart';
 import 'package:immich_mobile/widgets/common/remote_album_sliver_app_bar.dart';
-import 'package:intl/intl.dart';
 
 @RoutePage()
 class RemoteAlbumPage extends ConsumerStatefulWidget {
   final RemoteAlbum album;
 
   const RemoteAlbumPage({super.key, required this.album});
-
-  static const timelineOverviewControlsEnabled = true;
 
   @override
   ConsumerState<RemoteAlbumPage> createState() => _RemoteAlbumPageState();
@@ -167,7 +166,7 @@ class _RemoteAlbumPageState extends ConsumerState<RemoteAlbumPage> {
     }
   }
 
-  Future<void> showEditAlbum(BuildContext context) async {
+  Future<void> showEditTitleAndDescription(BuildContext context) async {
     final result = await showDialog<_EditAlbumData?>(
       context: context,
       barrierDismissible: true,
@@ -190,59 +189,47 @@ class _RemoteAlbumPageState extends ConsumerState<RemoteAlbumPage> {
     unawaited(context.pushRoute(ActivitiesRoute(album: _album)));
   }
 
-  /// L15 — "Link to space" entry point from the album itself: opens the
-  /// space picker (Owner/Editor spaces) and links this album to the selected
-  /// space via the same [SpaceAlbumActions.link] path already used from
-  /// inside a space (B6 / [SpaceDetailPage._onAlbumsPicked]).
-  Future<void> linkToSpace(BuildContext context) async {
-    final space = await SpaceLinkPickerSheet.show(context);
-    if (space == null || !context.mounted) {
-      return;
-    }
-
-    try {
-      await ref.read(spaceAlbumActionsProvider).link(space.id, [_album.id]);
-      if (context.mounted) {
-        ImmichToast.show(
-          context: context,
-          msg: context.t.album_linked_to_space(space: space.name),
-          toastType: ToastType.success,
-        );
-      }
-    } catch (_) {
-      if (context.mounted) {
-        ImmichToast.show(context: context, msg: context.t.spaces_linked_albums_error_link, toastType: ToastType.error);
-      }
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
     final user = ref.watch(currentUserProvider);
     final isOwner = user != null ? user.id == _album.ownerId : false;
+    final editorCanUpdate = ref.watch(
+      serverInfoProvider.select((state) => state.serverVersion.supports(.albumEditorUpdate)),
+    );
 
     return TimelineRouteScope(
       timelineServiceBuilder: (ref, scope, groupBy) =>
           ref.watch(timelineFactoryProvider).remoteAlbum(albumId: _album.id, groupBy: groupBy, temporalScope: scope),
       overrides: [currentRemoteAlbumScopedProvider.overrideWithValue(_album)],
+      search: AlbumSearchScope(_album.id, name: _album.name),
       child: Timeline(
         withGroupingPill: true,
         topSliverWidget: PendingUploadsBanner(albumId: _album.id),
-        appBar: RemoteAlbumSliverAppBar(
-          icon: Icons.photo_album_outlined,
-          kebabMenu: _AlbumKebabMenu(
-            album: _album,
-            onDeleteAlbum: () => deleteAlbum(context),
-            onAddUsers: () => addUsers(context),
-            onAddPhotos: () => addAssets(context),
-            onToggleAlbumOrder: () => toggleAlbumOrder(),
-            onEditAlbum: () => showEditAlbum(context),
-            onCreateSharedLink: () => unawaited(context.pushRoute(SharedLinkEditRoute(albumId: _album.id))),
-            onShowOptions: () => context.pushRoute(AlbumOptionsRoute(album: _album)),
-            onLinkToSpace: () => unawaited(linkToSpace(context)),
-          ),
-          onEditTitle: isOwner ? () => showEditAlbum(context) : null,
-          onActivity: () => showActivity(context),
+        appBar: FutureBuilder<bool>(
+          future: ref
+              .watch(remoteAlbumServiceProvider)
+              .getUserRole(_album.id, user?.id ?? '')
+              .then((role) => role == AlbumUserRole.editor),
+          builder: (_, snapshot) {
+            final isEditor = snapshot.data ?? false;
+            final canEdit = isOwner || (isEditor && editorCanUpdate);
+
+            return RemoteAlbumSliverAppBar(
+              kebabMenu: _AlbumKebabMenu(
+                album: _album,
+                onDeleteAlbum: () => deleteAlbum(context),
+                onAddUsers: () => addUsers(context),
+                onAddPhotos: isOwner || isEditor ? () => addAssets(context) : null,
+                onToggleAlbumOrder: () => toggleAlbumOrder(),
+                onEditAlbum: canEdit ? () => showEditTitleAndDescription(context) : null,
+                onCreateSharedLink: () => unawaited(context.pushRoute(SharedLinkEditRoute(albumId: _album.id))),
+                onShowOptions: () => context.pushRoute(AlbumOptionsRoute(album: _album)),
+                onLinkToSpace: () => unawaited(linkAlbumToSpace(context, ref, _album.id)),
+              ),
+              onEditTitle: canEdit ? () => showEditTitleAndDescription(context) : null,
+              onActivity: () => showActivity(context),
+            );
+          },
         ),
         bottomSheet: RemoteAlbumBottomSheet(album: _album),
       ),
@@ -288,16 +275,6 @@ class _EditAlbumDialogState extends ConsumerState<_EditAlbumDialog> {
     titleController.dispose();
     descriptionController.dispose();
     super.dispose();
-  }
-
-  Future<void> _pickCreatedAt() async {
-    // Returns an ISO string with a +HH:MM offset, or null when dismissed —
-    // same contract action.service.dart:202-219 consumes for asset dates.
-    final picked = await showDateTimePicker(context: context, initialDateTime: createdAt);
-    if (picked == null) {
-      return;
-    }
-    setState(() => createdAt = DateTime.parse(picked).toLocal());
   }
 
   Future<void> _handleSave() async {
@@ -397,22 +374,7 @@ class _EditAlbumDialogState extends ConsumerState<_EditAlbumDialog> {
                     fillColor: context.colorScheme.surface,
                   ),
                 ),
-                const SizedBox(height: 18),
-
-                // Created date
-                Text(
-                  context.t.date_created.toUpperCase(),
-                  style: context.textTheme.labelSmall?.copyWith(fontWeight: FontWeight.w600),
-                ),
-                const SizedBox(height: 4),
-                ListTile(
-                  key: const Key('album-edit-created-at'),
-                  tileColor: context.colorScheme.surface,
-                  shape: const RoundedRectangleBorder(borderRadius: BorderRadius.all(Radius.circular(12))),
-                  title: Text(DateFormat.yMMMd().format(createdAt), style: context.textTheme.bodyMedium),
-                  trailing: Icon(Icons.edit_outlined, size: 18, color: context.colorScheme.primary),
-                  onTap: _pickCreatedAt,
-                ),
+                AlbumCreatedAtField(createdAt: createdAt, onChanged: (value) => setState(() => createdAt = value)),
                 const SizedBox(height: 24),
 
                 // Action Buttons
@@ -489,28 +451,18 @@ class _AlbumKebabMenu extends ConsumerWidget {
     final user = ref.watch(currentUserProvider);
     final isOwner = user != null && user.id == album.ownerId;
 
-    return FutureBuilder<bool>(
-      future: ref
-          .watch(remoteAlbumServiceProvider)
-          .getUserRole(album.id, user?.id ?? '')
-          .then((role) => role == AlbumUserRole.editor),
-      builder: (context, snapshot) {
-        final canAddPhotos = snapshot.data ?? false;
-
-        return RemoteAlbumOption(
-          iconColor: iconColor,
-          iconShadows: iconShadows,
-          onDeleteAlbum: isOwner ? onDeleteAlbum : null,
-          onAddUsers: isOwner ? onAddUsers : null,
-          onAddPhotos: isOwner || canAddPhotos ? onAddPhotos : null,
-          onToggleAlbumOrder: isOwner ? onToggleAlbumOrder : null,
-          onEditAlbum: isOwner || canAddPhotos ? onEditAlbum : null,
-          onCreateSharedLink: isOwner ? onCreateSharedLink : null,
-          onShowOptions: onShowOptions,
-          // L15: gated to owned albums (mirrors web's isOwned gate on the same affordance).
-          onLinkToSpace: isOwner ? onLinkToSpace : null,
-        );
-      },
+    return RemoteAlbumOption(
+      iconColor: iconColor,
+      iconShadows: iconShadows,
+      onDeleteAlbum: isOwner ? onDeleteAlbum : null,
+      onAddUsers: isOwner ? onAddUsers : null,
+      onAddPhotos: onAddPhotos,
+      onToggleAlbumOrder: isOwner ? onToggleAlbumOrder : null,
+      onEditAlbum: onEditAlbum,
+      onCreateSharedLink: isOwner ? onCreateSharedLink : null,
+      onShowOptions: onShowOptions,
+      // L15: gated to owned albums (mirrors web's isOwned gate on the same affordance).
+      onLinkToSpace: isOwner && ref.watch(serverSupportsSpacesProvider) ? onLinkToSpace : null,
     );
   }
 }

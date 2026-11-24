@@ -8,13 +8,8 @@ export enum AssetAction {
   TRASH = 'trash',
   DELETE = 'delete',
   RESTORE = 'restore',
-  STACK = 'stack',
-  UNSTACK = 'unstack',
-  SET_STACK_PRIMARY_ASSET = 'set-stack-primary-asset',
-  REMOVE_ASSET_FROM_STACK = 'remove-asset-from-stack',
   SET_VISIBILITY_LOCKED = 'set-visibility-locked',
   SET_VISIBILITY_TIMELINE = 'set-visibility-timeline',
-  SET_PERSON_FEATURED_PHOTO = 'set-person-featured-photo',
   RATING = 'rating',
 }
 
@@ -54,12 +49,16 @@ export enum QueryParameter {
   ACTION = 'action',
   ASSET_ID = 'assetId',
   ID = 'id',
+  IS_FAVORITE = 'isFavorite',
+  IS_HIDDEN = 'isHidden',
   IS_OPEN = 'isOpen',
   IS_SAVED = 'isSaved',
   OPEN_SETTING = 'openSetting',
   PREVIOUS_ROUTE = 'previousRoute',
   QUERY = 'query',
   SEARCHED_PEOPLE = 'searchedPeople',
+  SHARED_BY_ID = 'sharedById',
+  SHARED_WITH_ID = 'sharedWithId',
   SMART_SEARCH = 'smartSearch',
   SPACE_ID = 'spaceId',
   PAGE = 'page',
@@ -264,7 +263,7 @@ export interface Lang {
   rtl?: boolean;
 }
 
-export const defaultLang: Lang = { name: 'English', code: 'en', loader: () => import('$i18n/en.json') };
+export const defaultLang: Lang = { name: 'English', code: 'en', loader: () => import('#i18n/en.json') };
 
 export enum ImmichProduct {
   Client = 'immich-client',
@@ -303,7 +302,6 @@ export enum MediaType {
   All = 'all',
   Image = 'image',
   Video = 'video',
-  LivePhoto = 'live-photo',
 }
 
 export enum ProgressBarStatus {
@@ -325,14 +323,23 @@ export enum BackupFileStatus {
 
 export const assetViewerFadeDuration: number = 150;
 
+export const libraryTableClasses = {
+  column1: 'w-4/12',
+  column2: 'w-4/12',
+  column3: 'w-1/12',
+  column4: 'w-1/12',
+  column5: 'w-1/12',
+  column6: 'w-1/12 flex justify-end',
+};
+
 export const IOS_APP_STORE_URL = 'https://apps.apple.com/app/id6761776289';
 export const ANDROID_INSTALL_URL = '/install';
 
 /**
- * Queues rendered by the admin Jobs page and driven from the command palette's
- * bulk verbs. Omits system queues (BackgroundTask, Search, Notifications,
- * BackupDatabase, Workflow, Editor, StorageBackendMigration).
- */
+Queues rendered by the admin Jobs page and driven from the command palette's
+bulk verbs. Omits system queues (BackgroundTask, Search, Notifications,
+BackupDatabase, Workflow, Editor, StorageBackendMigration).
+*/
 export const ADMIN_VISIBLE_QUEUES = [
   QueueName.ThumbnailGeneration,
   QueueName.MetadataExtraction,
@@ -347,6 +354,8 @@ export const ADMIN_VISIBLE_QUEUES = [
   QueueName.PetDetection,
   QueueName.PetRecognition,
   QueueName.Classification,
+  QueueName.QualityAnalysis,
+  QueueName.SpatialScene,
   QueueName.VideoConversion,
   QueueName.StorageTemplateMigration,
   QueueName.Migration,

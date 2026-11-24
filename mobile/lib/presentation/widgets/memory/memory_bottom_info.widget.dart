@@ -3,44 +3,41 @@ import 'package:flutter/material.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:immich_mobile/domain/models/asset/base_asset.model.dart';
 import 'package:immich_mobile/domain/models/memory.model.dart';
+import 'package:immich_mobile/extensions/datetime_extensions.dart';
 import 'package:immich_mobile/generated/translations.g.dart';
+import 'package:immich_mobile/presentation/widgets/memory/memory_title.widget.dart';
 import 'package:immich_mobile/providers/asset_viewer/view_in_timeline_destination.dart';
 import 'package:immich_mobile/routing/router.dart';
 import 'package:intl/intl.dart';
 
-/// The asset shown on [page] of [memory], clamped to the memory's bounds.
-///
-/// `currentAssetPage` in the memory page belongs to the ACTIVE memory, so an
-/// inactive page in the vertical PageView can ask for an index this memory does
-/// not have.
-RemoteAsset memoryAssetForPage(Memory memory, int page) => memory.assets[page.clamp(0, memory.assets.length - 1)];
-
 class MemoryBottomInfo extends ConsumerWidget {
+  final Memory memory;
   final RemoteAsset asset;
-  final String title;
-  const MemoryBottomInfo({super.key, required this.asset, required this.title});
+  const MemoryBottomInfo({super.key, required this.memory, required this.asset});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final df = DateFormat.yMMMMd();
+    final df = DateFormat.yMMMMd(resolvedDateTimeLocale());
     final fileCreatedDate = asset.createdAt;
     return Padding(
       padding: const EdgeInsets.all(16.0),
       child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        spacing: 16.0,
         children: [
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                title,
-                style: TextStyle(color: Colors.grey[400], fontSize: 13.0, fontWeight: FontWeight.w500),
-              ),
-              Text(
-                df.format(fileCreatedDate.toLocal()),
-                style: const TextStyle(color: Colors.white, fontSize: 15.0, fontWeight: FontWeight.w500),
-              ),
-            ],
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  getMemoryTitle(context.t, memory, asset: asset),
+                  style: TextStyle(color: Colors.grey[400], fontSize: 13.0, fontWeight: FontWeight.w500),
+                ),
+                Text(
+                  df.format(fileCreatedDate.toLocal()),
+                  style: const TextStyle(color: Colors.white, fontSize: 15.0, fontWeight: FontWeight.w500),
+                ),
+              ],
+            ),
           ),
           Tooltip(
             message: context.t.view_in_timeline,
@@ -51,7 +48,7 @@ class MemoryBottomInfo extends ConsumerWidget {
                 read: ref.read,
                 popViewer: () => context.maybePop(),
                 // Activate the existing timeline tab without rebuilding it (a fresh
-                // TabShellRoute would reload the timeline to the top and discard the scroll).
+                // GalleryTabShellRoute would reload the timeline to the top and discard the scroll).
                 goToMainTimeline: () => context.navigateTo(const MainTimelineRoute()),
                 // #1047: a photo the viewer only reaches through a Space is not in their
                 // personal timeline, so open the Space's own timeline instead. Pushed, not

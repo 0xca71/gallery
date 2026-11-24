@@ -28,14 +28,12 @@ export async function configureExpress(
     ssr,
   }: {
     /**
-     * Whether to allow swagger module to write to the specs.json
-     * This is not desirable when the API is not available
-     * @default true
-     */
+    Whether to allow swagger module to write to the specs.json
+    This is not desirable when the API is not available
+    @default true
+    */
     permitSwaggerWrite?: boolean;
-    /**
-     * Service to use for server-side rendering
-     */
+    /** Service to use for server-side rendering */
     ssr: typeof ApiService | typeof MaintenanceWorkerService;
   },
 ) {
@@ -90,6 +88,13 @@ export async function configureExpress(
 
   const server = await (host ? app.listen(port, host) : app.listen(port));
   server.requestTimeout = 24 * 60 * 60 * 1000;
+
+  // make sure every socket always has an error handler
+  server.on('connection', (socket) => {
+    socket.on('error', (error) => {
+      logger.debug(`Socket error: ${error.message}`);
+    });
+  });
 
   logger.log(`${IMMICH_SERVER_START} on ${await app.getUrl()} [v${serverVersion}] [${environment}] `);
 }

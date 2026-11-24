@@ -35,7 +35,6 @@ class ActionButtonContext {
   final BaseAsset asset;
   final bool isOwner;
   final bool isArchived;
-  final bool isTrashEnabled;
   final bool isInLockedView;
   final bool isStacked;
   final RemoteAlbum? currentAlbum;
@@ -49,7 +48,6 @@ class ActionButtonContext {
     required this.asset,
     required this.isOwner,
     required this.isArchived,
-    required this.isTrashEnabled,
     required this.isStacked,
     required this.isInLockedView,
     required this.currentAlbum,
@@ -225,7 +223,7 @@ enum ActionButtonType {
                 read: ProviderScope.containerOf(buildContext, listen: false).read,
                 popViewer: () => buildContext.maybePop(),
                 // Activate the existing timeline tab without rebuilding it (a fresh
-                // TabShellRoute would reload the timeline to the top and discard the scroll).
+                // GalleryTabShellRoute would reload the timeline to the top and discard the scroll).
                 goToTimeline: () => buildContext.navigateTo(const MainTimelineRoute()),
               ),
       ),

@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import os
 import time
-from collections.abc import Callable, Iterable
-from typing import cast
+from collections.abc import AsyncGenerator, Callable, Iterable
+from typing import TYPE_CHECKING, Any, cast
 
+from fastapi import Depends
+from fastapi.exceptions import RequestValidationError
 from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram, generate_latest, multiprocess
 
-from .schemas import InferenceEntries, ModelTask, ModelType
+if TYPE_CHECKING:
+    from .models.base import InferenceEntry
 
 registry = CollectorRegistry()
 
@@ -52,13 +55,9 @@ MODEL_LOAD_DURATION = Histogram(
 _MODEL_CACHE_LABELS: set[tuple[str, str]] = set()
 
 
-def labels_from_entries(entries: InferenceEntries) -> list[tuple[str, str]]:
-    without_deps, with_deps = entries
-    labels: list[tuple[str, str]] = []
-    for entry in [*without_deps, *with_deps]:
-        task = entry["task"].value if isinstance(entry["task"], ModelTask) else str(entry["task"])
-        model_type = entry["type"].value if isinstance(entry["type"], ModelType) else str(entry["type"])
-        labels.append((task, model_type))
+def labels_from_entries(entries: Iterable[InferenceEntry[Any]]) -> list[tuple[str, str]]:
+    model_type, task = 0, 1
+    labels = [(entry.model.identity[task].value, entry.model.identity[model_type].value) for entry in entries]
     return labels or [("unknown", "unknown")]
 
 
@@ -67,6 +66,25 @@ def record_predict(labels: Iterable[tuple[str, str]], status: str, started: floa
     for task, model_type in labels:
         REQUESTS.labels(task=task, type=model_type, status=status).inc()
         REQUEST_DURATION.labels(task=task, type=model_type, status=status).observe(duration_ms)
+
+
+def predict_metrics(get_entries: Callable[..., list[InferenceEntry[Any]]]) -> Any:
+    """The `/predict` route dependency recording request count and duration, with status success or error.
+    Function scope: it ends when `predict` returns or raises, before the response is sent."""
+
+    async def time_predict(entries: Any = Depends(get_entries)) -> AsyncGenerator[None, None]:
+        started = time.perf_counter()
+        labels = labels_from_entries(entries)
+        try:
+            yield
+        except RequestValidationError:
+            raise  # `image`/`text` resolve after this dependency; their 422 is not a prediction
+        except Exception:
+            record_predict(labels, "error", started)
+            raise
+        record_predict(labels, "success", started)
+
+    return Depends(time_predict, scope="function")
 
 
 def record_validation_error(started: float) -> None:

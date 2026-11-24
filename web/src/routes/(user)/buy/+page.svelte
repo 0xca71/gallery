@@ -1,6 +1,6 @@
 <script lang="ts">
-  import UserPageLayout from '$lib/components/layouts/UserPageLayout.svelte';
-  import PurchaseContent from '$lib/components/shared-components/purchasing/PurchaseContent.svelte';
+  import UserPageLayout from '#lib/components/layouts/UserPageLayout.svelte';
+  import PurchaseContent from '#lib/components/shared-components/purchasing/PurchaseContent.svelte';
   import { Container, Stack } from '@immich/ui';
   import type { PageData } from './$types';
 

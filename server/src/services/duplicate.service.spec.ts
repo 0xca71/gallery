@@ -57,6 +57,12 @@ describe(DuplicateService.name, () => {
     // Default to "no editable spaces" so the new merge branch is a no-op for
     // existing tests. Tests that exercise the merge override per case.
     mocks.sharedSpace.getEditableByAssetIds.mockResolvedValue(new Set());
+    // #763 (E21): default no-op so existing tests that hit the metadata-merge branch
+    // (idsToKeep.length === 1 && idsToTrash.length > 0) don't need to know about the favorite
+    // union unless they're specifically asserting on it.
+    mocks.assetFavorite.mergeOnto.mockResolvedValue(undefined as any);
+    // resolve requires owning the keepers and the trashed copies; grant every requested id unless a test overrides it.
+    mocks.access.asset.checkOwnerAccess.mockImplementation((_userId, ids) => Promise.resolve(new Set(ids)));
   });
 
   it('should work', () => {
@@ -288,6 +294,28 @@ describe(DuplicateService.name, () => {
       ]);
     });
 
+    it('should only load the assets owned by the user', async () => {
+      const asset = AssetFactory.create();
+      mocks.access.duplicate.checkOwnerAccess.mockResolvedValue(new Set(['group-1']));
+      mocks.duplicateRepository.get.mockResolvedValue({
+        duplicateId: 'group-1',
+        assets: [asset as unknown as MapAsset],
+      });
+
+      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([asset.id]));
+
+      const result = await sut.resolve(authStub.admin, {
+        groups: [{ duplicateId: 'group-1', keepAssetIds: ['other-user-asset'], trashAssetIds: [asset.id] }],
+      });
+
+      expect(mocks.duplicateRepository.get).toHaveBeenCalledWith(authStub.admin.user.id, 'group-1');
+      expect(result[0].success).toBe(true);
+      expect(mocks.asset.updateAllExif).not.toHaveBeenCalled();
+      for (const [ids] of mocks.asset.updateAll.mock.calls) {
+        expect(ids).toEqual([asset.id]);
+      }
+    });
+
     it('should skip when keepAssetIds contains non-member', async () => {
       const asset = AssetFactory.create();
       mocks.access.duplicate.checkOwnerAccess.mockResolvedValue(new Set(['group-1']));
@@ -370,11 +398,41 @@ describe(DuplicateService.name, () => {
       expect(result[0].errorMessage).toContain('Every asset must be in either keepAssetIds or trashAssetIds');
     });
 
+    it("should fail before any write if a keeper is another owner's asset", async () => {
+      const theirs = AssetFactory.create();
+      const mine = AssetFactory.create();
+      mocks.access.duplicate.checkOwnerAccess.mockResolvedValue(new Set(['group-1']));
+      mocks.access.asset.checkOwnerAccess.mockImplementation((_userId, ids) =>
+        Promise.resolve(new Set([...ids].filter((id) => id !== theirs.id))),
+      );
+      mocks.duplicateRepository.get.mockResolvedValue({
+        duplicateId: 'group-1',
+        assets: [theirs as unknown as MapAsset, mine as unknown as MapAsset],
+      });
+
+      await expect(
+        sut.resolve(authStub.admin, {
+          groups: [{ duplicateId: 'group-1', keepAssetIds: [theirs.id], trashAssetIds: [mine.id] }],
+        }),
+      ).resolves.toEqual([
+        {
+          id: 'group-1',
+          success: false,
+          error: BulkIdErrorReason.NO_PERMISSION,
+          errorMessage: 'No permission to update assets',
+        },
+      ]);
+
+      expect(mocks.sharedSpace.getEditableByAssetIds).not.toHaveBeenCalled();
+      expect(mocks.sharedSpace.addAssets).not.toHaveBeenCalled();
+      expect(mocks.asset.updateAll).not.toHaveBeenCalled();
+      expect(mocks.assetFavorite.mergeOnto).not.toHaveBeenCalled();
+    });
+
     it('should sync merged tags to asset_exif.tags', async () => {
       const asset1 = AssetFactory.create();
       const asset2 = AssetFactory.create();
       mocks.access.duplicate.checkOwnerAccess.mockResolvedValue(new Set(['group-1']));
-      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set(['asset-2']));
       mocks.access.tag.checkOwnerAccess.mockResolvedValue(new Set(['tag-1', 'tag-2']));
       mocks.duplicateRepository.get.mockResolvedValue({
         duplicateId: 'group-1',
@@ -431,7 +489,6 @@ describe(DuplicateService.name, () => {
       const asset1 = AssetFactory.create({ visibility: AssetVisibility.Timeline });
       const asset2 = AssetFactory.create({ visibility: AssetVisibility.Archive });
       mocks.access.duplicate.checkOwnerAccess.mockResolvedValue(new Set(['group-1']));
-      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([asset2.id]));
       mocks.duplicateRepository.get.mockResolvedValue({
         duplicateId: 'group-1',
         assets: [asset1 as unknown as MapAsset, asset2 as unknown as MapAsset],
@@ -475,7 +532,6 @@ describe(DuplicateService.name, () => {
       // eslint-disable-next-line unicorn/consistent-function-scoping -- test helper, kept local to this describe
       const setupBaseDuplicate = (asset1: any, asset2: any) => {
         mocks.access.duplicate.checkOwnerAccess.mockResolvedValue(new Set(['group-1']));
-        mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([asset2.id]));
         mocks.duplicateRepository.get.mockResolvedValue({
           duplicateId: 'group-1',
           assets: [asset1 as unknown as MapAsset, asset2 as unknown as MapAsset],
@@ -581,7 +637,6 @@ describe(DuplicateService.name, () => {
         const asset1 = AssetFactory.create();
         const asset2 = AssetFactory.create();
         setupBaseDuplicate(asset1, asset2);
-        mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([asset1.id, asset2.id]));
 
         const result = await sut.resolve(authStub.admin, {
           groups: [{ duplicateId: 'group-1', keepAssetIds: [], trashAssetIds: [asset1.id, asset2.id] }],
@@ -680,20 +735,19 @@ describe(DuplicateService.name, () => {
       const asset2 = AssetFactory.create();
       const checksum = Buffer.from('abc123', 'hex');
       mocks.access.duplicate.checkOwnerAccess.mockResolvedValue(new Set(['group-1']));
-      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([asset2.id]));
       mocks.duplicateRepository.get.mockResolvedValue({
         duplicateId: 'group-1',
         assets: [asset1 as unknown as MapAsset, asset2 as unknown as MapAsset],
       });
-      mocks.asset.getChecksumsByIds.mockResolvedValue([{ id: asset2.id, checksum }]);
+      mocks.galleryAsset.getChecksumsByIds.mockResolvedValue([{ id: asset2.id, checksum }]);
 
       const result = await sut.resolve(authStub.admin, {
         groups: [{ duplicateId: 'group-1', keepAssetIds: [asset1.id], trashAssetIds: [asset2.id] }],
       });
 
       expect(result[0].success).toBe(true);
-      expect(mocks.asset.getChecksumsByIds).toHaveBeenCalledWith([asset2.id]);
-      expect(mocks.duplicateRepository.createChecksumTombstones).toHaveBeenCalledWith([
+      expect(mocks.galleryAsset.getChecksumsByIds).toHaveBeenCalledWith([asset2.id]);
+      expect(mocks.galleryDuplicate.createChecksumTombstones).toHaveBeenCalledWith([
         { assetId: asset1.id, ownerId: authStub.admin.user.id, checksum },
       ]);
     });
@@ -705,12 +759,11 @@ describe(DuplicateService.name, () => {
       const checksum2 = Buffer.from('aabb', 'hex');
       const checksum3 = Buffer.from('ccdd', 'hex');
       mocks.access.duplicate.checkOwnerAccess.mockResolvedValue(new Set(['group-1']));
-      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([asset2.id, asset3.id]));
       mocks.duplicateRepository.get.mockResolvedValue({
         duplicateId: 'group-1',
         assets: [asset1 as unknown as MapAsset, asset2 as unknown as MapAsset, asset3 as unknown as MapAsset],
       });
-      mocks.asset.getChecksumsByIds.mockResolvedValue([
+      mocks.galleryAsset.getChecksumsByIds.mockResolvedValue([
         { id: asset2.id, checksum: checksum2 },
         { id: asset3.id, checksum: checksum3 },
       ]);
@@ -720,7 +773,7 @@ describe(DuplicateService.name, () => {
       });
 
       expect(result[0].success).toBe(true);
-      expect(mocks.duplicateRepository.createChecksumTombstones).toHaveBeenCalledWith([
+      expect(mocks.galleryDuplicate.createChecksumTombstones).toHaveBeenCalledWith([
         { assetId: asset1.id, ownerId: authStub.admin.user.id, checksum: checksum2 },
         { assetId: asset1.id, ownerId: authStub.admin.user.id, checksum: checksum3 },
       ]);
@@ -732,19 +785,18 @@ describe(DuplicateService.name, () => {
       const asset3 = AssetFactory.create();
       const checksum = Buffer.from('eeff', 'hex');
       mocks.access.duplicate.checkOwnerAccess.mockResolvedValue(new Set(['group-1']));
-      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([asset3.id]));
       mocks.duplicateRepository.get.mockResolvedValue({
         duplicateId: 'group-1',
         assets: [asset1 as unknown as MapAsset, asset2 as unknown as MapAsset, asset3 as unknown as MapAsset],
       });
-      mocks.asset.getChecksumsByIds.mockResolvedValue([{ id: asset3.id, checksum }]);
+      mocks.galleryAsset.getChecksumsByIds.mockResolvedValue([{ id: asset3.id, checksum }]);
 
       const result = await sut.resolve(authStub.admin, {
         groups: [{ duplicateId: 'group-1', keepAssetIds: [asset1.id, asset2.id], trashAssetIds: [asset3.id] }],
       });
 
       expect(result[0].success).toBe(true);
-      expect(mocks.duplicateRepository.createChecksumTombstones).toHaveBeenCalledWith([
+      expect(mocks.galleryDuplicate.createChecksumTombstones).toHaveBeenCalledWith([
         { assetId: asset1.id, ownerId: authStub.admin.user.id, checksum },
       ]);
     });
@@ -753,7 +805,6 @@ describe(DuplicateService.name, () => {
       const asset1 = AssetFactory.create();
       const asset2 = AssetFactory.create();
       mocks.access.duplicate.checkOwnerAccess.mockResolvedValue(new Set(['group-1']));
-      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([asset1.id, asset2.id]));
       mocks.duplicateRepository.get.mockResolvedValue({
         duplicateId: 'group-1',
         assets: [asset1 as unknown as MapAsset, asset2 as unknown as MapAsset],
@@ -764,21 +815,20 @@ describe(DuplicateService.name, () => {
       });
 
       expect(result[0].success).toBe(true);
-      expect(mocks.asset.getChecksumsByIds).not.toHaveBeenCalled();
-      expect(mocks.duplicateRepository.createChecksumTombstones).not.toHaveBeenCalled();
+      expect(mocks.galleryAsset.getChecksumsByIds).not.toHaveBeenCalled();
+      expect(mocks.galleryDuplicate.createChecksumTombstones).not.toHaveBeenCalled();
     });
 
     it('should succeed even if tombstone insert fails', async () => {
       const asset1 = AssetFactory.create();
       const asset2 = AssetFactory.create();
       mocks.access.duplicate.checkOwnerAccess.mockResolvedValue(new Set(['group-1']));
-      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([asset2.id]));
       mocks.duplicateRepository.get.mockResolvedValue({
         duplicateId: 'group-1',
         assets: [asset1 as unknown as MapAsset, asset2 as unknown as MapAsset],
       });
-      mocks.asset.getChecksumsByIds.mockResolvedValue([{ id: asset2.id, checksum: Buffer.from('aa', 'hex') }]);
-      mocks.duplicateRepository.createChecksumTombstones.mockRejectedValue(new Error('DB error'));
+      mocks.galleryAsset.getChecksumsByIds.mockResolvedValue([{ id: asset2.id, checksum: Buffer.from('aa', 'hex') }]);
+      mocks.galleryDuplicate.createChecksumTombstones.mockRejectedValue(new Error('DB error'));
 
       const result = await sut.resolve(authStub.admin, {
         groups: [{ duplicateId: 'group-1', keepAssetIds: [asset1.id], trashAssetIds: [asset2.id] }],
@@ -800,8 +850,8 @@ describe(DuplicateService.name, () => {
       });
 
       expect(result[0].success).toBe(true);
-      expect(mocks.asset.getChecksumsByIds).not.toHaveBeenCalled();
-      expect(mocks.duplicateRepository.createChecksumTombstones).not.toHaveBeenCalled();
+      expect(mocks.galleryAsset.getChecksumsByIds).not.toHaveBeenCalled();
+      expect(mocks.galleryDuplicate.createChecksumTombstones).not.toHaveBeenCalled();
     });
   });
 

@@ -12,6 +12,7 @@ import 'package:immich_mobile/domain/models/user.model.dart';
 import 'package:immich_mobile/domain/services/store.service.dart';
 import 'package:immich_mobile/domain/services/user.service.dart';
 import 'package:immich_mobile/entities/store.entity.dart';
+import 'package:immich_mobile/gallery/search/search.providers.dart';
 import 'package:immich_mobile/infrastructure/repositories/settings.repository.dart';
 import 'package:immich_mobile/infrastructure/repositories/store.repository.dart';
 import 'package:immich_mobile/models/cast/cast_manager_state.dart';
@@ -19,12 +20,15 @@ import 'package:immich_mobile/presentation/pages/dev/main_timeline.page.dart';
 import 'package:immich_mobile/providers/cast.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/db.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/user.provider.dart' as infra;
-import 'package:immich_mobile/providers/photos_filter/photos_filter.provider.dart';
 import 'package:immich_mobile/providers/sync_status.provider.dart';
 import 'package:immich_mobile/providers/user.provider.dart';
+import 'package:immich_mobile/services/background_upload.service.dart';
+import 'package:immich_mobile/services/foreground_upload.service.dart';
 import 'package:immich_mobile/services/server_info.service.dart';
 import 'package:immich_mobile/widgets/common/immich_sliver_app_bar.dart';
 import 'package:mocktail/mocktail.dart';
+
+import '../../service.mocks.dart';
 import '../../test_utils.dart';
 import '../../widget_tester_extensions.dart';
 
@@ -152,12 +156,18 @@ void main() {
         infra.userServiceProvider.overrideWithValue(userService),
         currentUserProvider.overrideWith((ref) => _StubCurrentUserNotifier(userService, _testUser)),
         serverInfoServiceProvider.overrideWithValue(_MockServerInfoService()),
+        // immich-31082 put AssetService (hence ApiService) behind
+        // backgroundUploadServiceProvider, which backupProvider watches and the app
+        // bar's _BackupIndicator in turn watches. This test is about logo width, so
+        // stub the upload services rather than standing up the whole API layer.
+        foregroundUploadServiceProvider.overrideWithValue(MockForegroundUploadService()),
+        backgroundUploadServiceProvider.overrideWithValue(MockBackgroundUploadService()),
       ],
     );
 
     if (busy) {
       final container = ProviderScope.containerOf(tester.element(find.byType(ImmichSliverAppBar)));
-      container.read(photosFilterProvider.notifier).setText('beach');
+      container.read(searchStateProvider.notifier).submitText('beach');
       container.read(syncStatusProvider.notifier).startRemoteSync();
       // The sync line animates for as long as it is visible, so the tree never settles once
       // syncing starts; pump fixed frames instead of waiting for quiescence.
@@ -229,14 +239,14 @@ void main() {
       addTearDown(() => tester.binding.setSurfaceSize(null));
 
       await pumpAppBar(tester, width: 390, actions: PhotosTimelineAppBar.actions);
-      final chipWhenIdle = tester.getRect(find.byKey(const Key('timeline-grouping-compact-selector')));
+      final logoWhenIdle = tester.getRect(find.byType(SvgPicture));
 
       await pumpAppBar(tester, width: 390, actions: PhotosTimelineAppBar.actions, busy: true);
-      final chipWhenSyncing = tester.getRect(find.byKey(const Key('timeline-grouping-compact-selector')));
+      final logoWhenSyncing = tester.getRect(find.byType(SvgPicture));
 
       expect(
-        chipWhenSyncing,
-        chipWhenIdle,
+        logoWhenSyncing,
+        logoWhenIdle,
         reason: 'a sync must not shift the actions row — that is what used to squeeze the logo',
       );
     });

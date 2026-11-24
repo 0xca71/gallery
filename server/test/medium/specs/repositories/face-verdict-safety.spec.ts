@@ -1,5 +1,6 @@
 import { Kysely } from 'kysely';
 import { AssetVisibility, JobStatus, SourceType, SystemMetadataKey } from 'src/enum.js';
+import { FaceSearchRepository } from 'src/gallery/repositories/face-search.repository.js';
 import { AccessRepository } from 'src/repositories/access.repository.js';
 import { AssetRepository } from 'src/repositories/asset.repository.js';
 import { ConfigRepository } from 'src/repositories/config.repository.js';
@@ -32,12 +33,12 @@ let db: Kysely<DB>;
 const setup = () => {
   const { ctx } = newMediumService(BaseService, {
     database: db,
-    real: [SearchRepository, PersonRepository, FaceIdentityRepository],
+    real: [SearchRepository, FaceSearchRepository, PersonRepository, FaceIdentityRepository],
     mock: [LoggingRepository],
   });
   return {
     ctx,
-    searchRepository: ctx.get(SearchRepository),
+    searchRepository: ctx.get(FaceSearchRepository),
     personRepository: ctx.get(PersonRepository),
     faceIdentityRepository: ctx.get(FaceIdentityRepository),
   };
@@ -220,7 +221,7 @@ const setupReset = () => {
   jobMock.empty.mockResolvedValue();
   jobMock.queue.mockResolvedValue();
   jobMock.queueAll.mockResolvedValue();
-  jobMock.getJobCounts.mockResolvedValue({ active: 0, waiting: 0, delayed: 0, paused: 0, completed: 0, failed: 0 });
+  jobMock.getJobCounts.mockResolvedValue({ active: 0, waiting: 0, delayed: 0, completed: 0, failed: 0 });
 
   const metadata = ctx.getMock(SystemMetadataRepository);
   metadata.get.mockImplementation((key) => {

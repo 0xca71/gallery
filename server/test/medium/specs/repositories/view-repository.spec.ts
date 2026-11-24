@@ -10,6 +10,7 @@ import { getKyselyDB } from 'test/utils.js';
 
 let defaultDatabase: Kysely<DB>;
 
+// eslint-disable-next-line unicorn/no-unnecessary-parameters
 const setup = (db?: Kysely<DB>) => {
   const { ctx } = newMediumService(BaseService, {
     database: db || defaultDatabase,
@@ -360,6 +361,49 @@ describe(ViewRepository.name, () => {
       const result = await sut.getAssetsByOriginalPath(member.id, path);
 
       expect(result.map((a) => a.id)).toContain(asset.id);
+    });
+
+    // #763 slice 1b Task 2, E1 — mapAsset feeds isFavorite from `isFavoriteForUser` exclusively;
+    // the folder-contents query must project the per-user overlay, not the asset owner's flag.
+    it('E1 — a space member sees their own favorite here, independent of the owner (#763)', async () => {
+      const { ctx, sut } = setup();
+      const path = '/archive/contents/favorite-e1';
+      const { owner, member, asset } = await seedDirectSpaceAsset(ctx, SharedSpaceRole.Viewer, `${path}/IMG.jpg`);
+
+      await ctx.database.insertInto('asset_favorite').values({ userId: member.id, assetId: asset.id }).execute();
+
+      const asMember = await sut.getAssetsByOriginalPath(member.id, path);
+      expect(asMember).toEqual([expect.objectContaining({ id: asset.id, isFavoriteForUser: true })]);
+
+      const asOwner = await sut.getAssetsByOriginalPath(owner.id, path);
+      expect(asOwner).toEqual([expect.objectContaining({ id: asset.id, isFavoriteForUser: false })]);
+    });
+
+    // immich-32612 anchors the match at an absolute path; S3 originals are relative keys (isDiskPath),
+    // and the web folder tree sends the same slash-less path back for both kinds.
+    it('GRANT — an S3 original (relative key) is listed in its folder', async () => {
+      const { ctx, sut } = setup();
+      const { user } = await ctx.newUser();
+      const { asset } = await ctx.newAsset({ ownerId: user.id, originalPath: `upload/${user.id}/2024/1.jpg` });
+      await ctx.newAsset({ ownerId: user.id, originalPath: `upload/${user.id}/2024/sub/2.jpg` });
+      await ctx.newAsset({ ownerId: user.id, originalPath: `backup/upload/${user.id}/2024/3.jpg` });
+
+      for (const path of [`upload/${user.id}/2024`, `upload/${user.id}/2024/`, `/upload/${user.id}/2024`]) {
+        const result = await sut.getAssetsByOriginalPath(user.id, path);
+        expect(result.map(({ id }) => id)).toEqual([asset.id]);
+      }
+    });
+
+    it('DENY — a disk folder and an S3 folder with the same name do not leak into each other', async () => {
+      const { ctx, sut } = setup();
+      const { user } = await ctx.newUser();
+      const { asset: disk } = await ctx.newAsset({ ownerId: user.id, originalPath: '/data/photos/1.jpg' });
+      const { asset: s3 } = await ctx.newAsset({ ownerId: user.id, originalPath: 'data/photos/2.jpg' });
+      await ctx.newAsset({ ownerId: user.id, originalPath: '/mnt/data/photos/3.jpg' });
+      await ctx.newAsset({ ownerId: user.id, originalPath: 'mnt/data/photos/4.jpg' });
+
+      const result = await sut.getAssetsByOriginalPath(user.id, 'data/photos');
+      expect(result.map(({ id }) => id).toSorted()).toEqual([disk.id, s3.id].toSorted());
     });
   });
 });

@@ -5,7 +5,6 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { Readable } from 'node:stream';
-import type { UploadBody } from 'src/types.js';
 import { DiskStorageBackend } from 'src/backends/disk-storage.backend.js';
 import { AssetFile } from 'src/database.js';
 import { AssetMediaStatus, AssetRejectReason, AssetUploadAction } from 'src/dtos/asset-media-response.dto.js';
@@ -13,10 +12,12 @@ import { AssetMediaCreateDto, AssetMediaSize, UploadFieldName } from 'src/dtos/a
 import { MapAsset } from 'src/dtos/asset-response.dto.js';
 import { AssetEditAction } from 'src/dtos/editing.dto.js';
 import { AssetFileType, AssetType, AssetVisibility, CacheControl, JobName } from 'src/enum.js';
+import { storageBackends } from 'src/gallery/utils/storage-backends.js';
 import { RangeNotSatisfiableError } from 'src/interfaces/storage-backend.interface.js';
 import { AuthRequest } from 'src/middleware/auth.guard.js';
+import { StorageRepository } from 'src/repositories/storage.repository.js';
 import { AssetMediaService } from 'src/services/asset-media.service.js';
-import { StorageService } from 'src/services/storage.service.js';
+import type { UploadBody } from 'src/types.js';
 import { ASSET_CHECKSUM_CONSTRAINT } from 'src/utils/database.js';
 import { ImmichFileResponse, ImmichRedirectResponse, ImmichStreamResponse } from 'src/utils/file.js';
 import { AssetFileFactory } from 'test/factories/asset-file.factory.js';
@@ -78,6 +79,7 @@ const validImages = [
   '.heic',
   '.heif',
   '.iiq',
+  '.jfif',
   '.jp2',
   '.jpeg',
   '.jpg',
@@ -171,7 +173,7 @@ const assetEntity = Object.freeze({
     longitude: 10.703075,
   },
   livePhotoVideoId: null,
-} as MapAsset);
+} as MapAsset & { isFavorite: boolean });
 
 const existingAsset = Object.freeze({
   ...assetEntity,
@@ -199,7 +201,7 @@ describe(AssetMediaService.name, () => {
   beforeAll(() => {
     // Initialize the disk backend for StorageService so that serveFromBackend works in tests.
     // The DiskStorageBackend returns absolute paths as-is, so the mediaLocation value doesn't matter.
-    (StorageService as any).diskBackend = new DiskStorageBackend('/data');
+    (storageBackends as any).diskBackend = new DiskStorageBackend('/data', {} as StorageRepository);
   });
 
   beforeEach(() => {
@@ -209,6 +211,14 @@ describe(AssetMediaService.name, () => {
   describe('getUploadAssetIdByChecksum', () => {
     it('should return if checksum is undefined', async () => {
       await expect(sut.getUploadAssetIdByChecksum(authStub.admin)).resolves.toBe(undefined);
+    });
+
+    it('should reject a shared link without upload permission', async () => {
+      const auth = AuthFactory.from().sharedLink({ allowUpload: false }).build();
+      await expect(sut.getUploadAssetIdByChecksum(auth, file1.toString('hex'))).rejects.toBeInstanceOf(
+        BadRequestException,
+      );
+      expect(mocks.asset.getUploadAssetIdByChecksum).not.toHaveBeenCalled();
     });
 
     it('should handle a non-existent asset', async () => {
@@ -450,227 +460,6 @@ describe(AssetMediaService.name, () => {
       expect(mocks.user.updateUsage).not.toHaveBeenCalled();
     });
 
-    it('should keep uploaded disk files when removing the incomplete asset row fails', async () => {
-      const file = {
-        uuid: 'random-uuid',
-        originalPath: 'fake_path/asset_1.heic',
-        mimeType: 'image/heic',
-        checksum: Buffer.from('file hash', 'utf8'),
-        originalName: 'asset_1.HEIC',
-        size: 42,
-      };
-      const error = new Error('failed after asset create');
-
-      mocks.asset.create.mockResolvedValue(assetEntity);
-      mocks.asset.upsertExif.mockRejectedValue(error);
-      mocks.asset.remove.mockRejectedValue(new Error('remove failed'));
-
-      await expect(sut.uploadAsset(authStub.user1, createDto, file)).rejects.toThrow(error);
-
-      expect(mocks.asset.remove).toHaveBeenCalledWith({ id: assetEntity.id });
-      expect(mocks.job.queue).not.toHaveBeenCalledWith({
-        name: JobName.FileDelete,
-        data: { files: [file.originalPath, undefined] },
-      });
-      expect(mocks.user.updateUsage).not.toHaveBeenCalled();
-    });
-
-    it('should queue disk original and sidecar cleanup when post-create processing fails', async () => {
-      const file = {
-        uuid: 'random-uuid',
-        originalPath: 'fake_path/asset_1.heic',
-        mimeType: 'image/heic',
-        checksum: Buffer.from('file hash', 'utf8'),
-        originalName: 'asset_1.HEIC',
-        size: 42,
-      };
-      const sidecarFile = {
-        uuid: 'random-sidecar-uuid',
-        originalPath: 'fake_path/asset_1.xmp',
-        mimeType: 'application/xml',
-        checksum: Buffer.from('sidecar hash', 'utf8'),
-        originalName: 'asset_1.xmp',
-        size: 12,
-      };
-      const error = new Error('failed after sidecar create');
-
-      mocks.asset.create.mockResolvedValue(assetEntity);
-      mocks.asset.upsertExif.mockRejectedValue(error);
-
-      await expect(sut.uploadAsset(authStub.user1, createDto, file, sidecarFile)).rejects.toThrow(error);
-
-      expect(mocks.asset.upsertFile).toHaveBeenCalledWith({
-        assetId: assetEntity.id,
-        path: sidecarFile.originalPath,
-        type: AssetFileType.Sidecar,
-      });
-      expect(mocks.asset.remove).toHaveBeenCalledWith({ id: assetEntity.id });
-      expect(mocks.job.queue).toHaveBeenCalledWith({
-        name: JobName.FileDelete,
-        data: { files: [file.originalPath, sidecarFile.originalPath] },
-      });
-      expect(mocks.user.updateUsage).not.toHaveBeenCalled();
-    });
-
-    it('should delete uploaded S3 originals when post-upload processing fails', async () => {
-      const file = {
-        uuid: 'random-uuid',
-        originalPath: '/dev/null',
-        mimeType: 'image/heic',
-        checksum: Buffer.from('file hash', 'utf8'),
-        originalName: 'asset_1.HEIC',
-        size: 42,
-      };
-      const error = new Error('failed after s3 upload');
-      const expectedKey = 'upload/user-id/id/_1/id_1';
-      const s3Backend = {
-        put: vi.fn().mockResolvedValue(void 0),
-        delete: vi.fn().mockResolvedValue(void 0),
-      };
-      const previousS3Backend = (StorageService as any).s3Backend;
-      const previousWriteBackendType = (StorageService as any).writeBackendType;
-
-      (StorageService as any).s3Backend = s3Backend;
-      (StorageService as any).writeBackendType = 's3';
-      mocks.asset.create.mockResolvedValue(assetEntity);
-      mocks.event.emit.mockRejectedValue(error);
-
-      try {
-        await expect(sut.uploadAsset(authStub.user1, createDto, file)).rejects.toThrow(error);
-
-        expect(s3Backend.put).toHaveBeenCalledWith(expectedKey, expect.anything(), {
-          contentType: 'application/octet-stream',
-        });
-        expect(mocks.asset.update).toHaveBeenCalledWith({ id: assetEntity.id, originalPath: expectedKey });
-        expect(mocks.asset.remove).toHaveBeenCalledWith({ id: assetEntity.id });
-        expect(s3Backend.delete).toHaveBeenCalledWith(expectedKey);
-        expect(mocks.user.updateUsage).not.toHaveBeenCalled();
-      } finally {
-        (StorageService as any).s3Backend = previousS3Backend;
-        (StorageService as any).writeBackendType = previousWriteBackendType;
-      }
-    });
-
-    it('should preserve the original upload error when S3 rollback deletion fails', async () => {
-      const file = {
-        uuid: 'random-uuid',
-        originalPath: '/dev/null',
-        mimeType: 'image/heic',
-        checksum: Buffer.from('file hash', 'utf8'),
-        originalName: 'asset_1.HEIC',
-        size: 42,
-      };
-      const error = new Error('failed after s3 upload');
-      const deleteError = new Error('s3 delete failed');
-      const expectedKey = 'upload/user-id/id/_1/id_1';
-      const s3Backend = {
-        put: vi.fn().mockResolvedValue(void 0),
-        delete: vi.fn().mockRejectedValue(deleteError),
-      };
-      const previousS3Backend = (StorageService as any).s3Backend;
-      const previousWriteBackendType = (StorageService as any).writeBackendType;
-
-      (StorageService as any).s3Backend = s3Backend;
-      (StorageService as any).writeBackendType = 's3';
-      mocks.asset.create.mockResolvedValue(assetEntity);
-      mocks.event.emit.mockRejectedValue(error);
-
-      try {
-        await expect(sut.uploadAsset(authStub.user1, createDto, file)).rejects.toThrow(error);
-
-        expect(mocks.asset.remove).toHaveBeenCalledWith({ id: assetEntity.id });
-        expect(s3Backend.delete).toHaveBeenCalledWith(expectedKey);
-        expect(mocks.user.updateUsage).not.toHaveBeenCalled();
-      } finally {
-        (StorageService as any).s3Backend = previousS3Backend;
-        (StorageService as any).writeBackendType = previousWriteBackendType;
-      }
-    });
-
-    it('should delete uploaded S3 sidecars when sidecar post-processing fails', async () => {
-      const file = {
-        uuid: 'random-uuid',
-        originalPath: '/dev/null',
-        mimeType: 'image/heic',
-        checksum: Buffer.from('file hash', 'utf8'),
-        originalName: 'asset_1.HEIC',
-        size: 42,
-      };
-      const sidecarFile = {
-        uuid: 'random-sidecar-uuid',
-        originalPath: '/dev/null',
-        mimeType: 'application/xml',
-        checksum: Buffer.from('sidecar hash', 'utf8'),
-        originalName: 'asset_1.xmp',
-        size: 12,
-      };
-      const error = new Error('failed after s3 sidecar upload');
-      const expectedOriginalKey = 'upload/user-id/id/_1/id_1';
-      const expectedSidecarKey = 'upload/user-id/id/_1/id_1.xmp';
-      const s3Backend = {
-        put: vi.fn().mockResolvedValue(void 0),
-        delete: vi.fn().mockResolvedValue(void 0),
-      };
-      const previousS3Backend = (StorageService as any).s3Backend;
-      const previousWriteBackendType = (StorageService as any).writeBackendType;
-
-      (StorageService as any).s3Backend = s3Backend;
-      (StorageService as any).writeBackendType = 's3';
-      mocks.asset.create.mockResolvedValue(assetEntity);
-      mocks.asset.upsertFile.mockResolvedValueOnce(void 0).mockRejectedValueOnce(error);
-
-      try {
-        await expect(sut.uploadAsset(authStub.user1, createDto, file, sidecarFile)).rejects.toThrow(error);
-
-        expect(s3Backend.put).toHaveBeenCalledWith(expectedOriginalKey, expect.anything(), {
-          contentType: 'application/octet-stream',
-        });
-        expect(s3Backend.put).toHaveBeenCalledWith(expectedSidecarKey, expect.anything());
-        expect(mocks.asset.remove).toHaveBeenCalledWith({ id: assetEntity.id });
-        expect(s3Backend.delete).toHaveBeenCalledWith(expectedOriginalKey);
-        expect(s3Backend.delete).toHaveBeenCalledWith(expectedSidecarKey);
-        expect(mocks.user.updateUsage).not.toHaveBeenCalled();
-      } finally {
-        (StorageService as any).s3Backend = previousS3Backend;
-        (StorageService as any).writeBackendType = previousWriteBackendType;
-      }
-    });
-
-    it('should delete uploaded S3 originals directly when the temp cleanup queue fails', async () => {
-      const file = {
-        uuid: 'random-uuid',
-        originalPath: '/dev/null',
-        mimeType: 'image/heic',
-        checksum: Buffer.from('file hash', 'utf8'),
-        originalName: 'asset_1.HEIC',
-        size: 42,
-      };
-      const error = new Error('job queue unavailable');
-      const expectedKey = 'upload/user-id/id/_1/id_1';
-      const s3Backend = {
-        put: vi.fn().mockResolvedValue(void 0),
-        delete: vi.fn().mockResolvedValue(void 0),
-      };
-      const previousS3Backend = (StorageService as any).s3Backend;
-      const previousWriteBackendType = (StorageService as any).writeBackendType;
-
-      (StorageService as any).s3Backend = s3Backend;
-      (StorageService as any).writeBackendType = 's3';
-      mocks.asset.create.mockResolvedValue(assetEntity);
-      mocks.job.queue.mockRejectedValueOnce(error);
-
-      try {
-        await expect(sut.uploadAsset(authStub.user1, createDto, file)).rejects.toThrow(error);
-
-        expect(s3Backend.delete).toHaveBeenCalledWith(expectedKey);
-        expect(mocks.asset.remove).toHaveBeenCalledWith({ id: assetEntity.id });
-        expect(mocks.user.updateUsage).not.toHaveBeenCalled();
-      } finally {
-        (StorageService as any).s3Backend = previousS3Backend;
-        (StorageService as any).writeBackendType = previousWriteBackendType;
-      }
-    });
-
     it('should handle a duplicate', async () => {
       const file = {
         uuid: 'random-uuid',
@@ -728,6 +517,7 @@ describe(AssetMediaService.name, () => {
         .owner(authStub.user1.user)
         .build();
       const asset = AssetFactory.create({ livePhotoVideoId: motionAsset.id });
+      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([motionAsset.id]));
       mocks.asset.getById.mockResolvedValueOnce(getForAsset(motionAsset));
       mocks.asset.create.mockResolvedValueOnce(asset);
 
@@ -745,6 +535,7 @@ describe(AssetMediaService.name, () => {
     it('should hide the linked motion asset', async () => {
       const motionAsset = AssetFactory.from({ type: AssetType.Video }).owner(authStub.user1.user).build();
       const asset = AssetFactory.create();
+      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([motionAsset.id]));
       mocks.asset.getById.mockResolvedValueOnce(getForAsset(motionAsset));
       mocks.asset.create.mockResolvedValueOnce(asset);
 
@@ -760,6 +551,63 @@ describe(AssetMediaService.name, () => {
         id: motionAsset.id,
         visibility: AssetVisibility.Hidden,
       });
+    });
+
+    it('should link a live photo video that is already in the shared link', async () => {
+      const motionAsset = AssetFactory.from({ type: AssetType.Video }).owner(authStub.user1.user).build();
+      const asset = AssetFactory.create({ livePhotoVideoId: motionAsset.id });
+      const auth = AuthFactory.from(authStub.user1.user).sharedLink({ allowUpload: true }).build();
+      mocks.access.asset.checkSharedLinkAccess.mockResolvedValue(new Set([motionAsset.id]));
+      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([motionAsset.id]));
+      mocks.asset.getById.mockResolvedValueOnce(getForAsset(motionAsset));
+      mocks.asset.create.mockResolvedValueOnce(asset);
+      mocks.sharedLink.addAssets.mockResolvedValue([]);
+
+      await expect(
+        sut.uploadAsset(auth, { ...createDto, livePhotoVideoId: motionAsset.id }, fileStub.livePhotoStill),
+      ).resolves.toEqual({
+        status: AssetMediaStatus.CREATED,
+        id: asset.id,
+      });
+
+      expect(mocks.access.asset.checkSharedLinkAccess).toHaveBeenCalledWith(
+        auth.sharedLink!.id,
+        new Set([motionAsset.id]),
+      );
+      expect(mocks.access.asset.checkOwnerAccess).toHaveBeenCalledWith(auth.user.id, new Set([motionAsset.id]), false);
+      expect(mocks.asset.getById).toHaveBeenCalledWith(motionAsset.id);
+      expect(mocks.asset.update).toHaveBeenCalledWith({ id: motionAsset.id, visibility: AssetVisibility.Hidden });
+      expect(mocks.asset.create).toHaveBeenCalledWith(expect.objectContaining({ livePhotoVideoId: motionAsset.id }));
+    });
+
+    it('should not link a live photo video that is not in the shared link', async () => {
+      const motionAsset = AssetFactory.from({ type: AssetType.Video }).owner(authStub.user1.user).build();
+      const auth = AuthFactory.from(authStub.user1.user).sharedLink({ allowUpload: true }).build();
+      mocks.access.asset.checkSharedLinkAccess.mockResolvedValue(new Set());
+      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([motionAsset.id]));
+
+      await expect(
+        sut.uploadAsset(auth, { ...createDto, livePhotoVideoId: motionAsset.id }, fileStub.livePhotoStill),
+      ).rejects.toThrow('Not found or no asset.update permission');
+
+      expect(mocks.asset.getById).not.toHaveBeenCalled();
+      expect(mocks.asset.update).not.toHaveBeenCalled();
+      expect(mocks.asset.create).not.toHaveBeenCalled();
+    });
+
+    it('should not link a live photo video in the shared link that is owned by another user', async () => {
+      const motionAsset = AssetFactory.from({ type: AssetType.Video }).build();
+      const auth = AuthFactory.from(authStub.user1.user).sharedLink({ allowUpload: true }).build();
+      mocks.access.asset.checkSharedLinkAccess.mockResolvedValue(new Set([motionAsset.id]));
+      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set());
+
+      await expect(
+        sut.uploadAsset(auth, { ...createDto, livePhotoVideoId: motionAsset.id }, fileStub.livePhotoStill),
+      ).rejects.toThrow('Not found or no asset.update permission');
+
+      expect(mocks.asset.getById).not.toHaveBeenCalled();
+      expect(mocks.asset.update).not.toHaveBeenCalled();
+      expect(mocks.asset.create).not.toHaveBeenCalled();
     });
 
     it('should handle a sidecar file', async () => {
@@ -839,8 +687,8 @@ describe(AssetMediaService.name, () => {
 
       mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([asset.id]));
       mocks.asset.getForOriginal.mockResolvedValue(asset);
-      const previousS3Backend = (StorageService as any).s3Backend;
-      (StorageService as any).s3Backend = s3Backend;
+      const previousS3Backend = (storageBackends as any).s3Backend;
+      (storageBackends as any).s3Backend = s3Backend;
 
       try {
         await expect(sut.downloadOriginal(authStub.admin, asset.id, {})).resolves.toEqual(
@@ -856,7 +704,7 @@ describe(AssetMediaService.name, () => {
           disposition: 'inline',
         });
       } finally {
-        (StorageService as any).s3Backend = previousS3Backend;
+        (storageBackends as any).s3Backend = previousS3Backend;
       }
     });
 
@@ -876,8 +724,8 @@ describe(AssetMediaService.name, () => {
 
       mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([asset.id]));
       mocks.asset.getForOriginal.mockResolvedValue(asset);
-      const previousS3Backend = (StorageService as any).s3Backend;
-      (StorageService as any).s3Backend = s3Backend;
+      const previousS3Backend = (storageBackends as any).s3Backend;
+      (storageBackends as any).s3Backend = s3Backend;
 
       try {
         await expect(sut.downloadOriginal(authStub.admin, asset.id, {}, 'bytes=0-1023')).resolves.toEqual(
@@ -888,7 +736,7 @@ describe(AssetMediaService.name, () => {
           expect.objectContaining({ range: 'bytes=0-1023' }),
         );
       } finally {
-        (StorageService as any).s3Backend = previousS3Backend;
+        (storageBackends as any).s3Backend = previousS3Backend;
       }
     });
 
@@ -977,8 +825,7 @@ describe(AssetMediaService.name, () => {
         isEdited: true,
         path: '/encoded-video/owner/asset_edited.mp4',
       });
-      const editedAsset = AssetFactory.from({ type: AssetType.Video })
-        .edit({ action: AssetEditAction.Trim })
+      const editedAsset = AssetFactory.from({ type: AssetType.Video, isEdited: true })
         .file({ type: AssetFileType.EncodedVideo })
         .file({ type: AssetFileType.FullSize, isEdited: true })
         .file(trimmedVideoFile)
@@ -1036,8 +883,8 @@ describe(AssetMediaService.name, () => {
 
       mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([asset.id]));
       mocks.asset.getForThumbnail.mockResolvedValue({ ...asset, path });
-      const previousS3Backend = (StorageService as any).s3Backend;
-      (StorageService as any).s3Backend = s3Backend;
+      const previousS3Backend = (storageBackends as any).s3Backend;
+      (storageBackends as any).s3Backend = s3Backend;
 
       try {
         const results = await Promise.all(
@@ -1064,7 +911,7 @@ describe(AssetMediaService.name, () => {
           disposition: 'inline',
         });
       } finally {
-        (StorageService as any).s3Backend = previousS3Backend;
+        (storageBackends as any).s3Backend = previousS3Backend;
       }
     });
 
@@ -1083,8 +930,8 @@ describe(AssetMediaService.name, () => {
 
       mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([asset.id]));
       mocks.asset.getForThumbnail.mockResolvedValue({ ...asset, path });
-      const previousS3Backend = (StorageService as any).s3Backend;
-      (StorageService as any).s3Backend = s3Backend;
+      const previousS3Backend = (storageBackends as any).s3Backend;
+      (storageBackends as any).s3Backend = s3Backend;
 
       try {
         const response = (await sut.viewThumbnail(authStub.admin, asset.id, {
@@ -1095,7 +942,7 @@ describe(AssetMediaService.name, () => {
         // client is never told it can range-request this URL
         expect(response.acceptsRanges).toBeUndefined();
       } finally {
-        (StorageService as any).s3Backend = previousS3Backend;
+        (storageBackends as any).s3Backend = previousS3Backend;
       }
     });
 
@@ -1253,7 +1100,7 @@ describe(AssetMediaService.name, () => {
       );
     });
 
-    it('should fall back to the original path', async () => {
+    it('should fall back to the original path, revalidated so a later encode replaces it (#1176)', async () => {
       const asset = AssetFactory.create({ type: AssetType.Video, originalPath: '/original/path.ext' });
       mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([asset.id]));
       mocks.asset.getForVideo.mockResolvedValue({
@@ -1264,7 +1111,7 @@ describe(AssetMediaService.name, () => {
       await expect(sut.playbackVideo(authStub.admin, asset.id)).resolves.toEqual(
         new ImmichFileResponse({
           path: asset.originalPath,
-          cacheControl: CacheControl.PrivateWithCache,
+          cacheControl: CacheControl.PrivateWithoutCache,
           contentType: 'application/octet-stream',
         }),
       );
@@ -1285,8 +1132,8 @@ describe(AssetMediaService.name, () => {
         originalPath: 'upload/admin/aa/bb/video.mp4',
         encodedVideoPath: null,
       });
-      const previousS3Backend = (StorageService as any).s3Backend;
-      (StorageService as any).s3Backend = s3Backend;
+      const previousS3Backend = (storageBackends as any).s3Backend;
+      (storageBackends as any).s3Backend = s3Backend;
 
       try {
         await expect(sut.playbackVideo(authStub.admin, 'asset-1', 'bytes=0-1023')).resolves.toEqual(
@@ -1296,7 +1143,7 @@ describe(AssetMediaService.name, () => {
             length: 1024,
             contentRange: 'bytes 0-1023/1048576',
             acceptsRanges: true,
-            cacheControl: CacheControl.PrivateWithCache,
+            cacheControl: CacheControl.PrivateWithoutCache,
           }),
         );
         expect(s3Backend.getServeStrategy).toHaveBeenCalledWith(
@@ -1304,7 +1151,7 @@ describe(AssetMediaService.name, () => {
           expect.objectContaining({ range: 'bytes=0-1023' }),
         );
       } finally {
-        (StorageService as any).s3Backend = previousS3Backend;
+        (storageBackends as any).s3Backend = previousS3Backend;
       }
     });
 
@@ -1321,8 +1168,8 @@ describe(AssetMediaService.name, () => {
         originalPath: 'upload/admin/aa/bb/video.mp4',
         encodedVideoPath: null,
       });
-      const previousS3Backend = (StorageService as any).s3Backend;
-      (StorageService as any).s3Backend = s3Backend;
+      const previousS3Backend = (storageBackends as any).s3Backend;
+      (storageBackends as any).s3Backend = s3Backend;
 
       try {
         const response = await sut.playbackVideo(authStub.admin, 'asset-1');
@@ -1333,7 +1180,7 @@ describe(AssetMediaService.name, () => {
         );
         expect((response as ImmichStreamResponse).contentRange).toBeUndefined();
       } finally {
-        (StorageService as any).s3Backend = previousS3Backend;
+        (storageBackends as any).s3Backend = previousS3Backend;
       }
     });
 
@@ -1346,15 +1193,15 @@ describe(AssetMediaService.name, () => {
         originalPath: 'upload/admin/aa/bb/video.mp4',
         encodedVideoPath: null,
       });
-      const previousS3Backend = (StorageService as any).s3Backend;
-      (StorageService as any).s3Backend = s3Backend;
+      const previousS3Backend = (storageBackends as any).s3Backend;
+      (storageBackends as any).s3Backend = s3Backend;
 
       try {
         await expect(sut.playbackVideo(authStub.admin, 'asset-1', 'bytes=999999999-')).rejects.toMatchObject({
           status: 416,
         });
       } finally {
-        (StorageService as any).s3Backend = previousS3Backend;
+        (storageBackends as any).s3Backend = previousS3Backend;
       }
     });
   });
@@ -1481,18 +1328,6 @@ describe(AssetMediaService.name, () => {
       const result = await sut.viewThumbnail(authStub.admin, asset.id, { size: AssetMediaSize.FULLSIZE });
 
       expect(result).toEqual({ targetSize: 'original' });
-    });
-
-    it('rejects a missing fullsize image when fallback is explicitly disabled', async () => {
-      const asset = AssetFactory.from({
-        originalFileName: 'IMG_001.arw',
-        originalPath: '/data/library/IMG_001.arw',
-      }).build();
-      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([asset.id]));
-      mocks.asset.getForThumbnail.mockResolvedValue({ ...asset, path: null });
-      await expect(
-        sut.viewThumbnail(authStub.admin, asset.id, { size: AssetMediaSize.FULLSIZE, fallback: false }),
-      ).rejects.toBeInstanceOf(NotFoundException);
     });
 
     it('should downgrade to preview if fullsize path is not available', async () => {

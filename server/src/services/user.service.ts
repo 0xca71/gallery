@@ -1,11 +1,6 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { Updateable } from 'kysely';
 import { DateTime } from 'luxon';
-import { createReadStream } from 'node:fs';
-import { basename } from 'node:path';
-import type { ArgOf } from 'src/repositories/event.repository.js';
-import type { JobOf, UserMetadataItem } from 'src/types.js';
-import { DiskStorageBackend } from 'src/backends/disk-storage.backend.js';
 import { SALT_ROUNDS } from 'src/constants.js';
 import { StorageCore } from 'src/cores/storage.core.js';
 import { OnEvent, OnJob } from 'src/decorators.js';
@@ -17,11 +12,14 @@ import { UserPreferencesResponseDto, UserPreferencesUpdateDto, mapPreferences } 
 import { CreateProfileImageResponseDto } from 'src/dtos/user-profile.dto.js';
 import { UserAdminResponseDto, UserResponseDto, UserUpdateMeDto, mapUser, mapUserAdmin } from 'src/dtos/user.dto.js';
 import { CacheControl, JobName, JobStatus, QueueName, StorageFolder, UserMetadataKey } from 'src/enum.js';
+import { getDeletableUserS3Prefixes } from 'src/gallery/utils/storage-usage.js';
+import type { ArgOf } from 'src/repositories/event.repository.js';
 import { UserFindOptions } from 'src/repositories/user.repository.js';
 import { UserTable } from 'src/schema/tables/user.table.js';
 import { BaseService } from 'src/services/base.service.js';
 import { getCalendarHeatmap } from 'src/services/shared/user-methods.js';
 import { StorageService } from 'src/services/storage.service.js';
+import type { JobOf, UserMetadataItem } from 'src/types.js';
 import { ImmichMediaResponse } from 'src/utils/file.js';
 import { mimeTypes } from 'src/utils/mime-types.js';
 import { findOrFail } from 'src/utils/misc.js';
@@ -125,17 +123,7 @@ export class UserService extends BaseService {
       throw new BadRequestException('Unable to process profile image', { cause: error });
     }
 
-    const writeBackend = StorageService.getWriteBackend();
-
-    if (!(writeBackend instanceof DiskStorageBackend)) {
-      const filename = basename(profileImagePath);
-      const relativeKey = StorageCore.getRelativeProfileImagePath(auth.user.id, filename);
-      const stream = createReadStream(profileImagePath);
-      await writeBackend.put(relativeKey, stream, { contentType: mimeTypes.lookup(profileImagePath) });
-      // After S3 upload, drop the local generated file and store the relative key.
-      await this.jobRepository.queue({ name: JobName.FileDelete, data: { files: [profileImagePath] } });
-      profileImagePath = relativeKey;
-    }
+    profileImagePath = await this.backendMedia.persistProfileImage(auth.user.id, profileImagePath);
 
     const user = await this.userRepository.update(auth.user.id, {
       profileImagePath,
@@ -168,7 +156,11 @@ export class UserService extends BaseService {
       throw new NotFoundException();
     }
 
-    return this.serveFromBackend(user.profileImagePath, mimeTypes.lookup(user.profileImagePath), CacheControl.None);
+    return this.backendMedia.serveFromBackend(
+      user.profileImagePath,
+      mimeTypes.lookup(user.profileImagePath),
+      CacheControl.None,
+    );
   }
 
   async getLicense(auth: AuthDto): Promise<LicenseResponseDto> {
@@ -303,19 +295,11 @@ export class UserService extends BaseService {
       await this.storageRepository.unlinkDir(folder, { recursive: true, force: true });
     }
 
-    // S3: clean the user-scoped relative prefixes. Library and Backups are intentionally
-    // excluded — storage-template migration is a no-op on S3 (StorageCore.moveFile guard),
-    // so S3 never writes to library/; Backups is admin/global scope.
+    // S3: clean the keys of the folders above, library/<label>/ included (storage templates and disk-to-S3
+    // migrations write there) unless another user's assets are stored under it. Backups is admin/global scope.
     const s3 = StorageService.getS3Backend();
     if (s3) {
-      const userScopedS3Folders = [
-        StorageFolder.Upload,
-        StorageFolder.Profile,
-        StorageFolder.Thumbnails,
-        StorageFolder.EncodedVideo,
-      ] as const;
-      for (const folder of userScopedS3Folders) {
-        const prefix = `${folder}/${user.id}/`;
+      for (const prefix of await getDeletableUserS3Prefixes(user, this.storageMigrationRepository, this.logger)) {
         try {
           await s3.deletePrefix(prefix);
           this.logger.log(`Cleaned S3 prefix ${prefix}`);

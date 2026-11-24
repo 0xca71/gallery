@@ -1,10 +1,6 @@
-import { Body, Container, Font, Head, Hr, Html, Img, Preview, Section, Tailwind, Text } from '@react-email/components';
 import * as React from 'react';
-// tailwindcss-preset-email is CJS-only (no ESM build); Node's CJS/ESM interop maps its
-// `module.exports` object onto this default import when running under "type": "module".
-// A bare `require(...)` here (as upstream had it) throws `ReferenceError: require is not
-// defined` at render time once the server runs as real ESM instead of CommonJS.
-import tailwindcssPresetEmail from 'tailwindcss-preset-email';
+import { Body, Container, Font, Head, Hr, Html, Img, Preview, Section, Tailwind, Text } from 'react-email';
+import tailwindPresetEmail from 'tailwindcss-preset-email';
 import { ImmichFooter } from 'src/emails/components/footer.template.js';
 
 interface ImmichLayoutProps {
@@ -16,7 +12,7 @@ export const ImmichLayout = ({ children, preview }: ImmichLayoutProps) => (
   <Html>
     <Tailwind
       config={{
-        presets: [tailwindcssPresetEmail],
+        presets: [tailwindPresetEmail],
         theme: {
           extend: {
             colors: {

@@ -1,10 +1,10 @@
 import request from 'supertest';
 import { PersonController } from 'src/controllers/person.controller.js';
-import { PersonStatisticsResponseDto } from 'src/dtos/person.dto.js';
+import { PersonStatisticsResponseDto, PersonUserRole } from 'src/dtos/person.dto.js';
 import { LoggingRepository } from 'src/repositories/logging.repository.js';
 import { PersonService } from 'src/services/person.service.js';
 import { errorDto } from 'test/medium/responses.js';
-import { factory } from 'test/small.factory.js';
+import { factory, newUuid } from 'test/small.factory.js';
 import { ControllerContext, automock, controllerSetup, mockBaseService } from 'test/utils.js';
 
 describe(PersonController.name, () => {
@@ -83,142 +83,6 @@ describe(PersonController.name, () => {
     });
   });
 
-  describe('GET /people/statistics', () => {
-    it('should be an authenticated route', async () => {
-      await request(ctx.getHttpServer()).get('/people/statistics');
-      expect(ctx.authenticate).toHaveBeenCalled();
-    });
-
-    it('should return people overview statistics', async () => {
-      service.getPeopleStatistics.mockResolvedValue({
-        total: 7,
-        hidden: 2,
-        detectedFaceCount: 23,
-      });
-
-      const { status, body } = await request(ctx.getHttpServer())
-        .get('/people/statistics')
-        .query({ withSharedSpaces: true })
-        .set('Authorization', `Bearer token`);
-
-      expect(status).toBe(200);
-      expect(service.getPeopleStatistics).toHaveBeenCalledWith(
-        undefined,
-        expect.objectContaining({ withSharedSpaces: true }),
-      );
-      expect(body).toEqual({
-        total: 7,
-        hidden: 2,
-        detectedFaceCount: 23,
-      });
-    });
-  });
-
-  describe('GET /people/face-statistics', () => {
-    it('should be an authenticated route', async () => {
-      await request(ctx.getHttpServer()).get('/people/face-statistics');
-      expect(ctx.authenticate).toHaveBeenCalled();
-    });
-
-    it('should return lazy people face statistics', async () => {
-      service.getPeopleFaceStatistics.mockResolvedValue({
-        detectedFaceCount: 23,
-        assignedVisibleFaceCount: 18,
-        namedVisiblePersonCount: 9,
-        assignedHiddenFaceCount: 3,
-        unassignedFaceCount: 2,
-      });
-
-      const { status, body } = await request(ctx.getHttpServer())
-        .get('/people/face-statistics')
-        .query({ withSharedSpaces: true })
-        .set('Authorization', `Bearer token`);
-
-      expect(status).toBe(200);
-      expect(service.getPeopleFaceStatistics).toHaveBeenCalledWith(
-        undefined,
-        expect.objectContaining({ withSharedSpaces: true }),
-      );
-      expect(body).toEqual({
-        detectedFaceCount: 23,
-        assignedVisibleFaceCount: 18,
-        namedVisiblePersonCount: 9,
-        assignedHiddenFaceCount: 3,
-        unassignedFaceCount: 2,
-      });
-    });
-  });
-  describe('POST /people/same-person', () => {
-    it('should merge scoped personal and space people', async () => {
-      const targetId = factory.uuid();
-      const sourceId = factory.uuid();
-      const spaceId = factory.uuid();
-
-      const { status } = await request(ctx.getHttpServer())
-        .post('/people/same-person')
-        .send({
-          target: { type: 'person', id: targetId },
-          sources: [{ type: 'space-person', id: sourceId, spaceId }],
-        })
-        .set('Authorization', `Bearer token`);
-
-      expect(status).toBe(204);
-      expect(service.mergeScopedPeople).toHaveBeenCalledWith(undefined, {
-        target: { type: 'person', id: targetId },
-        sources: [{ type: 'space-person', id: sourceId, spaceId }],
-      });
-    });
-
-    it('should reject raw identity refs', async () => {
-      const { status, body } = await request(ctx.getHttpServer())
-        .post('/people/same-person')
-        .send({
-          target: { type: 'face-identity', id: factory.uuid() },
-          sources: [],
-        })
-        .set('Authorization', `Bearer token`);
-
-      expect(status).toBe(400);
-      expect(body).toEqual(
-        errorDto.validationError([
-          { path: ['target', 'type'], message: 'Invalid option: expected one of "person"|"space-person"' },
-          { path: ['sources'], message: 'Too small: expected array to have >=1 items' },
-        ]),
-      );
-    });
-
-    it('should require spaceId for space-person refs', async () => {
-      const { status, body } = await request(ctx.getHttpServer())
-        .post('/people/same-person')
-        .send({
-          target: { type: 'person', id: factory.uuid() },
-          sources: [{ type: 'space-person', id: factory.uuid() }],
-        })
-        .set('Authorization', `Bearer token`);
-
-      expect(status).toBe(400);
-      expect(body).toEqual(
-        errorDto.validationError([
-          { path: ['sources', 0, 'spaceId'], message: 'spaceId is required for space-person refs' },
-        ]),
-      );
-    });
-  });
-
-  describe('POST /people/detach-profile', () => {
-    it('should detach a scoped profile', async () => {
-      const profile = { type: 'person' as const, id: factory.uuid() };
-
-      const { status } = await request(ctx.getHttpServer())
-        .post('/people/detach-profile')
-        .send({ profile })
-        .set('Authorization', `Bearer token`);
-
-      expect(status).toBe(204);
-      expect(service.detachScopedPerson).toHaveBeenCalledWith(undefined, { profile });
-    });
-  });
-
   describe('DELETE /people', () => {
     it('should require uuids in the body', async () => {
       const { status, body } = await request(ctx.getHttpServer())
@@ -234,32 +98,6 @@ describe(PersonController.name, () => {
         .send({ ids: [factory.uuid()] });
       expect(status).toBe(204);
       expect(service.deleteAll).toHaveBeenCalled();
-    });
-  });
-
-  describe('representative face routes', () => {
-    it('should require representative assetFaceId to be a uuid', async () => {
-      const { status, body } = await request(ctx.getHttpServer())
-        .put('/people/00000000-0000-4000-8000-000000000001/representative-face')
-        .send({ assetFaceId: 'invalid' })
-        .set('Authorization', `Bearer token`);
-
-      expect(status).toBe(400);
-      expect(body).toEqual(errorDto.validationError([{ path: ['assetFaceId'], message: 'Invalid UUID' }]));
-    });
-
-    it('should parse person face page query values', async () => {
-      service.getFacesForPicker.mockResolvedValue({ faces: [], hasNextPage: false });
-
-      const { status } = await request(ctx.getHttpServer())
-        .get('/people/00000000-0000-4000-8000-000000000001/faces?page=1&size=25')
-        .set('Authorization', `Bearer token`);
-
-      expect(status).toBe(200);
-      expect(service.getFacesForPicker).toHaveBeenCalledWith(undefined, '00000000-0000-4000-8000-000000000001', {
-        page: 1,
-        size: 25,
-      });
     });
   });
 
@@ -290,6 +128,23 @@ describe(PersonController.name, () => {
         .set('Authorization', `Bearer token`);
       expect(status).toBe(400);
       expect(body).toEqual(errorDto.validationError([{ path: ['featureFaceAssetId'], message: 'Invalid UUID' }]));
+    });
+
+    it('should require at least one property to update', async () => {
+      const { status, body } = await request(ctx.getHttpServer())
+        .put(`/people/${factory.uuid()}`)
+        .send({ userId: factory.uuid() })
+        .set('Authorization', `Bearer token`);
+      expect(status).toBe(400);
+      expect(body).toEqual(
+        errorDto.validationError([
+          {
+            path: [],
+            message:
+              'At least one of the following fields is required: name, birthDate, isHidden, isFavorite, color, type, featureFaceAssetId',
+          },
+        ]),
+      );
     });
 
     it(`should require isFavorite to be a boolean`, async () => {
@@ -351,13 +206,13 @@ describe(PersonController.name, () => {
 
   describe('DELETE /people/:id', () => {
     it('should require a valid uuid', async () => {
-      const { status, body } = await request(ctx.getHttpServer()).delete(`/people/invalid`);
+      const { status, body } = await request(ctx.getHttpServer()).delete(`/people/invalid`).send({});
       expect(status).toBe(400);
       expect(body).toEqual(errorDto.validationError([{ path: ['id'], message: 'Invalid UUID' }]));
     });
 
     it('should respond with 204', async () => {
-      const { status } = await request(ctx.getHttpServer()).delete(`/people/${factory.uuid()}`);
+      const { status } = await request(ctx.getHttpServer()).delete(`/people/${factory.uuid()}`).send({});
       expect(status).toBe(204);
       expect(service.delete).toHaveBeenCalled();
     });
@@ -389,6 +244,23 @@ describe(PersonController.name, () => {
         throw new Error('Person statistics response schema should accept faces');
       }
       expect(result.data).toEqual({ assets: 7, faces: 10 });
+    });
+  });
+
+  describe('PUT /people/users', () => {
+    it('should reject duplicate personIds as well as duplicate userIds', async () => {
+      const userId = newUuid();
+      const personId = newUuid();
+      const { status, body } = await request(ctx.getHttpServer())
+        .put('/people/users')
+        .send({ personIds: [personId, personId], sharedWithIds: [userId, userId], role: PersonUserRole.Write });
+      expect(status).toBe(400);
+      expect(body.errors).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ path: ['personIds'], message: 'Items must be unique' }),
+          expect.objectContaining({ path: ['sharedWithIds'], message: 'Items must be unique' }),
+        ]),
+      );
     });
   });
 });

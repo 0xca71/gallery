@@ -4,6 +4,7 @@ import {
   asset_face_source_type,
   asset_visibility_enum,
   assets_status_enum,
+  person_user_role_enum,
 } from 'src/schema/enums.js';
 import {
   album_user_after_insert,
@@ -27,21 +28,18 @@ import {
   user_delete_audit,
   user_metadata_audit,
 } from 'src/schema/functions.js';
+import { GalleryDB, galleryTables } from 'src/schema/gallery.js';
 import { ActivityTable } from 'src/schema/tables/activity.table.js';
 import { AlbumAssetAuditTable } from 'src/schema/tables/album-asset-audit.table.js';
 import { AlbumAssetTable } from 'src/schema/tables/album-asset.table.js';
 import { AlbumAuditTable } from 'src/schema/tables/album-audit.table.js';
-import { AlbumSpaceAssetAuditTable } from 'src/schema/tables/album-space-asset-audit.table.js';
-import { AlbumSpaceAssetTable } from 'src/schema/tables/album-space-asset.table.js';
 import { AlbumUserAuditTable } from 'src/schema/tables/album-user-audit.table.js';
 import { AlbumUserTable } from 'src/schema/tables/album-user.table.js';
 import { AlbumTable } from 'src/schema/tables/album.table.js';
 import { ApiKeyTable } from 'src/schema/tables/api-key.table.js';
 import { AssetAuditTable } from 'src/schema/tables/asset-audit.table.js';
 import { AssetAudioTable, AssetKeyframeTable, AssetVideoTable } from 'src/schema/tables/asset-av.table.js';
-import { AssetDuplicateChecksumTable } from 'src/schema/tables/asset-duplicate-checksum.table.js';
 import { AssetEditAuditTable } from 'src/schema/tables/asset-edit-audit.table.js';
-import { AssetEditSaveTable } from 'src/schema/tables/asset-edit-save.table.js';
 import { AssetEditTable } from 'src/schema/tables/asset-edit.table.js';
 import { AssetExifTable } from 'src/schema/tables/asset-exif.table.js';
 import { AssetFaceAuditTable } from 'src/schema/tables/asset-face-audit.table.js';
@@ -53,20 +51,12 @@ import { AssetMetadataTable } from 'src/schema/tables/asset-metadata.table.js';
 import { AssetOcrAuditTable } from 'src/schema/tables/asset-ocr-audit.table.js';
 import { AssetOcrTable } from 'src/schema/tables/asset-ocr.table.js';
 import { AssetTable } from 'src/schema/tables/asset.table.js';
+import { AuthChallengeTable } from 'src/schema/tables/auth-challenge.table.js';
 import { ClusterGroupRequestTable } from 'src/schema/tables/cluster-group-request.table.js';
 import { ClusterGroupTable } from 'src/schema/tables/cluster-group.table.js';
-import { FaceIdentityFaceTable } from 'src/schema/tables/face-identity-face.table.js';
-import { FaceIdentityTable } from 'src/schema/tables/face-identity.table.js';
-import { FacePersonVerdictTable } from 'src/schema/tables/face-person-verdict.table.js';
-import { FaceRepairDeclineTable } from 'src/schema/tables/face-repair-decline.table.js';
-import { FaceRepairScanFlaggedFaceTable } from 'src/schema/tables/face-repair-scan-flagged-face.table.js';
-import { FaceRepairScanTable } from 'src/schema/tables/face-repair-scan.table.js';
 import { FaceSearchTable } from 'src/schema/tables/face-search.table.js';
 import { GeodataPlacesTable } from 'src/schema/tables/geodata-places.table.js';
 import { IntegrityReportTable } from 'src/schema/tables/integrity-report.table.js';
-import { LibraryAssetAuditTable } from 'src/schema/tables/library-asset-audit.table.js';
-import { LibraryAuditTable } from 'src/schema/tables/library-audit.table.js';
-import { LibraryUserTable } from 'src/schema/tables/library-user.table.js';
 import { LibraryTable } from 'src/schema/tables/library.table.js';
 import { MemoryAssetAuditTable } from 'src/schema/tables/memory-asset-audit.table.js';
 import { MemoryAssetTable } from 'src/schema/tables/memory-asset.table.js';
@@ -78,51 +68,26 @@ import { NotificationTable } from 'src/schema/tables/notification.table.js';
 import { OcrSearchTable } from 'src/schema/tables/ocr-search.table.js';
 import { PartnerAuditTable } from 'src/schema/tables/partner-audit.table.js';
 import { PartnerTable } from 'src/schema/tables/partner.table.js';
+import { PasskeyTable } from 'src/schema/tables/passkey.table.js';
 import { PersonAuditTable } from 'src/schema/tables/person-audit.table.js';
 import { PersonGroupAuditTable } from 'src/schema/tables/person-group-audit.table.js';
 import { PersonGroupTable } from 'src/schema/tables/person-group.table.js';
+import { PersonUserTable } from 'src/schema/tables/person-user.table.js';
 import { PersonTable } from 'src/schema/tables/person.table.js';
-import { PetSearchTable } from 'src/schema/tables/pet-search.table.js';
 import { PluginMethodTable } from 'src/schema/tables/plugin-method.table.js';
 import { PluginTable } from 'src/schema/tables/plugin.table.js';
 import { SessionTable } from 'src/schema/tables/session.table.js';
 import { SharedLinkAssetTable } from 'src/schema/tables/shared-link-asset.table.js';
 import { SharedLinkTable } from 'src/schema/tables/shared-link.table.js';
-import { SharedSpaceActivityTable } from 'src/schema/tables/shared-space-activity.table.js';
-import { SharedSpaceAlbumAssetAuditTable } from 'src/schema/tables/shared-space-album-asset-audit.table.js';
-import { SharedSpaceAlbumAuditTable } from 'src/schema/tables/shared-space-album-audit.table.js';
-import { SharedSpaceAlbumFolderAuditTable } from 'src/schema/tables/shared-space-album-folder-audit.table.js';
-import { SharedSpaceAlbumFolderTable } from 'src/schema/tables/shared-space-album-folder.table.js';
-import { SharedSpaceAlbumHiddenAuditTable } from 'src/schema/tables/shared-space-album-hidden-audit.table.js';
-import { SharedSpaceAlbumHiddenTable } from 'src/schema/tables/shared-space-album-hidden.table.js';
-import { SharedSpaceAlbumUserAuditTable } from 'src/schema/tables/shared-space-album-user-audit.table.js';
-import { SharedSpaceAlbumUserTable } from 'src/schema/tables/shared-space-album-user.table.js';
-import { SharedSpaceAlbumTable } from 'src/schema/tables/shared-space-album.table.js';
-import { SharedSpaceAssetAuditTable } from 'src/schema/tables/shared-space-asset-audit.table.js';
-import { SharedSpaceAssetTable } from 'src/schema/tables/shared-space-asset.table.js';
-import { SharedSpaceAuditTable } from 'src/schema/tables/shared-space-audit.table.js';
-import { SharedSpaceFaceMatchBackfillTargetTable } from 'src/schema/tables/shared-space-face-match-backfill-target.table.js';
-import { SharedSpaceLibraryAssetAuditTable } from 'src/schema/tables/shared-space-library-asset-audit.table.js';
-import { SharedSpaceLibraryAuditTable } from 'src/schema/tables/shared-space-library-audit.table.js';
-import { SharedSpaceLibraryTable } from 'src/schema/tables/shared-space-library.table.js';
-import { SharedSpaceMemberAuditTable } from 'src/schema/tables/shared-space-member-audit.table.js';
-import { SharedSpaceMemberTable } from 'src/schema/tables/shared-space-member.table.js';
-import { SharedSpacePersonAliasTable } from 'src/schema/tables/shared-space-person-alias.table.js';
-import { SharedSpacePersonFaceTable } from 'src/schema/tables/shared-space-person-face.table.js';
-import { SharedSpacePersonTable } from 'src/schema/tables/shared-space-person.table.js';
-import { SharedSpaceTable } from 'src/schema/tables/shared-space.table.js';
 import { SmartSearchTable } from 'src/schema/tables/smart-search.table.js';
 import { StackAuditTable } from 'src/schema/tables/stack-audit.table.js';
 import { StackTable } from 'src/schema/tables/stack.table.js';
-import { StorageMigrationLogTable } from 'src/schema/tables/storage-migration-log.table.js';
 import { SessionSyncCheckpointTable } from 'src/schema/tables/sync-checkpoint.table.js';
 import { SystemMetadataTable } from 'src/schema/tables/system-metadata.table.js';
 import { TagAssetTable } from 'src/schema/tables/tag-asset.table.js';
 import { TagClosureTable } from 'src/schema/tables/tag-closure.table.js';
 import { TagTable } from 'src/schema/tables/tag.table.js';
 import { UserAuditTable } from 'src/schema/tables/user-audit.table.js';
-import { UserGroupMemberTable } from 'src/schema/tables/user-group-member.table.js';
-import { UserGroupTable } from 'src/schema/tables/user-group.table.js';
 import { UserMetadataAuditTable } from 'src/schema/tables/user-metadata-audit.table.js';
 import { UserMetadataTable } from 'src/schema/tables/user-metadata.table.js';
 import { UserTable } from 'src/schema/tables/user.table.js';
@@ -143,18 +108,14 @@ export class ImmichDatabase {
     ActivityTable,
     AlbumAssetTable,
     AlbumAssetAuditTable,
-    AlbumSpaceAssetTable,
-    AlbumSpaceAssetAuditTable,
     AlbumAuditTable,
     AlbumUserAuditTable,
     AlbumUserTable,
     AlbumTable,
     ApiKeyTable,
     AssetAuditTable,
-    AssetDuplicateChecksumTable,
     AssetEditTable,
     AssetEditAuditTable,
-    AssetEditSaveTable,
     AssetFaceTable,
     AssetFaceAuditTable,
     AssetMetadataTable,
@@ -163,22 +124,15 @@ export class ImmichDatabase {
     AssetOcrTable,
     AssetOcrAuditTable,
     AssetTable,
+    AuthChallengeTable,
     AssetFileTable,
     AssetExifTable,
     ClusterGroupTable,
     ClusterGroupRequestTable,
-    FaceIdentityTable,
-    FaceIdentityFaceTable,
-    FaceRepairDeclineTable,
-    FaceRepairScanFlaggedFaceTable,
-    FaceRepairScanTable,
     FaceSearchTable,
     GeodataPlacesTable,
     IntegrityReportTable,
     LibraryTable,
-    LibraryAuditTable,
-    LibraryUserTable,
-    LibraryAssetAuditTable,
     MemoryTable,
     MemoryAuditTable,
     MemoryAssetTable,
@@ -189,44 +143,18 @@ export class ImmichDatabase {
     OcrSearchTable,
     PartnerAuditTable,
     PartnerTable,
+    PasskeyTable,
     PersonTable,
     PersonAuditTable,
+    PersonUserTable,
     PersonGroupTable,
     PersonGroupAuditTable,
-    FacePersonVerdictTable,
-    PetSearchTable,
     SessionTable,
     SharedLinkAssetTable,
     SharedLinkTable,
-    SharedSpaceTable,
-    SharedSpaceAuditTable,
-    SharedSpaceMemberTable,
-    SharedSpaceMemberAuditTable,
-    SharedSpaceAssetTable,
-    SharedSpaceAssetAuditTable,
-    SharedSpaceFaceMatchBackfillTargetTable,
-    SharedSpaceAlbumTable,
-    SharedSpaceAlbumAuditTable,
-    SharedSpaceAlbumAssetAuditTable,
-    SharedSpaceAlbumFolderTable,
-    SharedSpaceAlbumFolderAuditTable,
-    SharedSpaceAlbumUserTable,
-    SharedSpaceAlbumUserAuditTable,
-    SharedSpaceAlbumHiddenTable,
-    SharedSpaceAlbumHiddenAuditTable,
-    SharedSpaceLibraryTable,
-    SharedSpaceLibraryAuditTable,
-    SharedSpaceLibraryAssetAuditTable,
-    SharedSpaceActivityTable,
-    SharedSpacePersonTable,
-    SharedSpacePersonFaceTable,
-    SharedSpacePersonAliasTable,
-    UserGroupTable,
-    UserGroupMemberTable,
     SmartSearchTable,
     StackTable,
     StackAuditTable,
-    StorageMigrationLogTable,
     SessionSyncCheckpointTable,
     SystemMetadataTable,
     TagTable,
@@ -244,6 +172,7 @@ export class ImmichDatabase {
     PluginMethodTable,
     WorkflowTable,
     WorkflowStepTable,
+    ...galleryTables,
   ];
 
   functions = [
@@ -269,7 +198,13 @@ export class ImmichDatabase {
     album_user_delete,
   ];
 
-  enum = [album_user_role_enum, assets_status_enum, asset_face_source_type, asset_visibility_enum];
+  enum = [
+    album_user_role_enum,
+    assets_status_enum,
+    asset_face_source_type,
+    asset_visibility_enum,
+    person_user_role_enum,
+  ];
 }
 
 export interface Migrations {
@@ -278,8 +213,7 @@ export interface Migrations {
   timestamp: Int8;
 }
 
-export interface DB {
-  asset_edit_save: AssetEditSaveTable;
+export interface DB extends GalleryDB {
   kysely_migrations: { timestamp: string; name: string };
 
   activity: ActivityTable;
@@ -288,8 +222,6 @@ export interface DB {
   album_audit: AlbumAuditTable;
   album_asset: AlbumAssetTable;
   album_asset_audit: AlbumAssetAuditTable;
-  album_space_asset: AlbumSpaceAssetTable;
-  album_space_asset_audit: AlbumSpaceAssetAuditTable;
   album_user: AlbumUserTable;
   album_user_audit: AlbumUserAuditTable;
 
@@ -297,7 +229,7 @@ export interface DB {
 
   asset: AssetTable;
   asset_audit: AssetAuditTable;
-  asset_duplicate_checksum: AssetDuplicateChecksumTable;
+  auth_challenge: AuthChallengeTable;
   asset_edit: AssetEditTable;
   asset_edit_audit: AssetEditAuditTable;
   asset_exif: AssetExifTable;
@@ -315,20 +247,12 @@ export interface DB {
   ocr_search: OcrSearchTable;
 
   face_search: FaceSearchTable;
-  face_identity: FaceIdentityTable;
-  face_identity_face: FaceIdentityFaceTable;
-  face_repair_decline: FaceRepairDeclineTable;
-  face_repair_scan_flagged_face: FaceRepairScanFlaggedFaceTable;
-  face_repair_scan: FaceRepairScanTable;
 
   geodata_places: GeodataPlacesTable;
 
   integrity_report: IntegrityReportTable;
 
   library: LibraryTable;
-  library_audit: LibraryAuditTable;
-  library_user: LibraryUserTable;
-  library_asset_audit: LibraryAssetAuditTable;
 
   memory: MemoryTable;
   memory_audit: MemoryAuditTable;
@@ -346,15 +270,16 @@ export interface DB {
   partner: PartnerTable;
   partner_audit: PartnerAuditTable;
 
+  passkey: PasskeyTable;
+
   person: PersonTable;
   person_audit: PersonAuditTable;
+  person_user: PersonUserTable;
   person_group: PersonGroupTable;
   person_group_audit: PersonGroupAuditTable;
+
   cluster_group: ClusterGroupTable;
   cluster_group_request: ClusterGroupRequestTable;
-  face_person_verdict: FacePersonVerdictTable;
-
-  pet_search: PetSearchTable;
 
   session: SessionTable;
   session_sync_checkpoint: SessionSyncCheckpointTable;
@@ -362,39 +287,10 @@ export interface DB {
   shared_link: SharedLinkTable;
   shared_link_asset: SharedLinkAssetTable;
 
-  shared_space: SharedSpaceTable;
-  shared_space_audit: SharedSpaceAuditTable;
-  shared_space_member: SharedSpaceMemberTable;
-  shared_space_member_audit: SharedSpaceMemberAuditTable;
-  shared_space_asset: SharedSpaceAssetTable;
-  shared_space_asset_audit: SharedSpaceAssetAuditTable;
-  shared_space_face_match_backfill_target: SharedSpaceFaceMatchBackfillTargetTable;
-  shared_space_album: SharedSpaceAlbumTable;
-  shared_space_album_audit: SharedSpaceAlbumAuditTable;
-  shared_space_album_asset_audit: SharedSpaceAlbumAssetAuditTable;
-  shared_space_album_folder: SharedSpaceAlbumFolderTable;
-  shared_space_album_folder_audit: SharedSpaceAlbumFolderAuditTable;
-  shared_space_album_user: SharedSpaceAlbumUserTable;
-  shared_space_album_user_audit: SharedSpaceAlbumUserAuditTable;
-  shared_space_album_hidden: SharedSpaceAlbumHiddenTable;
-  shared_space_album_hidden_audit: SharedSpaceAlbumHiddenAuditTable;
-  shared_space_library: SharedSpaceLibraryTable;
-  shared_space_library_audit: SharedSpaceLibraryAuditTable;
-  shared_space_library_asset_audit: SharedSpaceLibraryAssetAuditTable;
-  shared_space_activity: SharedSpaceActivityTable;
-  shared_space_person: SharedSpacePersonTable;
-  shared_space_person_face: SharedSpacePersonFaceTable;
-  shared_space_person_alias: SharedSpacePersonAliasTable;
-
-  user_group: UserGroupTable;
-  user_group_member: UserGroupMemberTable;
-
   smart_search: SmartSearchTable;
 
   stack: StackTable;
   stack_audit: StackAuditTable;
-
-  storage_migration_log: StorageMigrationLogTable;
 
   system_metadata: SystemMetadataTable;
 

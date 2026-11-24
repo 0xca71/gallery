@@ -1,8 +1,8 @@
+import { createFilterState } from '#lib/components/filter-panel/filter-panel.ts';
+import { buildAlbumAssetPickerOptions, buildAlbumTimelineOptions } from '#lib/utils/album-filter-options.ts';
+import { buildSpaceTimelineOptions } from '#lib/utils/space-filter-options.ts';
 import { AssetOrder } from '@immich/sdk';
 import { describe, expect, it } from 'vitest';
-import { createFilterState } from '$lib/components/filter-panel/filter-panel';
-import { buildAlbumTimelineOptions } from '$lib/utils/album-filter-options';
-import { buildSpaceTimelineOptions } from '$lib/utils/space-filter-options';
 
 describe('space vs album timeline options — stack collapse (#751)', () => {
   it('space timeline requests stack collapse (withStacked: true) (E24)', () => {
@@ -12,9 +12,20 @@ describe('space vs album timeline options — stack collapse (#751)', () => {
     expect(options.withStacked).toBe(true);
   });
 
-  it('space-album detail does NOT collapse stacks (no withStacked) (E25)', () => {
+  // E25 kept the space-album detail page at parity with a normal album. Both now collapse stacks to a photo the album
+  // holds (specs/2026-11-01-album-stack-collapse-design.md); they still share this one builder.
+  it('space-album detail collapses stacks like any album (withStacked) (E25)', () => {
     const options = buildAlbumTimelineOptions('album-1', AssetOrder.Desc, createFilterState());
 
-    expect(options.withStacked).toBeUndefined();
+    expect(options.withStacked).toBe(true);
+  });
+});
+
+describe('album asset picker options — favorites compose with cross-user scopes (#763 slice 4)', () => {
+  it('an active favorite filter no longer suppresses partner scope', () => {
+    const options = buildAlbumAssetPickerOptions('album-1', { ...createFilterState(), isFavorite: true });
+
+    expect(options.isFavorite).toBe(true);
+    expect(options.withPartners).toBe(true);
   });
 });

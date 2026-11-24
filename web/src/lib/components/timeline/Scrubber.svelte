@@ -1,16 +1,12 @@
 <script lang="ts">
-  import { TimelineManager } from '$lib/managers/timeline-manager/timeline-manager.svelte';
-  import type { ScrubberMonth, ViewportTopMonth } from '$lib/managers/timeline-manager/types';
-  import { mediaQueryManager } from '$lib/stores/media-query-manager.svelte';
-  import { locale } from '$lib/stores/preferences.store';
-  import { getTabbable } from '$lib/utils/focus-util';
-  import { type ScrubberListener } from '$lib/utils/timeline-util';
-  import { AssetOrder } from '@immich/sdk';
+  import { TimelineManager } from '#lib/managers/timeline-manager/timeline-manager.svelte.ts';
+  import type { ScrubberMonth, ViewportTopMonth } from '#lib/managers/timeline-manager/types.ts';
+  import { mediaQueryManager } from '#lib/stores/media-query-manager.svelte.ts';
+  import { getTabbable } from '#lib/utils/focus-util.ts';
+  import { type ScrubberListener } from '#lib/utils/timeline-util.ts';
   import { Icon } from '@immich/ui';
   import { mdiPlay } from '@mdi/js';
   import { clamp } from 'lodash-es';
-  import { DateTime } from 'luxon';
-  import { get } from 'svelte/store';
   import { onMount } from 'svelte';
   import { fade, fly } from 'svelte/transition';
 
@@ -63,7 +59,6 @@
   let isHoverOnPaddingTop = $state(false);
   let isHoverOnPaddingBottom = $state(false);
   let hoverY = $state(0);
-  let hoverSegmentScrollPercent = $state(0);
   let clientY = 0;
   let windowHeight = $state(0);
   let scrollBar: HTMLElement | undefined = $state();
@@ -198,53 +193,12 @@
   };
   let activeSegment: HTMLElement | undefined = $state();
   const segments = $derived(calculateSegments(timelineManager.scrubberMonths));
-  const formatHoverDate = (date: { year: number; month: number; day: number }) =>
-    DateTime.fromObject(date, { zone: 'local', locale: get(locale) }).toLocaleString(
-      { month: 'short', day: 'numeric', year: 'numeric' },
-      { locale: get(locale) },
-    );
-
-  const getEstimatedHoverLabel = (yearMonth: { year: number; month: number } | undefined, percent: number) => {
-    if (!yearMonth) {
-      return undefined;
-    }
-
-    const monthDate = DateTime.fromObject(yearMonth, { zone: 'local', locale: get(locale) });
-    const daysInMonth = monthDate.daysInMonth ?? 31;
-    const clampedPercent = clamp(percent, 0, 0.999999);
-    const descending = timelineManager.getAssetOrder() !== AssetOrder.Asc;
-    const day = descending
-      ? clamp(daysInMonth - Math.floor(clampedPercent * daysInMonth), 1, daysInMonth)
-      : clamp(Math.floor(clampedPercent * daysInMonth) + 1, 1, daysInMonth);
-
-    return formatHoverDate({ ...yearMonth, day });
-  };
-
-  const activeYearMonth = $derived.by(() => {
+  const hoverLabel = $derived.by(() => {
     if (isHoverOnPaddingTop) {
-      const segment = segments.at(0);
-      return segment ? { year: segment.year, month: segment.month } : undefined;
+      return segments.at(0)?.dateFormatted;
     }
     if (isHoverOnPaddingBottom) {
-      const segment = segments.at(-1);
-      return segment ? { year: segment.year, month: segment.month } : undefined;
-    }
-    if (!activeSegment?.dataset.segmentYearMonth) {
-      return undefined;
-    }
-    const [year, month] = activeSegment.dataset.segmentYearMonth.split('-').map(Number);
-    return { year, month };
-  });
-
-  const hoverLabel = $derived.by(() => {
-    const yearMonth = activeYearMonth;
-    const percent = isHoverOnPaddingTop ? 0 : isHoverOnPaddingBottom ? 0.999999 : hoverSegmentScrollPercent;
-    const actual = yearMonth ? timelineManager.getScrubberDateAtMonthScrollPercent(yearMonth, percent) : undefined;
-    if (actual) {
-      return formatHoverDate(actual);
-    }
-    if (yearMonth) {
-      return getEstimatedHoverLabel(yearMonth, percent);
+      return segments.at(-1)?.dateFormatted;
     }
     return activeSegment?.dataset.label;
   });
@@ -261,19 +215,6 @@
     const [year, month] = activeSegment.dataset.segmentYearMonth.split('-').map(Number);
     return { year, month };
   });
-  $effect(() => {
-    const yearMonth = activeYearMonth;
-    if (usingMobileDevice || (!isHover && !isDragging) || !yearMonth) {
-      return;
-    }
-
-    const timeout = setTimeout(() => {
-      void timelineManager.ensureScrubberMonthGeometry(yearMonth);
-    }, 120);
-
-    return () => clearTimeout(timeout);
-  });
-
   const scrollSegment = $derived.by(() => {
     const y = scrollY;
     let cur = relativeTopOffset;
@@ -390,7 +331,6 @@
     const x = rect!.left + rect!.width / 2;
     const { segment, timelineMonthPercentY, isOnPaddingTop, isOnPaddingBottom } = getActive(x, clientY);
     activeSegment = segment;
-    hoverSegmentScrollPercent = timelineMonthPercentY;
     isHoverOnPaddingTop = isOnPaddingTop;
     isHoverOnPaddingBottom = isOnPaddingBottom;
 
@@ -615,7 +555,7 @@
           style:width="fit-content"
           class="pointer-events-none absolute w-8 truncate rounded-full bg-immich-primary/90 px-4 py-2 text-sm font-semibold text-white select-none hover:cursor-pointer dark:bg-gray-500"
         >
-          {hoverLabel ?? scrollHoverLabel}
+          {scrollHoverLabel}
         </p>
       {/if}
     </div>

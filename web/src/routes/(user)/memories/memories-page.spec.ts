@@ -1,9 +1,10 @@
+import TestWrapper from '#lib/components/TestWrapper.svelte';
+import { factory } from '#test/unit/factories.ts';
 import { MemoryType, type MemoryResponseDto } from '@immich/sdk';
-import '@testing-library/jest-dom';
-import { render, screen } from '@testing-library/svelte';
 import type { Component } from 'svelte';
-import TestWrapper from '$lib/components/TestWrapper.svelte';
-import { assetFactory } from '@test-data/factories/asset-factory';
+import { expect } from 'vitest';
+import { render } from 'vitest-browser-svelte';
+import { page } from 'vitest/browser';
 import MemoriesPage from './+page.svelte';
 
 // Fork delta guard. Upstream's memory card renders the title only, but the fork's rule engine
@@ -23,13 +24,13 @@ const { mockMemoryManager, mockUserPreferencesManager } = vi.hoisted(() => ({
   },
 }));
 
-vi.mock('$lib/managers/memory-manager.svelte', () => ({ memoryManager: mockMemoryManager }));
-vi.mock('$lib/managers/user-preferences-manager.svelte', () => ({
+vi.mock('#lib/managers/memory-manager.svelte.js', () => ({ memoryManager: mockMemoryManager }));
+vi.mock('#lib/managers/user-preferences-manager.svelte.js', () => ({
   userPreferencesManager: mockUserPreferencesManager,
 }));
 
-vi.mock('$lib/components/layouts/UserPageLayout.svelte', async () => {
-  const { default: MockComponent } = await import('$lib/components/spaces/mock-user-page-layout.test-wrapper.svelte');
+vi.mock('#lib/components/layouts/UserPageLayout.svelte', async () => {
+  const { default: MockComponent } = await import('#lib/components/spaces/mock-user-page-layout.test-wrapper.svelte');
   return { default: MockComponent };
 });
 
@@ -37,7 +38,7 @@ function memory(overrides: Partial<MemoryResponseDto> = {}): MemoryResponseDto {
   return {
     id: 'memory-1',
     ownerId: 'user-1',
-    assets: [assetFactory.build({ id: 'asset-1' })],
+    assets: [factory.asset({ id: 'asset-1' })],
     createdAt: '2020-01-01T00:00:00.000Z',
     updatedAt: '2020-01-01T00:00:00.000Z',
     deletedAt: undefined,
@@ -64,31 +65,31 @@ function renderPage(memories: MemoryResponseDto[]) {
 }
 
 describe('Memories page', () => {
-  it('renders the rule-aware subtitle the server sends with a memory', () => {
-    renderPage([memory({ type: MemoryType.Rule, subtitle: 'Coastal weekend', title: 'Recent trip to Lisbon' })]);
+  it('renders the rule-aware subtitle the server sends with a memory', async () => {
+    await renderPage([memory({ type: MemoryType.Rule, subtitle: 'Coastal weekend', title: 'Recent trip to Lisbon' })]);
 
-    expect(screen.getByText('Recent trip to Lisbon')).toBeInTheDocument();
-    expect(screen.getByText('Coastal weekend')).toBeInTheDocument();
+    await expect.element(page.getByText('Recent trip to Lisbon')).toBeInTheDocument();
+    await expect.element(page.getByText('Coastal weekend')).toBeInTheDocument();
   });
 
-  it('derives the recent-trip subtitle from the rule context when the server sends none', () => {
-    renderPage([
+  it('derives the recent-trip subtitle from the rule context when the server sends none', async () => {
+    await renderPage([
       memory({
         type: MemoryType.Rule,
         data: { ruleId: 'recent_trip', context: { placeLabel: 'Lisbon, Portugal', assetCount: 12, dayCount: 3 } },
       }),
     ]);
 
-    // svelte-i18n is initialised without messages in tests, so `$t` echoes the key back. The
+    // Tests run in the `dev` locale, so `$t` echoes the key back. The
     // point of the assertion is that the recent-trip branch of `getMemorySubtitle` is reached
     // and rendered at all — it renders nothing when the fork delta is dropped.
-    expect(screen.getByText('memory_recent_trip_subtitle')).toBeInTheDocument();
+    await expect.element(page.getByText('memory_recent_trip_subtitle')).toBeInTheDocument();
   });
 
-  it('renders no subtitle line for a memory that has none', () => {
-    const { container } = renderPage([memory({ title: 'Years ago' })]);
+  it('renders no subtitle line for a memory that has none', async () => {
+    const { container } = await renderPage([memory({ title: 'Years ago' })]);
 
-    expect(screen.getByText('Years ago')).toBeInTheDocument();
-    expect(container.querySelectorAll(':scope .item-card p')).toHaveLength(1);
+    await expect.element(page.getByText('Years ago')).toBeInTheDocument();
+    expect(container.querySelectorAll(':scope a[href] p')).toHaveLength(1);
   });
 });

@@ -1,12 +1,14 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
-import type { JobOf } from 'src/types.js';
+import { join } from 'node:path';
 import { StorageCore } from 'src/cores/storage.core.js';
 import { OnJob } from 'src/decorators.js';
 import { AssetFileType, JobName, JobStatus, QueueName } from 'src/enum.js';
+import { toS3Key } from 'src/gallery/utils/s3-key.js';
 import { StorageMigrationDirection } from 'src/repositories/storage-migration.repository.js';
 import { BaseService } from 'src/services/base.service.js';
 import { StorageService } from 'src/services/storage.service.js';
+import type { JobOf } from 'src/types.js';
 
 interface StorageMigrationFileTypes {
   originals: boolean;
@@ -190,6 +192,21 @@ export class StorageMigrationService extends BaseService {
       }
     }
 
+    // Stream Spatial Scene depth maps, which move with the previews they were made from
+    if (fileTypes.previews) {
+      for await (const row of this.storageMigrationRepository.streamDepthMaps(direction)) {
+        await enqueue({
+          entityType: 'asset',
+          entityId: row.assetId,
+          fileType: 'depthMap',
+          sourcePath: row.path,
+          batchId,
+          direction,
+          deleteSource,
+        });
+      }
+    }
+
     // Stream encoded videos
     if (fileTypes.encodedVideos) {
       for await (const row of this.storageMigrationRepository.streamEncodedVideos(direction)) {
@@ -197,6 +214,21 @@ export class StorageMigrationService extends BaseService {
           entityType: 'asset',
           entityId: row.assetId,
           fileType: 'encodedVideo',
+          sourcePath: row.path,
+          batchId,
+          direction,
+          deleteSource,
+        });
+      }
+    }
+
+    // Stream Data Saver video copies, which move with the encoded videos they sit beside
+    if (fileTypes.encodedVideos) {
+      for await (const row of this.storageMigrationRepository.streamDataSaverVideos(direction)) {
+        await enqueue({
+          entityType: 'asset',
+          entityId: row.assetId,
+          fileType: 'dataSaverVideo',
           sourcePath: row.path,
           batchId,
           direction,
@@ -213,6 +245,21 @@ export class StorageMigrationService extends BaseService {
           entityId: row.personGroupId,
           fileType: null,
           sourcePath: row.thumbnailPath,
+          batchId,
+          direction,
+          deleteSource,
+        });
+      }
+    }
+
+    // Stream the best frames of video faces, which move with the person thumbnails cut from them
+    if (fileTypes.personThumbnails) {
+      for await (const row of this.storageMigrationRepository.streamVideoFaceFrames(direction)) {
+        await enqueue({
+          entityType: 'assetFace',
+          entityId: row.faceId,
+          fileType: 'videoFaceFrame',
+          sourcePath: row.path,
           batchId,
           direction,
           deleteSource,
@@ -260,7 +307,28 @@ export class StorageMigrationService extends BaseService {
 
       // Idempotency: check if target already exists
       const targetExists = await targetBackend.exists(targetPath);
-      if (!targetExists) {
+      if (targetExists) {
+        // Reuse an existing target only at the source's size. Usually it is this file's own copy: from a run of this
+        // migration that stopped before saving, or from a migration the other way with deleteSource off, stale if the
+        // source was rewritten in place since (a regenerated thumbnail or encoded video, a re-trim, a sidecar write).
+        // It can also be a partial or different file left by a build before atomic disk writes, by a host crash before
+        // a disk write was flushed, or by a thumbnail or encoded video for S3 whose render at this disk path stopped or
+        // whose upload failed (MediaService.persistFile); or, under library/, another asset's file (a template name
+        // given out by a build that checked disk only, or while S3 could not be asked).
+        // Adopting a different file would re-point this entity at it and, with deleteSource, delete the only current
+        // copy; overwriting it could destroy another asset's file or one a job just wrote here. So a mismatch fails.
+        // An equal size is not proof: a sidecar rewritten at the same length passes.
+        const [{ size: sourceSize }, { size: targetSize }] = await Promise.all([
+          sourceBackend.stat(sourcePath),
+          targetBackend.stat(targetPath),
+        ]);
+        if (sourceSize !== targetSize) {
+          this.logger.error(
+            `Target already exists with a different size, not migrating: ${sourcePath} (${sourceSize} bytes) -> ${targetPath} (${targetSize} bytes)`,
+          );
+          return JobStatus.Failed;
+        }
+      } else {
         // Copy: get stream from source, put to target
         const { stream } = await sourceBackend.get(sourcePath);
         await targetBackend.put(targetPath, stream);
@@ -362,23 +430,15 @@ export class StorageMigrationService extends BaseService {
   }
 
   private computeTargetPath(sourcePath: string, direction: StorageMigrationDirection): string {
+    const mediaLocation = StorageCore.getMediaLocation();
     if (direction === 'toS3') {
-      // Strip media location prefix to get relative key
-      // e.g. /usr/src/app/upload/library/user/file.jpg -> library/user/file.jpg
-      const mediaLocation = StorageCore.getMediaLocation();
-      const prefix = mediaLocation.endsWith('/') ? mediaLocation : `${mediaLocation}/`;
-      if (sourcePath.startsWith(prefix)) {
-        return sourcePath.slice(prefix.length);
-      }
-      // If path doesn't start with media location, strip leading slash as fallback
-      return sourcePath.startsWith('/') ? sourcePath.slice(1) : sourcePath;
+      // e.g. /usr/src/app/upload/library/user/file.jpg -> library/user/file.jpg. A path outside the media location (an
+      // external library) has no key of its own: it keeps the whole path without its leading slash, as it always has
+      return toS3Key(sourcePath, mediaLocation) ?? sourcePath.slice(1);
     }
 
-    // toDisk: prepend media location
-    // e.g. library/user/file.jpg -> /usr/src/app/upload/library/user/file.jpg
-    const mediaLocation = StorageCore.getMediaLocation();
-    const prefix = mediaLocation.endsWith('/') ? mediaLocation : `${mediaLocation}/`;
-    return `${prefix}${sourcePath}`;
+    // toDisk: e.g. library/user/file.jpg -> /usr/src/app/upload/library/user/file.jpg
+    return join(mediaLocation, sourcePath);
   }
 
   private async updatePath(
@@ -393,7 +453,16 @@ export class StorageMigrationService extends BaseService {
         if (fileType === 'encodedVideo') {
           return this.storageMigrationRepository.updateAssetEncodedVideoPath(entityId, oldPath, newPath);
         }
+        if (fileType === 'depthMap') {
+          return this.storageMigrationRepository.updateDepthMapPath(entityId, oldPath, newPath);
+        }
+        if (fileType === 'dataSaverVideo') {
+          return this.storageMigrationRepository.updateDataSaverVideoPath(entityId, oldPath, newPath);
+        }
         return this.storageMigrationRepository.updateAssetOriginalPath(entityId, oldPath, newPath);
+      }
+      case 'assetFace': {
+        return this.storageMigrationRepository.updateVideoFaceFramePath(entityId, oldPath, newPath);
       }
       case 'assetFile': {
         return this.storageMigrationRepository.updateAssetFilePath(entityId, oldPath, newPath);

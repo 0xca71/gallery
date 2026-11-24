@@ -2,6 +2,8 @@ import { createZodDto } from 'nestjs-zod';
 import z from 'zod';
 import { HistoryBuilder } from 'src/decorators.js';
 import { JobNameSchema, QueueCommandSchema, QueueJobStatusSchema, QueueNameSchema } from 'src/enum.js';
+import { GalleryQueueResponseExtension } from 'src/gallery/dtos/queue.dto.js';
+import { queryParamArray } from 'src/validation.js';
 
 const QueueNameParamSchema = z
   .object({
@@ -34,7 +36,7 @@ const QueueDeleteSchema = z
 
 const QueueJobSearchSchema = z
   .object({
-    status: z.array(QueueJobStatusSchema).optional().describe('Filter jobs by status'),
+    status: queryParamArray(QueueJobStatusSchema).optional().describe('Filter jobs by status'),
   })
   .meta({ id: 'QueueJobSearchDto' });
 
@@ -54,26 +56,25 @@ export const QueueStatisticsSchema = z
     failed: z.int().describe('Number of failed jobs'),
     delayed: z.int().describe('Number of delayed jobs'),
     waiting: z.int().describe('Number of waiting jobs'),
-    paused: z.int().describe('Number of paused jobs'),
+    paused: z
+      .int()
+      .describe('Number of paused jobs')
+      .meta(
+        new HistoryBuilder()
+          .added('v2.0.0')
+          .updated('v4.0.0', 'A paused queue will now also shows its job as `waiting`')
+          .deprecated('v4.0.0')
+          .getExtensions(),
+      ),
   })
   .meta({ id: 'QueueStatisticsDto' });
-
-const QueueJobTypeCountsSchema = z
-  .object({
-    name: JobNameSchema,
-    active: z.int().describe('Number of sampled active jobs with this name'),
-    waiting: z.int().describe('Number of sampled waiting jobs with this name'),
-    delayed: z.int().describe('Number of sampled delayed jobs with this name'),
-    paused: z.int().describe('Number of sampled paused jobs with this name'),
-  })
-  .meta({ id: 'QueueJobTypeCountsDto' });
 
 const QueueResponseSchema = z
   .object({
     name: QueueNameSchema,
     isPaused: z.boolean().describe('Whether the queue is paused'),
     statistics: QueueStatisticsSchema,
-    jobTypes: z.array(QueueJobTypeCountsSchema).optional().describe('Sampled job type counts for display purposes'),
+    ...GalleryQueueResponseExtension,
   })
   .meta({ id: 'QueueResponseDto' });
 
@@ -83,6 +84,7 @@ export class QueueUpdateDto extends createZodDto(QueueUpdateSchema) {}
 export class QueueDeleteDto extends createZodDto(QueueDeleteSchema) {}
 export class QueueJobSearchDto extends createZodDto(QueueJobSearchSchema) {}
 export class QueueJobResponseDto extends createZodDto(QueueJobResponseSchema) {}
-export class QueueJobTypeCountsDto extends createZodDto(QueueJobTypeCountsSchema) {}
 export class QueueStatisticsDto extends createZodDto(QueueStatisticsSchema) {}
 export class QueueResponseDto extends createZodDto(QueueResponseSchema) {}
+
+export * from 'src/gallery/dtos/queue.dto.js';

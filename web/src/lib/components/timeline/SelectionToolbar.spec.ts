@@ -1,14 +1,29 @@
-import type { AlbumResponseDto, AssetVisibility as AssetVisibilityType } from '@immich/sdk';
-import { AlbumUserRole, AssetVisibility } from '@immich/sdk';
-import { render, screen } from '@testing-library/svelte';
+import TestWrapper from '#lib/components/TestWrapper.svelte';
+import type { AssetMultiSelectManager } from '#lib/managers/asset-multi-select-manager.svelte.ts';
+import type { TimelineManager } from '#lib/managers/timeline-manager/timeline-manager.svelte.ts';
+import type { TimelineAsset } from '#lib/managers/timeline-manager/types.ts';
+import type { TimelineDateTime } from '#lib/utils/timeline-util.ts';
+import {
+  AlbumUserRole,
+  AssetVisibility,
+  getEditableAssets,
+  type AlbumResponseDto,
+  type AssetVisibility as AssetVisibilityType,
+  type SharedSpaceMemberResponseDto,
+} from '@immich/sdk';
 import type { Component } from 'svelte';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import TestWrapper from '$lib/components/TestWrapper.svelte';
-import type { AssetMultiSelectManager } from '$lib/managers/asset-multi-select-manager.svelte';
-import type { TimelineManager } from '$lib/managers/timeline-manager/timeline-manager.svelte';
-import type { TimelineAsset } from '$lib/managers/timeline-manager/types';
-import type { TimelineDateTime } from '$lib/utils/timeline-util';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { render } from 'vitest-browser-svelte';
+import { page } from 'vitest/browser';
 import SelectionToolbar from './SelectionToolbar.svelte';
+
+// #734: SelectionToolbar resolves `editableSelectedAssetIds` itself via `POST /assets/editable`
+// (`resolveEditableAssetIds`) whenever the selection isn't all-owned — mock the SDK call so
+// tests control the response instead of hitting the network.
+vi.mock('@immich/sdk', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@immich/sdk')>();
+  return { ...actual, getEditableAssets: vi.fn() };
+});
 
 // Mirrors the (unexported) Props interface declared inside SelectionToolbar.svelte —
 // just enough shape for this spec file's own type-checking of test fixtures.
@@ -16,7 +31,7 @@ interface ToolbarTestProps {
   timelineManager: TimelineManager;
   assetInteraction: AssetMultiSelectManager;
   album?: AlbumResponseDto;
-  space?: { id: string; canWrite: boolean };
+  space?: { id: string; canWrite: boolean; members?: SharedSpaceMemberResponseDto[] };
   downloadFilename?: string;
   onRemove?: (assetIds: string[]) => void;
   onSetCover?: () => void;
@@ -40,7 +55,7 @@ const { mockUser, mockPreferences } = vi.hoisted(() => ({
   mockPreferences: { current: { tags: { enabled: true } } },
 }));
 
-vi.mock('$lib/managers/auth-manager.svelte', () => ({
+vi.mock('#lib/managers/auth-manager.svelte.js', () => ({
   authManager: {
     get authenticated() {
       return mockUser.current !== null;
@@ -54,7 +69,7 @@ vi.mock('$lib/managers/auth-manager.svelte', () => ({
   },
 }));
 
-vi.mock('$lib/managers/feature-flags-manager.svelte', () => ({
+vi.mock('#lib/managers/feature-flags-manager.svelte.js', () => ({
   featureFlagsManager: {
     value: { trash: true },
   },
@@ -93,9 +108,9 @@ type FakeAssetInteraction = Pick<
 > & { clear: () => void };
 
 /**
- * `ownedAssets` defaults to the real manager's rule — the assets whose `ownerId` is the
- * logged-in user — so a fixture cannot accidentally disagree with its own `assets` list.
- */
+`ownedAssets` defaults to the real manager's rule — the assets whose `ownerId` is the
+logged-in user — so a fixture cannot accidentally disagree with its own `assets` list.
+*/
 function makeAssetInteraction(overrides: Partial<FakeAssetInteraction> = {}): AssetMultiSelectManager {
   const assets = overrides.assets ?? [makeAsset()];
   const base: FakeAssetInteraction = {
@@ -139,11 +154,12 @@ function renderToolbar(props: ToolbarTestProps) {
 beforeEach(() => {
   mockUser.current = { id: 'me', isAdmin: false };
   mockPreferences.current = { tags: { enabled: true } };
+  vi.mocked(getEditableAssets).mockReset();
 });
 
 describe('SelectionToolbar', () => {
-  it("Given a space viewer browsing another member's asset in a direct space, When the toolbar renders, Then only Select-all and Download are shown", () => {
-    renderToolbar({
+  it("Given a space viewer browsing another member's asset in a direct space, When the toolbar renders, Then only Select-all and Download are shown", async () => {
+    await renderToolbar({
       timelineManager: fakeTimelineManager,
       assetInteraction: makeAssetInteraction({
         isAllUserOwned: false,
@@ -152,21 +168,22 @@ describe('SelectionToolbar', () => {
       space: { id: 'space-1', canWrite: false },
     });
 
-    expect(screen.getByLabelText('select_all')).toBeInTheDocument();
-    expect(screen.getByRole('menuitem', { name: 'download' })).toBeInTheDocument();
+    await expect.element(page.getByLabelText('select_all')).toBeInTheDocument();
+    await expect.element(page.getByRole('menuitem', { name: 'download' })).toBeInTheDocument();
 
-    expect(screen.queryByLabelText('share')).not.toBeInTheDocument();
-    expect(screen.queryByLabelText('add_to_album_or_space')).not.toBeInTheDocument();
-    expect(screen.queryByLabelText('to_favorite')).not.toBeInTheDocument();
-    expect(screen.queryByLabelText('remove_from_favorites')).not.toBeInTheDocument();
-    expect(screen.queryByLabelText('delete')).not.toBeInTheDocument();
-    expect(screen.queryByLabelText('remove_from_space')).not.toBeInTheDocument();
-    expect(screen.queryByRole('menuitem', { name: 'set_as_space_cover' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('menuitem', { name: 'set_as_album_cover' })).not.toBeInTheDocument();
+    expect(page.getByLabelText('share').query()).toBeNull();
+    expect(page.getByLabelText('add_to_album_or_space').query()).toBeNull();
+    // Shown even for a viewer on someone else's asset: a favorite is the viewer's own
+    // `asset_favorite` overlay row (#763), so it is not owner-gated.
+    await expect.element(page.getByLabelText('to_favorite')).toBeInTheDocument();
+    expect(page.getByRole('menuitem', { name: 'delete' }).query()).toBeNull();
+    expect(page.getByLabelText('remove_from_space').query()).toBeNull();
+    expect(page.getByRole('menuitem', { name: 'set_as_space_cover' }).query()).toBeNull();
+    expect(page.getByRole('menuitem', { name: 'set_as_album_cover' }).query()).toBeNull();
   });
 
-  it('Given a space editor selecting their own single asset in a direct space, When the toolbar renders, Then Share/Add-to-album/Favorite/Delete/Remove-from-space/Cover are all shown', () => {
-    renderToolbar({
+  it('Given a space editor selecting their own single asset in a direct space, When the toolbar renders, Then Share/Add-to-album/Favorite/Delete/Remove-from-space/Cover are all shown', async () => {
+    await renderToolbar({
       timelineManager: fakeTimelineManager,
       assetInteraction: makeAssetInteraction({
         isAllUserOwned: true,
@@ -180,24 +197,18 @@ describe('SelectionToolbar', () => {
       onAssetDelete: vi.fn(),
     });
 
-    expect(screen.getByLabelText('select_all')).toBeInTheDocument();
-    expect(screen.getByRole('menuitem', { name: 'download' })).toBeInTheDocument();
-    expect(screen.getByLabelText('share')).toBeInTheDocument();
-    expect(screen.getByLabelText('add_to_album_or_space')).toBeInTheDocument();
-    expect(screen.getByLabelText('to_favorite')).toBeInTheDocument();
-    expect(screen.getByLabelText('delete')).toBeInTheDocument();
-    expect(screen.getByLabelText('remove_from_space')).toBeInTheDocument();
-    expect(screen.getByRole('menuitem', { name: 'set_as_space_cover' })).toBeInTheDocument();
-
-    const favorite = screen.getByLabelText('to_favorite');
-    const deleteButton = screen.getByLabelText('delete');
-    const more = screen.getByLabelText('menu');
-    expect(favorite.compareDocumentPosition(deleteButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(deleteButton.compareDocumentPosition(more) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    await expect.element(page.getByLabelText('select_all')).toBeInTheDocument();
+    await expect.element(page.getByRole('menuitem', { name: 'download' })).toBeInTheDocument();
+    await expect.element(page.getByLabelText('share')).toBeInTheDocument();
+    await expect.element(page.getByLabelText('add_to_album_or_space')).toBeInTheDocument();
+    await expect.element(page.getByLabelText('to_favorite')).toBeInTheDocument();
+    await expect.element(page.getByRole('menuitem', { name: 'delete' })).toBeInTheDocument();
+    await expect.element(page.getByLabelText('remove_from_space')).toBeInTheDocument();
+    await expect.element(page.getByRole('menuitem', { name: 'set_as_space_cover' })).toBeInTheDocument();
   });
 
-  it('Given the space-person surface (same editor+own-asset context but no onSetCover passed), When the toolbar renders, Then Cover is absent even though caps.canSetCover is true', () => {
-    renderToolbar({
+  it('Given the space-person surface (same editor+own-asset context but no onSetCover passed), When the toolbar renders, Then Cover is absent even though caps.canSetCover is true', async () => {
+    await renderToolbar({
       timelineManager: fakeTimelineManager,
       assetInteraction: makeAssetInteraction({
         isAllUserOwned: true,
@@ -209,14 +220,14 @@ describe('SelectionToolbar', () => {
       onFavorite: vi.fn(),
     });
 
-    expect(screen.getByLabelText('share')).toBeInTheDocument();
-    expect(screen.getByLabelText('remove_from_space')).toBeInTheDocument();
-    expect(screen.queryByRole('menuitem', { name: 'set_as_space_cover' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('menuitem', { name: 'set_as_album_cover' })).not.toBeInTheDocument();
+    await expect.element(page.getByLabelText('share')).toBeInTheDocument();
+    await expect.element(page.getByLabelText('remove_from_space')).toBeInTheDocument();
+    expect(page.getByRole('menuitem', { name: 'set_as_space_cover' }).query()).toBeNull();
+    expect(page.getByRole('menuitem', { name: 'set_as_album_cover' }).query()).toBeNull();
   });
 
-  it('Given a space-album manager viewing a not-owned asset, When the toolbar renders, Then Remove-from-album is shown and Remove-from-space is absent', () => {
-    renderToolbar({
+  it('Given a space-album manager viewing a not-owned asset, When the toolbar renders, Then Remove-from-album is shown and Remove-from-space is absent', async () => {
+    await renderToolbar({
       timelineManager: fakeTimelineManager,
       assetInteraction: makeAssetInteraction({
         isAllUserOwned: false,
@@ -227,18 +238,19 @@ describe('SelectionToolbar', () => {
       onRemove: vi.fn(),
     });
 
-    expect(screen.getByLabelText('select_all')).toBeInTheDocument();
-    expect(screen.getByRole('menuitem', { name: 'download' })).toBeInTheDocument();
-    expect(screen.getByRole('menuitem', { name: 'remove_from_album' })).toBeInTheDocument();
-    expect(screen.queryByLabelText('remove_from_space')).not.toBeInTheDocument();
+    await expect.element(page.getByLabelText('select_all')).toBeInTheDocument();
+    await expect.element(page.getByRole('menuitem', { name: 'download' })).toBeInTheDocument();
+    await expect.element(page.getByRole('menuitem', { name: 'remove_from_album' })).toBeInTheDocument();
+    expect(page.getByLabelText('remove_from_space').query()).toBeNull();
     // Share is present since #1018 — the space Owner/Editor role carries it, like add-to-album.
-    expect(screen.getByLabelText('share')).toBeInTheDocument();
-    expect(screen.queryByLabelText('to_favorite')).not.toBeInTheDocument();
-    expect(screen.queryByLabelText('delete')).not.toBeInTheDocument();
+    await expect.element(page.getByLabelText('share')).toBeInTheDocument();
+    // Favorites are a per-user overlay row (#763), so they are never owner-gated.
+    await expect.element(page.getByLabelText('to_favorite')).toBeInTheDocument();
+    expect(page.getByRole('menuitem', { name: 'delete' }).query()).toBeNull();
   });
 
-  it('Given a space editor with a MIXED selection, When the toolbar renders, Then both Share and Add-to-album are shown', () => {
-    renderToolbar({
+  it('Given a space editor with a MIXED selection, When the toolbar renders, Then both Share and Add-to-album are shown', async () => {
+    await renderToolbar({
       timelineManager: fakeTimelineManager,
       assetInteraction: makeAssetInteraction({
         isAllUserOwned: false,
@@ -248,15 +260,16 @@ describe('SelectionToolbar', () => {
       onRemove: vi.fn(),
     });
 
-    expect(screen.getByLabelText('share')).toBeInTheDocument();
-    expect(screen.getByLabelText('add_to_album_or_space')).toBeInTheDocument();
-    // Still hidden: these mutate every selected asset and the server refuses the non-owned ones.
-    expect(screen.queryByLabelText('to_favorite')).not.toBeInTheDocument();
-    expect(screen.queryByLabelText('delete')).not.toBeInTheDocument();
+    await expect.element(page.getByLabelText('share')).toBeInTheDocument();
+    await expect.element(page.getByLabelText('add_to_album_or_space')).toBeInTheDocument();
+    // Shown regardless of ownership: a favorite is the viewer's own `asset_favorite` row (#763).
+    await expect.element(page.getByLabelText('to_favorite')).toBeInTheDocument();
+    // Still hidden: this mutates every selected asset and the server refuses the non-owned ones.
+    expect(page.getByRole('menuitem', { name: 'delete' }).query()).toBeNull();
   });
 
-  it("Given a space editor selecting only other members' assets, When the toolbar renders, Then both Add-to-album and Share are shown — the space role covers both (#764 contribution, #1018 link)", () => {
-    renderToolbar({
+  it("Given a space editor selecting only other members' assets, When the toolbar renders, Then both Add-to-album and Share are shown — the space role covers both (#764 contribution, #1018 link)", async () => {
+    await renderToolbar({
       timelineManager: fakeTimelineManager,
       assetInteraction: makeAssetInteraction({
         isAllUserOwned: false,
@@ -266,12 +279,12 @@ describe('SelectionToolbar', () => {
       onRemove: vi.fn(),
     });
 
-    expect(screen.getByLabelText('add_to_album_or_space')).toBeInTheDocument();
-    expect(screen.getByLabelText('share')).toBeInTheDocument();
+    await expect.element(page.getByLabelText('add_to_album_or_space')).toBeInTheDocument();
+    await expect.element(page.getByLabelText('share')).toBeInTheDocument();
   });
 
-  it('Given a space VIEWER with a mixed selection, When the toolbar renders, Then Share is shown for the owned subset but Add-to-album is not — a viewer cannot contribute', () => {
-    renderToolbar({
+  it('Given a space VIEWER with a mixed selection, When the toolbar renders, Then Share is shown for the owned subset but Add-to-album is not — a viewer cannot contribute', async () => {
+    await renderToolbar({
       timelineManager: fakeTimelineManager,
       assetInteraction: makeAssetInteraction({
         isAllUserOwned: false,
@@ -280,12 +293,12 @@ describe('SelectionToolbar', () => {
       space: { id: 'space-1', canWrite: false },
     });
 
-    expect(screen.getByLabelText('share')).toBeInTheDocument();
-    expect(screen.queryByLabelText('add_to_album_or_space')).not.toBeInTheDocument();
+    await expect.element(page.getByLabelText('share')).toBeInTheDocument();
+    expect(page.getByLabelText('add_to_album_or_space').query()).toBeNull();
   });
 
-  it('Given a REGULAR album editor with a mixed selection, When the toolbar renders, Then Add-to-album stays hidden — contribution needs a space link', () => {
-    renderToolbar({
+  it('Given a REGULAR album editor with a mixed selection, When the toolbar renders, Then Add-to-album stays hidden — contribution needs a space link', async () => {
+    await renderToolbar({
       timelineManager: fakeTimelineManager,
       assetInteraction: makeAssetInteraction({
         isAllUserOwned: false,
@@ -295,17 +308,139 @@ describe('SelectionToolbar', () => {
       onRemove: vi.fn(),
     });
 
-    expect(screen.queryByLabelText('add_to_album_or_space')).not.toBeInTheDocument();
-    expect(screen.getByLabelText('share')).toBeInTheDocument();
+    expect(page.getByLabelText('add_to_album_or_space').query()).toBeNull();
+    await expect.element(page.getByLabelText('share')).toBeInTheDocument();
   });
 
-  it('Given no active selection, When the toolbar renders, Then nothing is rendered', () => {
-    const { container } = renderToolbar({
+  it('Given no active selection, When the toolbar renders, Then nothing is rendered', async () => {
+    const { container } = await renderToolbar({
       timelineManager: fakeTimelineManager,
       assetInteraction: makeAssetInteraction({ selectionActive: false, assets: [] }),
     });
 
-    expect(screen.queryByLabelText('menu')).not.toBeInTheDocument();
-    expect(container.querySelector('#control-bar')).not.toBeInTheDocument();
+    expect(page.getByLabelText('menu').query()).toBeNull();
+    expect(container.querySelector('[data-testid="control-bar"]')).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #734: canEditMetadata resolves to the editable subset (POST /assets/editable), and
+// Archive/SetVisibility split out into canSetVisibility (still owner-only).
+// ---------------------------------------------------------------------------
+
+describe('SelectionToolbar — #734 editable-subset resolution', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('an all-owned selection shows Rotate and Archive immediately, without ever calling POST /assets/editable', async () => {
+    await renderToolbar({
+      timelineManager: fakeTimelineManager,
+      assetInteraction: makeAssetInteraction({
+        isAllUserOwned: true,
+        assets: [makeAsset({ id: 'mine', ownerId: 'me' })],
+      }),
+      space: { id: 'space-1', canWrite: true },
+    });
+
+    await expect.element(page.getByRole('menuitem', { name: 'rotate_right' })).toBeInTheDocument();
+    await expect.element(page.getByRole('menuitem', { name: 'to_archive' })).toBeInTheDocument();
+
+    // Advance well past the 250ms debounce window used for a non-all-owned selection: if the
+    // resolution effect took that path instead of the synchronous one, this is where it would
+    // fire. Asserting immediately after render (with no timer advance) would pass either way.
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(getEditableAssets).not.toHaveBeenCalled();
+  });
+
+  it('a mixed selection hides Rotate until the resolved subset is non-empty, then shows it — Archive never appears', async () => {
+    vi.mocked(getEditableAssets).mockResolvedValue({ editableAssetIds: ['mine', 'theirs'] });
+
+    await renderToolbar({
+      timelineManager: fakeTimelineManager,
+      assetInteraction: makeAssetInteraction({
+        isAllUserOwned: false,
+        assets: [makeAsset({ id: 'mine', ownerId: 'me' }), makeAsset({ id: 'theirs', ownerId: 'other' })],
+      }),
+      space: { id: 'space-1', canWrite: true },
+    });
+
+    // Pending: editableSelectedAssetIds hasn't resolved yet, so canEditMetadata (hasEditable) is
+    // false — the action must not pop in before the request lands (W-11).
+    expect(page.getByRole('menuitem', { name: 'rotate_right' }).query()).toBeNull();
+    expect(page.getByRole('menuitem', { name: 'to_archive' }).query()).toBeNull();
+
+    await vi.advanceTimersByTimeAsync(250);
+
+    expect(getEditableAssets).toHaveBeenCalledWith({ assetEditableDto: { assetIds: ['mine', 'theirs'] } });
+    await expect.element(page.getByRole('menuitem', { name: 'rotate_right' })).toBeInTheDocument();
+    // Still absent: canSetVisibility stays isAllUserOwned-only regardless of what resolves.
+    expect(page.getByRole('menuitem', { name: 'to_archive' }).query()).toBeNull();
+  });
+
+  it('W-14: discards a stale response that resolves after the selection has already changed', async () => {
+    let resolveStaleRequest: ((value: { editableAssetIds: string[] }) => void) | undefined;
+    const staleRequest = new Promise<{ editableAssetIds: string[] }>((resolve) => {
+      resolveStaleRequest = resolve;
+    });
+    vi.mocked(getEditableAssets).mockReturnValueOnce(staleRequest as ReturnType<typeof getEditableAssets>);
+    vi.mocked(getEditableAssets).mockResolvedValueOnce({ editableAssetIds: [] });
+
+    const { rerender } = await renderToolbar({
+      timelineManager: fakeTimelineManager,
+      assetInteraction: makeAssetInteraction({
+        isAllUserOwned: false,
+        assets: [makeAsset({ id: 'a', ownerId: 'other' }), makeAsset({ id: 'b', ownerId: 'other' })],
+      }),
+      space: { id: 'space-1', canWrite: true },
+    });
+
+    // Fires the first (stale-to-be) debounced request; it stays unresolved.
+    await vi.advanceTimersByTimeAsync(250);
+
+    // The selection changes before that request settles.
+    await rerender({
+      component: SelectionToolbar,
+      componentProps: {
+        timelineManager: fakeTimelineManager,
+        assetInteraction: makeAssetInteraction({
+          isAllUserOwned: false,
+          assets: [makeAsset({ id: 'b', ownerId: 'other' })],
+        }),
+        space: { id: 'space-1', canWrite: true },
+      },
+    });
+
+    // Fires the second (fresh) debounced request, which resolves to nothing editable.
+    await vi.advanceTimersByTimeAsync(250);
+    expect(page.getByRole('menuitem', { name: 'rotate_right' }).query()).toBeNull();
+
+    // The stale first request now settles, claiming both original assets are editable. If it
+    // were applied on top of the fresh (empty) answer, Rotate would incorrectly reappear.
+    resolveStaleRequest?.({ editableAssetIds: ['a', 'b'] });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(page.getByRole('menuitem', { name: 'rotate_right' }).query()).toBeNull();
+  });
+
+  it('a mixed selection that resolves to nothing editable never shows Rotate', async () => {
+    vi.mocked(getEditableAssets).mockResolvedValue({ editableAssetIds: [] });
+
+    await renderToolbar({
+      timelineManager: fakeTimelineManager,
+      assetInteraction: makeAssetInteraction({
+        isAllUserOwned: false,
+        assets: [makeAsset({ id: 'theirs', ownerId: 'other' })],
+      }),
+      space: { id: 'space-1', canWrite: false },
+    });
+
+    await vi.advanceTimersByTimeAsync(250);
+
+    expect(page.getByRole('menuitem', { name: 'rotate_right' }).query()).toBeNull();
   });
 });

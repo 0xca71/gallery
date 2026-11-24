@@ -1,9 +1,9 @@
+import { assetCacheManager } from '#lib/managers/AssetCacheManager.svelte.ts';
+import { Route } from '#lib/route.ts';
+import { withoutAtParam } from '#lib/utils/filter-target.ts';
 import { goto } from '$app/navigation';
 import { page } from '$app/state';
 import type { RouteId } from '$app/types';
-import { assetCacheManager } from '$lib/managers/AssetCacheManager.svelte';
-import { Route } from '$lib/route';
-import { withoutAtParam } from '$lib/utils/filter-target';
 
 export type AssetGridRouteSearchParams = {
   at: string | null | undefined;
@@ -63,7 +63,7 @@ export function currentUrlReplaceAssetId(assetId: string) {
 }
 
 function replaceScrollTarget(url: string, searchParams?: AssetGridRouteSearchParams | null) {
-  const parsed = new URL(url, page.url);
+  const parsed = new URL(url, page.url.href);
 
   const { at: assetId } = searchParams || { at: null };
 
@@ -88,9 +88,7 @@ function currentUrl() {
 }
 
 interface Route {
-  /**
-   * The route to target, or 'current' to stay on current route.
-   */
+  /** The route to target, or 'current' to stay on current route. */
   targetRoute: string | 'current';
 }
 
@@ -109,10 +107,9 @@ type ImmichRoute = AssetRoute | AssetGridRoute;
 type NavOptions = {
   /* navigate even if url is the same */
   forceNavigate?: boolean | undefined;
-  replaceState?: boolean | undefined;
-  noScroll?: boolean | undefined;
-  keepFocus?: boolean | undefined;
-  invalidateAll?: boolean | undefined;
+  replace?: boolean | undefined;
+  reset?: boolean | undefined;
+  refreshAll?: boolean | undefined;
   state?: App.PageState | undefined;
 };
 
@@ -160,12 +157,12 @@ export const clearQueryParam = async (queryParam: string, url: URL) => {
   }
 
   url.searchParams.delete(queryParam);
-  await goto(url, { keepFocus: true });
+  await goto(url, { reset: false });
 };
 
 export const setQueryValue = async (queryKey: string, queryValue: string) => {
   const url = location.href;
   const urlObject = new URL(url);
   urlObject.searchParams.set(queryKey, queryValue);
-  await goto(urlObject, { keepFocus: true });
+  await goto(urlObject, { reset: false });
 };

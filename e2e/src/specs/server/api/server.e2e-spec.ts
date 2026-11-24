@@ -99,6 +99,7 @@ describe('/server', () => {
         configFile: false,
         duplicateDetection: false,
         facialRecognition: false,
+        backups: false,
         map: true,
         reverseGeocoding: true,
         importFaces: false,
@@ -112,6 +113,13 @@ describe('/server', () => {
         trash: true,
         email: false,
         peopleStatistics: false,
+        // false on the e2e stack, which runs the disk storage backend. The admin UI uses this to hide
+        // the database-backup S3 options, which cannot apply without an S3 backend.
+        s3Storage: false,
+        // off on the e2e stack: Spatial Scene ships disabled
+        spatialScene: false,
+        // off on the e2e stack: Data Saver video ships disabled
+        dataSaverVideo: false,
         // The full list mirrors the SyncRequestType enum; pin the fork's space-album types,
         // which mobile's sync gate opens on (capability signalling).
         syncRequestTypes: expect.arrayContaining([
@@ -124,6 +132,10 @@ describe('/server', () => {
           'SharedSpaceAlbumAssetsV1',
           'SharedSpaceAlbumAssetExifsV1',
         ]),
+        // Mobile sends wall-clock taken ranges only to a server that declares it reads them that way.
+        localTakenRange: true,
+        searchOptions: true,
+        searchFavoritesAcrossSpaces: true,
       });
     });
   });
@@ -148,7 +160,6 @@ describe('/server', () => {
         minFaces: 3,
         availableMemoryTypes: [
           'on_this_day',
-          'birthday',
           'recent_trip',
           'month_recap',
           'favorites_throwback',

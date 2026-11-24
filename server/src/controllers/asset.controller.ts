@@ -1,6 +1,5 @@
 import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Param, Patch, Post, Put, Query } from '@nestjs/common';
-import { ApiExcludeEndpoint, ApiQuery, ApiTags } from '@nestjs/swagger';
-import type { AuthDto } from 'src/dtos/auth.dto.js';
+import { ApiExcludeEndpoint, ApiTags } from '@nestjs/swagger';
 import { Endpoint, HistoryBuilder } from 'src/decorators.js';
 import { AssetResponseDto } from 'src/dtos/asset-response.dto.js';
 import {
@@ -18,10 +17,11 @@ import {
   AssetStatsResponseDto,
   UpdateAssetDto,
 } from 'src/dtos/asset.dto.js';
+import type { AuthDto } from 'src/dtos/auth.dto.js';
 import { AssetEditsCreateDto, AssetEditsResponseDto } from 'src/dtos/editing.dto.js';
-import { AssetAddressResponseDto } from 'src/dtos/exif.dto.js';
 import { AssetOcrResponseDto } from 'src/dtos/ocr.dto.js';
 import { ApiTag, Permission, RouteKey } from 'src/enum.js';
+import { AssetInfoQueryDto } from 'src/gallery/dtos/asset.dto.js';
 import { Auth, Authenticated } from 'src/middleware/auth.guard.js';
 import { AssetService } from 'src/services/asset.service.js';
 import { UUIDParamDto } from 'src/validation.js';
@@ -60,11 +60,7 @@ export class AssetController {
   @Endpoint({
     summary: 'Update assets',
     description: 'Updates multiple assets at the same time.',
-    history: new HistoryBuilder()
-      .added('v1')
-      .beta('v1')
-      .stable('v2')
-      .deprecated('v3', { replacementId: 'updateAssets' }),
+    history: new HistoryBuilder().added('v1').beta('v1').stable('v2').v3PatchMigration(),
   })
   updateAssets(@Auth() auth: AuthDto, @Body() dto: AssetBulkUpdateDto): Promise<void> {
     return this.service.updateAll(auth, dto);
@@ -90,18 +86,6 @@ export class AssetController {
     return this.service.deleteAll(auth, dto);
   }
 
-  @Post(':id/address')
-  @Authenticated({ permission: Permission.AssetRead })
-  @HttpCode(HttpStatus.OK)
-  @Endpoint({
-    summary: 'Ensure asset detailed address',
-    description: 'Resolve and store a missing detailed address without changing GPS or location filters.',
-    history: new HistoryBuilder().added('v1').beta('v1'),
-  })
-  ensureAssetAddress(@Auth() auth: AuthDto, @Param() { id }: UUIDParamDto): Promise<AssetAddressResponseDto> {
-    return this.service.ensureAssetAddress(auth, id);
-  }
-
   @Get(':id')
   @Authenticated({ permission: Permission.AssetRead, sharedLink: true })
   @Endpoint({
@@ -109,26 +93,12 @@ export class AssetController {
     description: 'Retrieve detailed information about a specific asset.',
     history: new HistoryBuilder().added('v1').beta('v1').stable('v2'),
   })
-  @ApiQuery({ name: 'spaceId', required: false, type: String })
   getAssetInfo(
     @Auth() auth: AuthDto,
     @Param() { id }: UUIDParamDto,
-    @Query('spaceId') spaceId?: string,
+    @Query() { spaceId }: AssetInfoQueryDto,
   ): Promise<AssetResponseDto> {
     return this.service.get(auth, id, spaceId) as Promise<AssetResponseDto>;
-  }
-
-  @Delete(':id/live-photo')
-  @Authenticated({ permission: Permission.AssetDelete })
-  @HttpCode(HttpStatus.OK)
-  @Endpoint({
-    summary: 'Unlink and permanently delete a Live Photo video',
-    description:
-      'Keeps the photo and permanently deletes its associated video, including the source file for uploaded and external-library assets. Photo metadata is not rewritten.',
-    history: new HistoryBuilder().added('v3'),
-  })
-  unlinkAndDeleteLivePhoto(@Auth() auth: AuthDto, @Param() { id }: UUIDParamDto): Promise<AssetResponseDto> {
-    return this.service.unlinkAndDeleteLivePhoto(auth, id);
   }
 
   @Put('copy')
@@ -174,11 +144,7 @@ export class AssetController {
   @Endpoint({
     summary: 'Update an asset',
     description: 'Update information of a specific asset.',
-    history: new HistoryBuilder()
-      .added('v1')
-      .beta('v1')
-      .stable('v2')
-      .deprecated('v3', { replacementId: 'updateAsset' }),
+    history: new HistoryBuilder().added('v1').beta('v1').stable('v2').v3PatchMigration(),
   })
   updateAsset(
     @Auth() auth: AuthDto,

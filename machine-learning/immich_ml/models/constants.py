@@ -86,13 +86,19 @@ _PADDLE_MODELS = {
     "KOREAN__PP-OCRv5_mobile",
     "LATIN__PP-OCRv5_mobile",
     "TH__PP-OCRv5_mobile",
+    "PP-OCRv6_tiny",
+    "PP-OCRv6_small",
+    "PP-OCRv6_medium",
 }
 
 _RFDETR_MODELS = {"rfdetr-nano", "rfdetr-small"}
 
 _PET_RECOGNITION_MODELS = {"pet-recognition-small", "pet-recognition-base", "pet-recognition-large"}
 
+_DEPTH_ANYTHING_MODELS = {"depth-anything-v2-small", "distill-any-depth-small", "distill-any-depth-large"}
+
 SUPPORTED_PROVIDERS = [
+    "nv_tensorrt_rtx",
     "CUDAExecutionProvider",
     "MIGraphXExecutionProvider",
     "OpenVINOExecutionProvider",
@@ -100,8 +106,7 @@ SUPPORTED_PROVIDERS = [
     "CPUExecutionProvider",
 ]
 
-RKNN_SUPPORTED_SOCS = ["rk3566", "rk3568", "rk3576", "rk3588"]
-RKNN_COREMASK_SUPPORTED_SOCS = ["rk3576", "rk3588"]
+RKNN_NPU_CORES = {"rk3566": 1, "rk3568": 1, "rk3576": 2, "rk3588": 3}
 
 
 WEBLATE_TO_FLORES200 = {
@@ -184,5 +189,8 @@ def get_model_source(model_name: str) -> ModelSource | None:
 
     if cleaned_name in _RFDETR_MODELS:
         return ModelSource.RFDETR
+
+    if cleaned_name in _DEPTH_ANYTHING_MODELS:
+        return ModelSource.DEPTH_ANYTHING
 
     return None

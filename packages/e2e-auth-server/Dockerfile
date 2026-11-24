@@ -1,7 +1,12 @@
-FROM node:24.19.0-trixie-slim@sha256:0711b541c1c33a8a530ac4f0d391baa9a15b3d804695b1b24a47daa5fb60e74d
-WORKDIR /usr/src/app
+FROM ghcr.io/immich-app/base-server-dev:202610291416@sha256:5f4f9f77059e1cd0182994419a19f4ee045c3fd48e611f5e77623ed63f7aa1e4
+ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
+  CI=1 \
+  COREPACK_HOME=/tmp
 
-RUN corepack enable
+RUN npm install --global corepack@latest && \
+  corepack enable pnpm
+
+WORKDIR /usr/src/app
 
 COPY package* pnpm* .pnpmfile.cjs ./
 # Gallery isolates e2e-auth-server as its own pnpm workspace (packages/e2e-auth-server/pnpm-workspace.yaml)

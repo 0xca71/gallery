@@ -1,7 +1,7 @@
 import { createZodDto } from 'nestjs-zod';
 import z from 'zod';
-import type { MaybeDehydrated } from 'src/types.js';
 import { Exif } from 'src/database.js';
+import type { MaybeDehydrated } from 'src/types.js';
 import { asDateTimeString } from 'src/utils/date.js';
 
 export const ExifResponseSchema = z
@@ -27,21 +27,12 @@ export const ExifResponseSchema = z
     city: z.string().nullish().default(null).describe('City name'),
     state: z.string().nullish().default(null).describe('State/province name'),
     country: z.string().nullish().default(null).describe('Country name'),
-    formattedAddress: z.string().nullish().default(null).describe('Detailed display address'),
     description: z.string().nullish().default(null).describe('Image description'),
     projectionType: z.string().nullish().default(null).describe('Projection type'),
     rating: z.int().min(1).max(5).nullish().default(null).describe('Rating'),
   })
   .describe('EXIF response')
   .meta({ id: 'ExifResponseDto' });
-
-export class AssetAddressResponseDto extends createZodDto(
-  z
-    .object({
-      formattedAddress: z.string().nullable().describe('Detailed address, or null when unavailable'),
-    })
-    .meta({ id: 'AssetAddressResponseDto' }),
-) {}
 
 class ExifResponseDto extends createZodDto(ExifResponseSchema) {}
 
@@ -66,7 +57,6 @@ export function mapExif(entity: MaybeDehydrated<Exif>): ExifResponseDto {
     city: entity.city,
     state: entity.state,
     country: entity.country,
-    formattedAddress: entity.formattedAddress,
     description: entity.description,
     projectionType: entity.projectionType,
     rating: entity.rating,

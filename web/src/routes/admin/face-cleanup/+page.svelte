@@ -1,11 +1,11 @@
 <script lang="ts">
-  import AdminPageLayout from '$lib/components/layouts/AdminPageLayout.svelte';
-  import { Route } from '$lib/route';
+  import AdminPageLayout from '#lib/components/layouts/AdminPageLayout.svelte';
+  import { Route } from '#lib/route.ts';
   import { Button, Icon } from '@immich/ui';
   import { mdiAccountSearch, mdiArrowRight, mdiRadar, mdiSwapHorizontal } from '@mdi/js';
   import { t } from 'svelte-i18n';
-  import { faceCleanupBreadcrumbs } from './breadcrumbs';
   import type { PageData } from './$types';
+  import { faceCleanupBreadcrumbs } from './breadcrumbs';
 
   // Local types for the loosely-typed SDK response (mirrors scan/+page.svelte).
   interface ScanTotals {

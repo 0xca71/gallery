@@ -1,6 +1,6 @@
 import { Selectable, ShallowDehydrateObject } from 'kysely';
-import type { UserMetadataItem } from 'src/types.js';
 import { MapAsset } from 'src/dtos/asset-response.dto.js';
+import { PersonUserRole } from 'src/dtos/person.dto.js';
 import {
   AlbumUserRole,
   AssetFileType,
@@ -14,10 +14,13 @@ import {
   UserAvatarColor,
   UserStatus,
 } from 'src/enum.js';
+import { galleryColumns } from 'src/gallery/database.js';
+import { projectedDuration } from 'src/gallery/utils/projected-duration.js';
 import { AlbumTable } from 'src/schema/tables/album.table.js';
 import { AssetExifTable } from 'src/schema/tables/asset-exif.table.js';
 import { AssetTable } from 'src/schema/tables/asset.table.js';
 import { PluginTable } from 'src/schema/tables/plugin.table.js';
+import type { UserMetadataItem } from 'src/types.js';
 
 export type AuthUser = {
   id: string;
@@ -45,7 +48,6 @@ export type Library = {
   ownerId: string;
   createdAt: Date;
   updatedAt: Date;
-  createId: string;
   updateId: string;
   name: string;
   importPaths: string[];
@@ -80,6 +82,17 @@ export type ApiKey = {
   createdAt: Date;
   updatedAt: Date;
   permissions: Permission[];
+};
+
+export type Passkey = {
+  id: string;
+  name: string | null;
+  userId: string;
+  credentialId: string;
+  transports: string[];
+  createdAt: Date;
+  updatedAt: Date;
+  usedAt: Date | null;
 };
 
 export type Tag = {
@@ -141,7 +154,7 @@ export type UserAdmin = User & {
   createdAt: Date;
   updatedAt: Date;
   deletedAt: Date | null;
-  oauthId: string;
+  oauthId: string | null;
   quotaSizeInBytes: number | null;
   quotaUsageInBytes: number;
   status: UserStatus;
@@ -168,8 +181,8 @@ export type AuthSharedLink = {
   expiresAt: Date | null;
   userId: string;
   albumId: string | null;
-  /** #1018: the space this link was created from; the tether for non-owned assets. */
-  spaceId: string | null;
+  /** #1018: the space this link was created from (`shared_link_space`); the tether for non-owned assets. */
+  spaceId?: string | null;
   showExif: boolean;
   allowUpload: boolean;
   allowDownload: boolean;
@@ -192,7 +205,6 @@ export type SharedLink = {
   type: SharedLinkType;
   userId: string;
   slug: string | null;
-  spaceId: string | null;
 };
 
 export type Album = Selectable<AlbumTable> & {
@@ -262,6 +274,8 @@ export type Person = {
   identityId: string | null;
 };
 
+export type PersonUser = User & { role: PersonUserRole };
+
 export type AssetFace = {
   id: string;
   deletedAt: Date | null;
@@ -278,131 +292,17 @@ export type AssetFace = {
   updatedAt: Date;
   updateId: string;
   isVisible: boolean;
+  ownerId: string;
+  assetVisibility: AssetVisibility;
+  assetDeletedAt: Date | null;
 };
 
 export type Plugin = Selectable<PluginTable>;
 
-export type SharedSpace = {
-  id: string;
-  name: string;
-  description: string | null;
-  createdById: string;
-  thumbnailAssetId: string | null;
-  color: string | null;
-  thumbnailCropY: number | null;
-  faceRecognitionEnabled: boolean;
-  petsEnabled: boolean;
-  lastActivityAt: Date | null;
-  createdAt: Date;
-  updatedAt: Date;
-  createId: string;
-  updateId: string;
-};
-
-export type SharedSpaceMember = {
-  spaceId: string;
-  userId: string;
-  role: string;
-  joinedAt: Date;
-  showInTimeline: boolean;
-  sharePersonMetadata: boolean;
-  lastViewedAt: Date | null;
-  createdAt: Date;
-  updatedAt: Date;
-  createId: string;
-  updateId: string;
-};
-
-export type SharedSpaceAsset = {
-  spaceId: string;
-  assetId: string;
-  addedById: string | null;
-  addedAt: Date;
-  createdAt: Date;
-  updatedAt: Date;
-  createId: string;
-  updateId: string;
-};
-
-export type SharedSpaceActivity = {
-  id: string;
-  spaceId: string;
-  userId: string | null;
-  type: string;
-  data: Record<string, unknown>;
-  createdAt: Date;
-};
-
-export type SharedSpacePerson = {
-  id: string;
-  spaceId: string;
-  name: string;
-  representativeFaceId: string | null;
-  representativeFaceSource: 'auto' | 'manual';
-  isHidden: boolean;
-  type: string;
-  birthDate: string | null;
-  faceCount: number;
-  assetCount: number;
-  createdAt: Date;
-  updatedAt: Date;
-  updateId: string;
-  identityId: string | null;
-  nameSource: string;
-  nameSourceProfileType: string | null;
-  nameSourceProfileId: string | null;
-  nameSourceUpdatedAt: Date | null;
-  birthDateSource: string;
-  birthDateSourceProfileType: string | null;
-  birthDateSourceProfileId: string | null;
-  birthDateSourceUpdatedAt: Date | null;
-  personalPersonId?: string | null;
-  personalName?: string | null;
-  personalThumbnailPath?: string | null;
-  personalBirthDate?: Date | null;
-};
-
-export type SharedSpacePersonFace = {
-  personId: string;
-  assetFaceId: string;
-};
-
-export type SharedSpacePersonAlias = {
-  personId: string;
-  userId: string;
-  alias: string;
-};
-
-export type SharedSpaceLibrary = {
-  spaceId: string;
-  libraryId: string;
-  addedById: string | null;
-  createdAt: Date;
-  updatedAt: Date;
-  createId: string;
-  updateId: string;
-};
-
-export type UserGroup = {
-  id: string;
-  name: string;
-  color: string | null;
-  origin: string;
-  createdById: string;
-  createdAt: Date;
-  updatedAt: Date;
-  createId: string;
-  updateId: string;
-};
-
-export type UserGroupMember = {
-  groupId: string;
-  userId: string;
-  addedAt: Date;
-};
+export * from 'src/gallery/database.js';
 
 const userColumns = ['id', 'name', 'email', 'avatarColor', 'profileImagePath', 'profileChangedAt'] as const;
-const userWithPrefixColumns = [
+const user2Columns = [
   'user2.id',
   'user2.name',
   'user2.email',
@@ -431,6 +331,8 @@ export const columns = {
     'asset.height',
     'asset.isEdited',
   ],
+  // #763: no isFavorite: the column is the owner's favorite, and search spans other users' assets.
+  // Callers project the caller's own via favoriteExistsFor(eb, options.authUserId).
   searchAsset: [
     'asset.id',
     'asset.updateId',
@@ -441,11 +343,10 @@ export const columns = {
     'asset.checksum',
     'asset.checksumAlgorithm',
     'asset.duplicateId',
-    'asset.duration',
+    projectedDuration,
     'asset.fileCreatedAt',
     'asset.fileModifiedAt',
     'asset.isExternal',
-    'asset.isFavorite',
     'asset.isOffline',
     'asset.isEdited',
     'asset.visibility',
@@ -500,7 +401,15 @@ export const columns = {
   authApiKey: ['api_key.id', 'api_key.permissions'],
   authSession: ['session.id', 'session.updatedAt', 'session.pinExpiresAt', 'session.appVersion'],
   user: userColumns,
-  userWithPrefix: userWithPrefixColumns,
+  user2: user2Columns,
+  userPrefix: [
+    'user.id',
+    'user.name',
+    'user.email',
+    'user.avatarColor',
+    'user.profileImagePath',
+    'user.profileChangedAt',
+  ],
   userAdmin: [
     ...userColumns,
     'clusterGroupId',
@@ -518,6 +427,7 @@ export const columns = {
   ],
   tag: ['tag.id', 'tag.value', 'tag.createdAt', 'tag.updatedAt', 'tag.color', 'tag.parentId'],
   apiKey: ['id', 'name', 'userId', 'createdAt', 'updatedAt', 'permissions'],
+  passkey: ['id', 'name', 'userId', 'credentialId', 'transports', 'createdAt', 'updatedAt', 'usedAt'],
   notification: ['id', 'createdAt', 'level', 'type', 'title', 'description', 'data', 'readAt'],
   pluginMethod: [
     'plugin_method.name',
@@ -543,7 +453,7 @@ export const columns = {
     'asset.deletedAt',
     'asset.isFavorite',
     'asset.visibility',
-    'asset.duration',
+    projectedDuration,
     'asset.livePhotoVideoId',
     'asset.stackId',
     'asset.libraryId',
@@ -564,7 +474,7 @@ export const columns = {
     'asset.type',
     'asset.deletedAt',
     'asset.visibility',
-    'asset.duration',
+    projectedDuration,
     'asset.livePhotoVideoId',
     'asset.stackId',
     'asset.libraryId',
@@ -585,7 +495,7 @@ export const columns = {
     'asset.type',
     'asset.deletedAt',
     'asset.visibility',
-    'asset.duration',
+    projectedDuration,
     'asset.livePhotoVideoId',
     'asset.stackId',
     'asset.libraryId',
@@ -593,55 +503,25 @@ export const columns = {
     'asset.height',
     'asset.isEdited',
   ],
-  syncSharedSpaceAsset: [
-    'asset.id',
-    'asset.ownerId',
-    'asset.originalFileName',
-    'asset.thumbhash',
-    'asset.checksum',
-    'asset.fileCreatedAt',
-    'asset.fileModifiedAt',
-    'asset.createdAt',
-    'asset.localDateTime',
-    'asset.type',
-    'asset.deletedAt',
-    'asset.visibility',
-    'asset.duration',
-    'asset.livePhotoVideoId',
-    'asset.stackId',
-    'asset.libraryId',
-    'asset.width',
-    'asset.height',
-    'asset.isEdited',
-  ],
-  // syncAsset minus isFavorite — LibraryAssetSync masks the favorite flag per row
-  // (owner keeps it, other library members see false), like the other shared-scope
-  // sync column sets above (issue #743 item 1).
-  syncLibraryAsset: [
-    'asset.id',
-    'asset.ownerId',
-    'asset.originalFileName',
-    'asset.thumbhash',
-    'asset.checksum',
-    'asset.fileCreatedAt',
-    'asset.fileModifiedAt',
-    'asset.createdAt',
-    'asset.localDateTime',
-    'asset.type',
-    'asset.deletedAt',
-    'asset.visibility',
-    'asset.duration',
-    'asset.livePhotoVideoId',
-    'asset.stackId',
-    'asset.libraryId',
-    'asset.width',
-    'asset.height',
-    'asset.isEdited',
-  ],
+  ...galleryColumns,
   syncAlbumUser: ['album_user.albumId as albumId', 'album_user.userId as userId', 'album_user.role'],
   syncStack: ['stack.id', 'stack.createdAt', 'stack.updatedAt', 'stack.primaryAssetId', 'stack.ownerId'],
   syncUser: ['id', 'name', 'email', 'avatarColor', 'deletedAt', 'updateId', 'profileImagePath', 'profileChangedAt'],
   stack: ['stack.id', 'stack.primaryAssetId', 'ownerId'],
+  syncAssetFace: [
+    'asset_face.id',
+    'asset_face.assetId',
+    'asset_face.personGroupId as personId',
+    'asset_face.imageWidth',
+    'asset_face.imageHeight',
+    'asset_face.boundingBoxX1',
+    'asset_face.boundingBoxY1',
+    'asset_face.boundingBoxX2',
+    'asset_face.boundingBoxY2',
+    'asset_face.sourceType',
+    'asset_face.isVisible',
+    'asset_face.deletedAt',
+  ],
   syncAssetExif: [
     'asset_exif.assetId',
     'asset_exif.description',
@@ -709,7 +589,6 @@ export const columns = {
     'asset_exif.fNumber',
     'asset_exif.focalLength',
     'asset_exif.fps',
-    'asset_exif.formattedAddress',
     'asset_exif.iso',
     'asset_exif.latitude',
     'asset_exif.lensModel',

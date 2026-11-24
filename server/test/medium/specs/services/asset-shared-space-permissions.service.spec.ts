@@ -4,6 +4,7 @@ import { AlbumRepository } from 'src/repositories/album.repository.js';
 import { AssetEditRepository } from 'src/repositories/asset-edit.repository.js';
 import { AssetJobRepository } from 'src/repositories/asset-job.repository.js';
 import { AssetRepository } from 'src/repositories/asset.repository.js';
+import { ConfigRepository } from 'src/repositories/config.repository.js';
 import { EventRepository } from 'src/repositories/event.repository.js';
 import { JobRepository } from 'src/repositories/job.repository.js';
 import { LoggingRepository } from 'src/repositories/logging.repository.js';
@@ -13,6 +14,7 @@ import { SharedLinkRepository } from 'src/repositories/shared-link.repository.js
 import { SharedSpaceRepository } from 'src/repositories/shared-space.repository.js';
 import { StackRepository } from 'src/repositories/stack.repository.js';
 import { StorageRepository } from 'src/repositories/storage.repository.js';
+import { SystemMetadataRepository } from 'src/repositories/system-metadata.repository.js';
 import { UserRepository } from 'src/repositories/user.repository.js';
 import { DB } from 'src/schema/index.js';
 import { AssetService } from 'src/services/asset.service.js';
@@ -22,6 +24,7 @@ import { getKyselyDB } from 'test/utils.js';
 
 let defaultDatabase: Kysely<DB>;
 
+// eslint-disable-next-line unicorn/no-unnecessary-parameters
 const setup = (db?: Kysely<DB>) => {
   return newMediumService(AssetService, {
     database: db || defaultDatabase,
@@ -36,6 +39,9 @@ const setup = (db?: Kysely<DB>) => {
       StackRepository,
       UserRepository,
       SharedLinkRepository,
+      // the Spatial Scene overlay reads the system config
+      ConfigRepository,
+      SystemMetadataRepository,
     ],
     mock: [EventRepository, LoggingRepository, JobRepository, StorageRepository, OcrRepository],
   });
@@ -78,6 +84,12 @@ describe(AssetService.name, () => {
         // Add asset to space
         await ctx.newSharedSpaceAsset({ spaceId: space.id, assetId: asset.id, addedById: owner.id });
 
+        // #734 spec §2.3: checkSpaceEditAccess requires the asset's owner to also be a member of
+        // the space granting the caller their role — see the EDITOR test below for the full
+        // rationale. Without this row the denial would come from the owner-is-member EXISTS, not
+        // from the role gate this test is meant to cover.
+        await ctx.newSharedSpaceMember({ spaceId: space.id, userId: owner.id, role: 'owner' });
+
         // Add viewer member to space
         await ctx.newSharedSpaceMember({ spaceId: space.id, userId: viewer.id, role: 'viewer' });
 
@@ -98,6 +110,13 @@ describe(AssetService.name, () => {
         // Add asset to space
         await ctx.newSharedSpaceAsset({ spaceId: space.id, assetId: asset.id, addedById: owner.id });
 
+        // #734 spec §2.3: checkSpaceEditAccess requires the asset's owner to also be a member of
+        // the space granting the caller their role — an editor may act on a fellow MEMBER's
+        // asset, not on any asset merely reachable through the space. Without this row the owner
+        // isn't a member, so this test would assert the pre-#734 behaviour instead of the
+        // scenario it's meant to cover.
+        await ctx.newSharedSpaceMember({ spaceId: space.id, userId: owner.id, role: 'owner' });
+
         // Add editor member to space
         await ctx.newSharedSpaceMember({ spaceId: space.id, userId: editor.id, role: 'editor' });
 
@@ -117,6 +136,11 @@ describe(AssetService.name, () => {
 
         // Add asset to space
         await ctx.newSharedSpaceAsset({ spaceId: space.id, assetId: asset.id, addedById: owner.id });
+
+        // #734 spec §2.3: checkSpaceEditAccess requires the asset's owner to also be a member of
+        // the space granting the caller their role — see the EDITOR test above for the full
+        // rationale.
+        await ctx.newSharedSpaceMember({ spaceId: space.id, userId: owner.id, role: 'owner' });
 
         // Add admin member to space
         await ctx.newSharedSpaceMember({ spaceId: space.id, userId: admin.id, role: 'owner' });

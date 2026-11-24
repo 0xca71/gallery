@@ -1,14 +1,14 @@
 import { Injectable } from '@nestjs/common';
-import { type ExpressionBuilder, type Insertable, type Kysely, type Updateable, sql } from 'kysely';
+import { sql, type ExpressionBuilder, type Insertable, type Kysely, type Updateable } from 'kysely';
 import { jsonArrayFrom } from 'kysely/helpers/postgres';
 import { DateTime } from 'luxon';
 import { InjectKysely } from 'nestjs-kysely';
-import type { UserMetadata, UserMetadataItem } from 'src/types.js';
 import { columns } from 'src/database.js';
 import { DummyValue, GenerateSql } from 'src/decorators.js';
 import { AssetType, AssetVisibility, UserStatus } from 'src/enum.js';
 import { DB } from 'src/schema/index.js';
 import { UserTable } from 'src/schema/tables/user.table.js';
+import type { UserMetadata, UserMetadataItem } from 'src/types.js';
 import { asUuid } from 'src/utils/database.js';
 
 export interface UserListFilter {
@@ -324,19 +324,5 @@ export class UserRepository {
       .$if(id !== undefined, (eb) => eb.where('user.id', '=', asUuid(id!)));
 
     await query.execute();
-  }
-
-  // Gallery-fork: writes an already-computed figure into the same column syncUsage above fills,
-  // so nothing downstream has to know which of the two produced it. Used when the admin has opted
-  // into counting server-generated files, where the number comes from a disk/S3 walk rather than
-  // from summing exif file sizes.
-  @GenerateSql({ params: [DummyValue.UUID, DummyValue.NUMBER] })
-  async setUsage(id: string, usage: number): Promise<void> {
-    await this.db
-      .updateTable('user')
-      .set({ quotaUsageInBytes: usage, updatedAt: new Date() })
-      .where('id', '=', asUuid(id))
-      .where('user.deletedAt', 'is', null)
-      .execute();
   }
 }

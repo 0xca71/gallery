@@ -1,6 +1,6 @@
 <script lang="ts">
-  import Image from '$lib/components/Image.svelte';
-  import type { AdaptiveImageLoader, ImageQuality } from '$lib/utils/adaptive-image-loader.svelte';
+  import Image from '#lib/components/Image.svelte';
+  import type { AdaptiveImageLoader, ImageQuality } from '#lib/utils/adaptive-image-loader.svelte.ts';
 
   type Props = {
     adaptiveImageLoader: AdaptiveImageLoader;
@@ -20,7 +20,6 @@
   <div class="absolute top-0" style:width style:height>
     <Image
       {src}
-      decodeBeforeLoad={quality === 'original'}
       onStart={() => adaptiveImageLoader.onStart(quality)}
       onLoad={() => adaptiveImageLoader.onLoad(quality)}
       onError={() => adaptiveImageLoader.onError(quality)}

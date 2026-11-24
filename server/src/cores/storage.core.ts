@@ -1,5 +1,4 @@
 import { dirname, isAbsolute, join, resolve } from 'node:path';
-import type { VideoInterfaces } from 'src/types.js';
 import { StorageAsset } from 'src/database.js';
 import {
   AssetFileType,
@@ -11,6 +10,8 @@ import {
   StorageFolder,
   UserPathType,
 } from 'src/enum.js';
+import { moveS3File } from 'src/gallery/utils/s3-file-move.js';
+import { isInStorageFolder } from 'src/gallery/utils/s3-key.js';
 import { AssetRepository } from 'src/repositories/asset.repository.js';
 import { ConfigRepository } from 'src/repositories/config.repository.js';
 import { CryptoRepository } from 'src/repositories/crypto.repository.js';
@@ -19,6 +20,7 @@ import { MoveRepository } from 'src/repositories/move.repository.js';
 import { PersonRepository } from 'src/repositories/person.repository.js';
 import { StorageRepository } from 'src/repositories/storage.repository.js';
 import { SystemMetadataRepository } from 'src/repositories/system-metadata.repository.js';
+import type { VideoInterfaces } from 'src/types.js';
 import { getAssetFile } from 'src/utils/asset.util.js';
 import { getConfig } from 'src/utils/config.js';
 
@@ -146,7 +148,7 @@ export class StorageCore {
   }
 
   static isAndroidMotionPath(originalPath: string) {
-    return originalPath.startsWith(StorageCore.getBaseFolder(StorageFolder.EncodedVideo));
+    return isInStorageFolder(originalPath, StorageFolder.EncodedVideo, StorageCore.getMediaLocation());
   }
 
   static isImmichPath(path: string) {
@@ -204,8 +206,18 @@ export class StorageCore {
       return;
     }
 
-    if (!isAbsolute(oldPath)) {
-      return;
+    // fs.rename only moves disk files; an S3 key moves inside S3
+    if (!isAbsolute(oldPath) || !isAbsolute(newPath)) {
+      return moveS3File(request, {
+        mediaLocation: StorageCore.getMediaLocation(),
+        moveRepository: this.moveRepository,
+        cryptoRepository: this.cryptoRepository,
+        configRepository: this.configRepository,
+        systemMetadataRepository: this.systemMetadataRepository,
+        logger: this.logger,
+        moveDiskFile: (diskRequest): Promise<void> => this.moveFile(diskRequest),
+        savePath: (path) => this.savePath(pathType, entityId, path, ownerId),
+      });
     }
 
     this.ensureFolders(newPath);
@@ -320,6 +332,10 @@ export class StorageCore {
     this.storageRepository.mkdirSync(dirname(input));
   }
 
+  removeEmptyDirs(folder: StorageFolder) {
+    return this.storageRepository.removeEmptyDirs(StorageCore.getBaseFolder(folder));
+  }
+
   async getVideoInterfaces(): Promise<VideoInterfaces> {
     const [dri, mali] = await Promise.all([this.getDevices(), this.hasMaliOpenCL()]);
     return { dri, mali };
@@ -354,49 +370,6 @@ export class StorageCore {
         return;
       }
     }
-  }
-
-  // --- Relative key methods (for S3 / backend-agnostic paths) ---
-
-  static getRelativeNestedPath(folder: StorageFolder, ownerId: string, filename: string): string {
-    return join(folder, ownerId, filename.slice(0, 2), filename.slice(2, 4), filename);
-  }
-
-  static getRelativeImagePath(asset: ThumbnailPathEntity, { fileType, format, isEdited }: ImagePathOptions): string {
-    const filename = `${asset.id}_${fileType}${isEdited ? '_edited' : ''}.${format}`;
-    return StorageCore.getRelativeNestedPath(StorageFolder.Thumbnails, asset.ownerId, filename);
-  }
-
-  static getRelativeEncodedVideoPath(asset: ThumbnailPathEntity): string {
-    return StorageCore.getRelativeNestedPath(StorageFolder.EncodedVideo, asset.ownerId, `${asset.id}.mp4`);
-  }
-
-  private static getEditedEncodedVideoFilename(asset: ThumbnailPathEntity): string {
-    return `${asset.id}_edited.mp4`;
-  }
-
-  static getEditedEncodedVideoPath(asset: ThumbnailPathEntity): string {
-    return StorageCore.getNestedPath(
-      StorageFolder.EncodedVideo,
-      asset.ownerId,
-      StorageCore.getEditedEncodedVideoFilename(asset),
-    );
-  }
-
-  static getRelativeEditedEncodedVideoPath(asset: ThumbnailPathEntity): string {
-    return StorageCore.getRelativeNestedPath(
-      StorageFolder.EncodedVideo,
-      asset.ownerId,
-      StorageCore.getEditedEncodedVideoFilename(asset),
-    );
-  }
-
-  static getRelativePersonThumbnailPath(person: PersonThumbnailPathEntity): string {
-    return StorageCore.getRelativeNestedPath(StorageFolder.Thumbnails, person.ownerId, `${person.personGroupId}.jpeg`);
-  }
-
-  static getRelativeProfileImagePath(userId: string, filename: string): string {
-    return StorageCore.getRelativeNestedPath(StorageFolder.Profile, userId, filename);
   }
 
   static getNestedFolder(folder: StorageFolder, ownerId: string, filename: string): string {

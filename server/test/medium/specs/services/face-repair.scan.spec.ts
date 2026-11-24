@@ -1,5 +1,6 @@
 import { Kysely } from 'kysely';
 import { AssetVisibility } from 'src/enum.js';
+import { FaceSearchRepository } from 'src/gallery/repositories/face-search.repository.js';
 import { ConfigRepository } from 'src/repositories/config.repository.js';
 import { FaceIdentityRepository } from 'src/repositories/face-identity.repository.js';
 import { FacePersonVerdictRepository } from 'src/repositories/face-person-verdict.repository.js';
@@ -48,6 +49,7 @@ const setup = () =>
       FacePersonVerdictRepository,
       FaceIdentityRepository,
       SearchRepository,
+      FaceSearchRepository,
       PersonRepository,
       ConfigRepository,
       SystemMetadataRepository,
@@ -66,6 +68,43 @@ describe('FaceRepairService.handleFaceRepairScan', () => {
     const { sut } = setup();
     const result = await sut.getLatestScanStatus();
     expect(result).toBeNull();
+  });
+
+  it('reports a running scan whose worker went silent as failed, so the console can retry it (#1105)', async () => {
+    const { sut } = setup();
+    const threeDaysAgo = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
+    await db
+      .insertInto('face_repair_scan')
+      .values({
+        status: 'running',
+        params: PARAMS,
+        progress: { processed: 120, total: 900, heartbeatAt: threeDaysAgo.toISOString() },
+        startedAt: threeDaysAgo,
+        createdAt: threeDaysAgo,
+      } as never)
+      .execute();
+
+    const latest = await sut.getLatestScanStatus();
+
+    expect(latest!.status).toBe('failed');
+    expect(latest!.error).toMatch(/stopped reporting progress/);
+  });
+
+  it('leaves a running scan with a recent heartbeat running (#1105)', async () => {
+    const { sut } = setup();
+    await db
+      .insertInto('face_repair_scan')
+      .values({
+        status: 'running',
+        params: PARAMS,
+        progress: { processed: 10, total: 900, heartbeatAt: new Date().toISOString() },
+        startedAt: new Date(Date.now() - 2 * 60 * 60 * 1000),
+      } as never)
+      .execute();
+
+    const latest = await sut.getLatestScanStatus();
+
+    expect(latest!.status).toBe('running');
   });
 
   it('clean instance: handleFaceRepairScan completes with empty report (no flagged faces), not failed', async () => {

@@ -1,16 +1,16 @@
 <script lang="ts">
-  import type { FilterState } from '$lib/components/filter-panel/filter-panel';
-  import SmartSearchResults from '$lib/components/search/smart-search-results.svelte';
+  import type { FilterState } from '#lib/components/filter-panel/filter-panel.ts';
+  import SmartSearchResults from '#lib/components/search/smart-search-results.svelte';
 
   /**
-   * Test host that reproduces how the album pages drive `SmartSearchResults`: `album` is `$state`
-   * and the scope is `$derived([album.id])`.
-   *
-   * This exists because `rerender` from @testing-library/svelte re-fires the component's mount
-   * effect even for literally identical props, so it cannot distinguish "the host re-derived the
-   * scope" from "the scope changed". Driving a real host is the only way to observe that
-   * difference.
-   */
+  Test host that reproduces how the album pages drive `SmartSearchResults`: `album` is `$state`
+  and the scope is `$derived([album.id])`.
+  
+  This exists because `rerender` from vitest-browser-svelte re-fires the component's mount
+  effect even for literally identical props, so it cannot distinguish "the host re-derived the
+  scope" from "the scope changed". Driving a real host is the only way to observe that
+  difference.
+  */
   interface Props {
     album: { id: string; name: string };
     filters: FilterState;

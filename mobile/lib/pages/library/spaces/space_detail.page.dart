@@ -4,6 +4,8 @@ import 'package:auto_route/auto_route.dart';
 import 'package:flutter/material.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:immich_mobile/domain/models/asset/base_asset.model.dart';
+import 'package:immich_mobile/gallery/search/search_scope.dart';
+import 'package:immich_mobile/gallery/search/widgets/search_frame.widget.dart';
 import 'package:immich_mobile/generated/translations.g.dart';
 import 'package:immich_mobile/presentation/widgets/bottom_sheet/space_bottom_sheet.widget.dart';
 import 'package:immich_mobile/presentation/widgets/spaces/space_detail_kebab.widget.dart';
@@ -27,7 +29,7 @@ import 'package:immich_mobile/widgets/spaces/sync_status_banner.dart';
 import 'package:openapi/api.dart';
 
 // The space timeline is served directly by the Drift
-// sharedSpace() query (see TimelineRepository.sharedSpace), so this page
+// sharedSpace() query (see SharedSpaceTimelineRepository.sharedSpace), so this page
 // no longer fetches assets over the network. Metadata + member list still
 // load from the API because they are not yet mirrored in Drift.
 
@@ -37,7 +39,7 @@ class SpaceDetailPage extends ConsumerStatefulWidget {
 
   const SpaceDetailPage({super.key, required this.spaceId});
 
-  static const timelineOverviewControlsEnabled = true;
+  // ignore: unused-code
   static double syncBannerTopSliverHeight({required bool isRemoteSyncing}) =>
       isRemoteSyncing ? kSyncStatusBannerSliverHeight : 0;
 
@@ -148,7 +150,7 @@ class _SpaceDetailPageState extends ConsumerState<SpaceDetailPage> {
       if (mounted) {
         ImmichToast.show(
           context: context,
-          msg: 'Added ${assetIds.length} photos to space',
+          msg: context.t.added_to_space_count(count: assetIds.length),
           toastType: ToastType.success,
         );
       }
@@ -162,7 +164,11 @@ class _SpaceDetailPageState extends ConsumerState<SpaceDetailPage> {
       await _refreshSpaceMetadata();
     } catch (e) {
       if (mounted) {
-        ImmichToast.show(context: context, msg: 'Failed to add photos', toastType: ToastType.error);
+        ImmichToast.show(
+          context: context,
+          msg: context.t.errors.error_adding_assets_to_space,
+          toastType: ToastType.error,
+        );
       }
     }
   }
@@ -202,12 +208,12 @@ class _SpaceDetailPageState extends ConsumerState<SpaceDetailPage> {
         await ref.read(sharedSpaceApiRepositoryProvider).delete(widget.spaceId);
         ref.invalidate(sharedSpacesProvider);
         if (mounted) {
-          ImmichToast.show(context: context, msg: 'Space deleted', toastType: ToastType.success);
+          ImmichToast.show(context: context, msg: context.t.spaces_deleted, toastType: ToastType.success);
           await context.maybePop();
         }
       } catch (e) {
         if (mounted) {
-          ImmichToast.show(context: context, msg: 'Failed to delete space', toastType: ToastType.error);
+          ImmichToast.show(context: context, msg: context.t.spaces_delete_failed, toastType: ToastType.error);
         }
       }
     }
@@ -254,7 +260,7 @@ class _SpaceDetailPageState extends ConsumerState<SpaceDetailPage> {
         });
         ImmichToast.show(
           context: context,
-          msg: newValue ? 'Space added to timeline' : 'Space removed from timeline',
+          msg: newValue ? context.t.spaces_added_to_timeline : context.t.spaces_removed_from_timeline,
           toastType: ToastType.success,
         );
       }
@@ -268,7 +274,11 @@ class _SpaceDetailPageState extends ConsumerState<SpaceDetailPage> {
     } catch (e) {
       if (mounted) {
         setState(() => _togglingTimeline = false);
-        ImmichToast.show(context: context, msg: 'Failed to update timeline setting', toastType: ToastType.error);
+        ImmichToast.show(
+          context: context,
+          msg: context.t.space_album_timeline_update_failed,
+          toastType: ToastType.error,
+        );
       }
     }
   }
@@ -416,21 +426,21 @@ class _SpaceDetailPageState extends ConsumerState<SpaceDetailPage> {
   Widget build(BuildContext context) {
     if (_loading) {
       return Scaffold(
-        appBar: AppBar(title: const Text('Space')),
+        appBar: AppBar(title: Text(context.t.spaces_space)),
         body: const Center(child: CircularProgressIndicator()),
       );
     }
 
     if (_error != null || _space == null) {
       return Scaffold(
-        appBar: AppBar(title: const Text('Space')),
+        appBar: AppBar(title: Text(context.t.spaces_space)),
         body: Center(
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
               const Icon(Icons.error_outline, size: 48),
               const SizedBox(height: 16),
-              Text('Failed to load space: ${_error ?? "Unknown error"}'),
+              Text(context.t.spaces_space_load_failed(error: _error ?? context.t.unknown)),
               const SizedBox(height: 16),
               ElevatedButton(
                 onPressed: () {
@@ -440,7 +450,7 @@ class _SpaceDetailPageState extends ConsumerState<SpaceDetailPage> {
                   });
                   unawaited(_loadData());
                 },
-                child: const Text('Retry'),
+                child: Text(context.t.retry),
               ),
             ],
           ),
@@ -454,28 +464,31 @@ class _SpaceDetailPageState extends ConsumerState<SpaceDetailPage> {
       timelineServiceBuilder: (ref, scope, groupBy) => ref
           .watch(timelineFactoryProvider)
           .sharedSpace(spaceId: widget.spaceId, groupBy: groupBy, temporalScope: scope),
+      search: SpaceSearchScope(widget.spaceId, name: _space!.name),
       child: Timeline(
         withGroupingPill: true,
         // Claims "view in timeline" requests addressed to this space, and leaves the
         // main timeline underneath alone (#1047).
         spaceId: widget.spaceId,
-        topSliverWidget: SpaceTopSliver(
-          spaceId: widget.spaceId,
-          canEdit: _canEdit,
-          // Opens the link picker.
-          onLinkTap: () => _openLinkPicker(),
-          // Tapping an album tile pushes the detail page.
-          onAlbumTap: (albumId) =>
-              context.pushRoute(SpaceAlbumDetailRoute(spaceId: widget.spaceId, albumId: albumId, canEdit: _canEdit)),
-          // "See all ▸" pushes the list/manage page, carrying the same link and
-          // mutation callbacks this page owns.
-          onSeeAll: () => context.pushRoute(
-            SpaceAlbumsRoute(
-              spaceId: widget.spaceId,
-              canEdit: _canEdit,
-              onLink: _openLinkPicker,
-              onToggle: _onToggleAlbumTimeline,
-              onUnlink: _onUnlinkAlbum,
+        topSliverWidget: HiddenWhileSearching(
+          sliver: SpaceTopSliver(
+            spaceId: widget.spaceId,
+            canEdit: _canEdit,
+            // Opens the link picker.
+            onLinkTap: () => _openLinkPicker(),
+            // Tapping an album tile pushes the detail page.
+            onAlbumTap: (albumId) =>
+                context.pushRoute(SpaceAlbumDetailRoute(spaceId: widget.spaceId, albumId: albumId, canEdit: _canEdit)),
+            // "See all ▸" pushes the list/manage page, carrying the same link and
+            // mutation callbacks this page owns.
+            onSeeAll: () => context.pushRoute(
+              SpaceAlbumsRoute(
+                spaceId: widget.spaceId,
+                canEdit: _canEdit,
+                onLink: _openLinkPicker,
+                onToggle: _onToggleAlbumTimeline,
+                onUnlink: _onUnlinkAlbum,
+              ),
             ),
           ),
         ),

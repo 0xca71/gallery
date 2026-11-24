@@ -7,8 +7,7 @@ select
   "asset_exif"."longitude" as "lon",
   "asset_exif"."city",
   "asset_exif"."state",
-  "asset_exif"."country",
-  "asset_exif"."formattedAddress"
+  "asset_exif"."country"
 from
   "asset"
   inner join "asset_exif" on "asset"."id" = "asset_exif"."assetId"
@@ -29,8 +28,7 @@ select
   "asset_exif"."longitude" as "lon",
   "asset_exif"."city",
   "asset_exif"."state",
-  "asset_exif"."country",
-  "asset_exif"."formattedAddress"
+  "asset_exif"."country"
 from
   "asset"
   inner join "asset_exif" on "asset"."id" = "asset_exif"."assetId"

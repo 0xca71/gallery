@@ -17,6 +17,7 @@ import {
   SyncEntityType,
   SyncRequestType,
 } from 'src/enum.js';
+import { AssetVisibilityTransitionService } from 'src/gallery/services/asset-visibility-transition.service.js';
 import { AccessRepository } from 'src/repositories/access.repository.js';
 import { AlbumRepository } from 'src/repositories/album.repository.js';
 import { AssetEditRepository } from 'src/repositories/asset-edit.repository.js';
@@ -33,6 +34,7 @@ import { SharedSpaceRepository } from 'src/repositories/shared-space.repository.
 import { StackRepository } from 'src/repositories/stack.repository.js';
 import { StorageRepository } from 'src/repositories/storage.repository.js';
 import { UserRepository } from 'src/repositories/user.repository.js';
+import { WebsocketRepository } from 'src/repositories/websocket.repository.js';
 import { DB } from 'src/schema/index.js';
 import { AssetService } from 'src/services/asset.service.js';
 import { SyncTestContext, newMediumService } from 'test/medium.factory.js';
@@ -40,6 +42,7 @@ import { getKyselyDB } from 'test/utils.js';
 
 let defaultDatabase: Kysely<DB>;
 
+// eslint-disable-next-line unicorn/no-unnecessary-parameters
 const setup = async (db?: Kysely<DB>) => {
   const ctx = new SyncTestContext(db || defaultDatabase);
   const { auth, user, session } = await ctx.newSyncAuthUser();
@@ -63,8 +66,18 @@ const setupAssetService = (db?: Kysely<DB>) => {
       StackRepository,
       UserRepository,
     ],
-    mock: [EventRepository, LoggingRepository, JobRepository, StorageRepository, OcrRepository, MapRepository],
+    mock: [
+      EventRepository,
+      LoggingRepository,
+      JobRepository,
+      StorageRepository,
+      OcrRepository,
+      MapRepository,
+      WebsocketRepository,
+    ],
   });
+  // immich-31777 pushes on_asset_update when updateAll writes no metadata (a visibility-only change).
+  ctx.getMock(WebsocketRepository).clientSend.mockReturnValue();
   ctx.getMock(JobRepository).queueAll.mockResolvedValue();
   return { sut, ctx };
 };
@@ -270,7 +283,7 @@ describe('Boundary-crossing purge gate (correctness-8 / M3 retry-convergence)', 
 });
 
 // M13: the #757 motion-photo purge (and the Slice-7 M3 motion retry fix) was pinned only by mock-called
-// unit tests (asset.service.spec.ts's "onAssetHide / onAssetShow" describe block calls `sut.onAssetHide(...)`
+// unit tests (asset-visibility-transition.service.spec.ts's "onAssetHide / onAssetShow" describe block calls `sut.onAssetHide(...)`
 // directly and asserts `mocks.sharedSpace.emit*` was called; metadata.service.spec.ts mocks
 // `eventRepository.emit` and asserts it was called with 'AssetHide'). Neither test exercises the real
 // `@OnEvent({ name: 'AssetHide' })` registration or a real EventRepository dispatch — a renamed event name,
@@ -278,18 +291,22 @@ describe('Boundary-crossing purge gate (correctness-8 / M3 retry-convergence)', 
 // in metadata.service.ts would keep every one of those unit tests green while a motion video silently
 // stopped purging off member devices.
 //
-// setupRealAssetHideSeam wires AssetService's onAssetHide/onAssetShow into a REAL EventRepository via
+// setupRealAssetHideSeam wires AssetVisibilityTransitionService's onAssetHide/onAssetShow into a REAL EventRepository via
 // EventRepository.setup() — the SAME reflection-based discovery app.module.ts runs once at boot
 // (`this.eventRepository.setup({ services })`) — against a fake ModuleRef that resolves only the two
-// tokens setup() needs (Reflector + the AssetService instance). Reflector itself is real: it has no DI
+// tokens setup() needs (Reflector + the AssetVisibilityTransitionService instance). Reflector itself is real: it has no DI
 // dependencies of its own (it's a thin `Reflect.getMetadata` wrapper — see
 // @nestjs/core/services/reflector.service.js), so this is genuine production wiring, not a hand-picked
 // handler bind like the real-EventRepository pattern used elsewhere in this suite (see
 // shared-space-album.service.spec.ts's setupWithAlbumDelete, which registers `emitHandlers['AlbumDelete']`
 // directly and would NOT notice a missing/renamed `@OnEvent` decorator). Removing or renaming
-// `@OnEvent({ name: 'AssetHide' })` on asset.service.ts is NOT registered here either — proven below.
+// `@OnEvent({ name: 'AssetHide' })` on asset-visibility-transition.service.ts is NOT registered here either — proven below.
 const setupRealAssetHideSeam = (db: Kysely<DB>) => {
-  const { sut: assetSut } = setupAssetService(db);
+  const { sut: transitionSut } = newMediumService(AssetVisibilityTransitionService, {
+    database: db,
+    real: [AlbumRepository, SharedSpaceRepository],
+    mock: [LoggingRepository],
+  });
 
   const reflector = new Reflector();
   const fakeModuleRef = {
@@ -297,8 +314,8 @@ const setupRealAssetHideSeam = (db: Kysely<DB>) => {
       if (token === Reflector) {
         return reflector;
       }
-      if (token === AssetService) {
-        return assetSut;
+      if (token === AssetVisibilityTransitionService) {
+        return transitionSut;
       }
       throw new Error(`setupRealAssetHideSeam: unexpected ModuleRef.get(${String(token)})`);
     },
@@ -306,7 +323,7 @@ const setupRealAssetHideSeam = (db: Kysely<DB>) => {
   const fakeConfigRepository = { getWorker: () => ImmichWorker.Api } as unknown as ConfigRepository;
 
   const realEventRepo = new EventRepository(fakeModuleRef, fakeConfigRepository, LoggingRepository.create());
-  realEventRepo.setup({ services: [AssetService] });
+  realEventRepo.setup({ services: [AssetVisibilityTransitionService] });
 
   return { realEventRepo };
 };

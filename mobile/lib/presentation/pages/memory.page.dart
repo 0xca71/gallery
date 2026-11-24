@@ -8,12 +8,12 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:immich_mobile/domain/models/asset/base_asset.model.dart';
 import 'package:immich_mobile/domain/models/memory.model.dart';
+import 'package:immich_mobile/gallery/memories/memory_motion.dart';
 import 'package:immich_mobile/presentation/widgets/images/image_provider.dart';
 import 'package:immich_mobile/presentation/widgets/memory/memory_bottom_info.widget.dart';
 import 'package:immich_mobile/presentation/widgets/memory/memory_card.widget.dart';
 import 'package:immich_mobile/providers/asset_viewer/asset_viewer.provider.dart';
 import 'package:immich_mobile/providers/haptic_feedback.provider.dart';
-import 'package:immich_mobile/utils/memory_card_text.dart';
 import 'package:immich_mobile/utils/system_ui.utils.dart';
 import 'package:immich_mobile/widgets/memories/memory_epilogue.dart';
 import 'package:immich_mobile/widgets/memories/memory_progress_indicator.dart';
@@ -54,16 +54,16 @@ class MemoryPage extends HookConsumerWidget {
         // Clean up to normal edge to edge when we are done
         unawaited(restoreEdgeToEdge());
       };
-    });
+    }, const []);
 
     void toNextMemory() {
-      unawaited(memoryPageController.nextPage(duration: const Duration(milliseconds: 500), curve: Curves.easeIn));
+      unawaited(memoryPageController.nextPage(duration: MemoryMotion.memoryDuration, curve: MemoryMotion.curve));
     }
 
     void toPreviousMemory() {
       if (currentMemoryIndex.value > 0) {
         // Move to the previous memory page
-        unawaited(memoryPageController.previousPage(duration: const Duration(milliseconds: 500), curve: Curves.easeIn));
+        unawaited(memoryPageController.previousPage(duration: MemoryMotion.memoryDuration, curve: MemoryMotion.curve));
 
         // Wait for the next frame to ensure the page is built
         SchedulerBinding.instance.addPostFrameCallback((_) {
@@ -90,7 +90,7 @@ class MemoryPage extends HookConsumerWidget {
         // Go to the next asset
         final PageController controller = memoryAssetPageControllers[currentMemoryIndex.value];
 
-        unawaited(controller.nextPage(curve: Curves.easeInOut, duration: const Duration(milliseconds: 500)));
+        unawaited(controller.nextPage(curve: MemoryMotion.curve, duration: MemoryMotion.assetDuration));
       } else {
         // Go to the next memory since we are at the end of our assets
         toNextMemory();
@@ -102,7 +102,7 @@ class MemoryPage extends HookConsumerWidget {
         // Go to the previous asset
         final PageController controller = memoryAssetPageControllers[currentMemoryIndex.value];
 
-        unawaited(controller.previousPage(curve: Curves.easeInOut, duration: const Duration(milliseconds: 500)));
+        unawaited(controller.previousPage(curve: MemoryMotion.curve, duration: MemoryMotion.assetDuration));
       } else {
         // Go to the previous memory since we are at the end of our assets
         toPreviousMemory();
@@ -166,7 +166,7 @@ class MemoryPage extends HookConsumerWidget {
       final activeMemory = currentMemory.value;
 
       // Wait for page change animation to finish
-      await Future.delayed(const Duration(milliseconds: 400));
+      await Future.delayed(MemoryMotion.assetDuration);
 
       // check if memory is still the same and if context is still mounted
       if (currentMemory.value != activeMemory || !context.mounted) {
@@ -211,7 +211,7 @@ class MemoryPage extends HookConsumerWidget {
         backgroundColor: bgColor,
         body: SafeArea(
           child: PageView.builder(
-            physics: const BouncingScrollPhysics(parent: AlwaysScrollableScrollPhysics()),
+            physics: const MemoryPagePhysics(parent: AlwaysScrollableScrollPhysics()),
             scrollDirection: Axis.vertical,
             controller: memoryPageController,
             onPageChanged: (pageNumber) {
@@ -241,13 +241,12 @@ class MemoryPage extends HookConsumerWidget {
                 return MemoryEpilogue(
                   onStartOver: () => memoryPageController.animateToPage(
                     0,
-                    duration: const Duration(seconds: 1),
-                    curve: Curves.easeInOut,
+                    duration: MemoryMotion.startOverDuration,
+                    curve: MemoryMotion.curve,
                   ),
                 );
               }
 
-              final title = getMemoryTitle(context, memories[mIndex]);
               // Build horizontal page
               final assetController = memoryAssetPageControllers[mIndex];
               return Column(
@@ -273,7 +272,7 @@ class MemoryPage extends HookConsumerWidget {
                     child: Stack(
                       children: [
                         PageView.builder(
-                          physics: const BouncingScrollPhysics(parent: AlwaysScrollableScrollPhysics()),
+                          physics: const MemoryPagePhysics(parent: AlwaysScrollableScrollPhysics()),
                           controller: assetController,
                           onPageChanged: onAssetChanged,
                           scrollDirection: Axis.horizontal,
@@ -286,7 +285,7 @@ class MemoryPage extends HookConsumerWidget {
                                   color: Colors.black,
                                   child: MemoryCard(
                                     asset: asset,
-                                    title: title,
+                                    memory: memories[mIndex],
                                     showTitle: index == 0,
                                     isCurrent: mIndex == currentMemoryIndex.value && index == currentAssetPage.value,
                                   ),
@@ -347,14 +346,15 @@ class MemoryPage extends HookConsumerWidget {
                       ],
                     ),
                   ),
-                  MemoryBottomInfo(
-                    // currentAssetPage tracks the ACTIVE memory only; other pages in
-                    // the vertical PageView show their own first asset.
-                    asset: memoryAssetForPage(
-                      memories[mIndex],
-                      mIndex == currentMemoryIndex.value ? currentAssetPage.value : 0,
-                    ),
-                    title: title,
+                  AnimatedBuilder(
+                    animation: assetController,
+                    builder: (context, child) {
+                      int assetIndex = 0;
+                      if (assetController.hasClients) {
+                        assetIndex = (assetController.page ?? 0).round().clamp(0, memories[mIndex].assets.length - 1);
+                      }
+                      return MemoryBottomInfo(memory: memories[mIndex], asset: memories[mIndex].assets[assetIndex]);
+                    },
                   ),
                 ],
               );

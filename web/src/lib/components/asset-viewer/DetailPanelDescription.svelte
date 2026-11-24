@@ -1,7 +1,7 @@
 <script lang="ts">
-  import { shortcut } from '$lib/actions/shortcut';
-  import { applyContextualFilter } from '$lib/utils/filter-target';
-  import { handleError } from '$lib/utils/handle-error';
+  import { shortcut } from '#lib/actions/shortcut.ts';
+  import { applyContextualFilter } from '#lib/utils/filter-target.ts';
+  import { handleError } from '#lib/utils/handle-error.ts';
   import { updateAsset, type AssetResponseDto } from '@immich/sdk';
   import { IconButton, Textarea, toastManager } from '@immich/ui';
   import { mdiFilterOutline } from '@mdi/js';
@@ -20,17 +20,17 @@
   let description = $derived(asset.exifInfo?.description ?? '');
 
   /**
-   * R6 — for the owner the description IS a focusable <Textarea> (clicking it places the caret), so
-   * the filter cannot live on the value. It gets its own icon.
-   *
-   * R9 — and only when there is something to filter by: an empty or whitespace-only description
-   * trims to nothing (filter-url.ts's setTrimmed), so the click would close the asset viewer and
-   * apply no filter at all. No truncation here on purpose either — the codec already clamps to 200
-   * CODE POINTS on both encode and decode.
-   *
-   * The click reads the CURRENT value: a pointer-down on the icon fires the textarea's focusout
-   * first, so an edit the user just typed is saved by the very same interaction that filters by it.
-   */
+  R6 — for the owner the description IS a focusable <Textarea> (clicking it places the caret), so
+  the filter cannot live on the value. It gets its own icon.
+  
+  R9 — and only when there is something to filter by: an empty or whitespace-only description
+  trims to nothing (filter-url.ts's setTrimmed), so the click would close the asset viewer and
+  apply no filter at all. No truncation here on purpose either — the codec already clamps to 200
+  CODE POINTS on both encode and decode.
+  
+  The click reads the CURRENT value: a pointer-down on the icon fires the textarea's focusout
+  first, so an edit the user just typed is saved by the very same interaction that filters by it.
+  */
   let filterableDescription = $derived(description.trim());
 
   const handleFocusOut = async () => {
@@ -66,7 +66,7 @@
     <div class="min-w-0 flex-1">
       <Textarea
         bind:value={description}
-        class="max-h-40 resize-none border-b border-gray-500 bg-transparent pl-0 ring-0 outline-none focus:border-b-2 focus:border-immich-primary focus:ring-0 dark:bg-transparent dark:focus:border-immich-dark-primary"
+        class="max-h-40 resize-none border-b border-gray-500 bg-transparent ps-0 ring-0 outline-none focus:border-b-2 focus:border-immich-primary focus:ring-0 dark:bg-transparent dark:focus:border-immich-dark-primary"
         rows={1}
         grow
         shape="rectangle"

@@ -1,10 +1,11 @@
 import { BadRequestException, InternalServerErrorException, NotFoundException } from '@nestjs/common';
 import { Readable } from 'node:stream';
 import { DiskStorageBackend } from 'src/backends/disk-storage.backend.js';
-import { StorageCore } from 'src/cores/storage.core.js';
 import { UserAdmin } from 'src/database.js';
 import { CacheControl, JobName, JobStatus, UserMetadataKey } from 'src/enum.js';
-import { StorageService } from 'src/services/storage.service.js';
+import { storageBackends } from 'src/gallery/utils/storage-backends.js';
+import { getRelativeProfileImagePath } from 'src/gallery/utils/storage-keys.js';
+import { StorageRepository } from 'src/repositories/storage.repository.js';
 import { UserService } from 'src/services/user.service.js';
 import { clearConfigCache } from 'src/utils/config.js';
 import { ImmichFileResponse } from 'src/utils/file.js';
@@ -36,7 +37,7 @@ describe(UserService.name, () => {
   let mocks: ServiceMocks;
 
   beforeAll(() => {
-    (StorageService as any).diskBackend = new DiskStorageBackend('/data');
+    (storageBackends as any).diskBackend = new DiskStorageBackend('/data', {} as StorageRepository);
   });
 
   beforeEach(() => {
@@ -212,23 +213,6 @@ describe(UserService.name, () => {
       expect(mocks.user.update).not.toHaveBeenCalled();
     });
 
-    it('should hash and update password', async () => {
-      const user = factory.userAdmin();
-      const auth = factory.auth({ user });
-      mocks.user.update.mockResolvedValue({ ...user, shouldChangePassword: false });
-
-      await sut.updateMe(auth, { password: 'new-password' });
-
-      expect(mocks.crypto.hashBcrypt).toHaveBeenCalledWith('new-password', expect.any(Number));
-      expect(mocks.user.update).toHaveBeenCalledWith(
-        user.id,
-        expect.objectContaining({
-          password: expect.any(String),
-          shouldChangePassword: false,
-        }),
-      );
-    });
-
     it('should update avatarColor', async () => {
       const user = factory.userAdmin();
       const auth = factory.auth({ user });
@@ -350,8 +334,13 @@ describe(UserService.name, () => {
 
       await sut.createProfileImage(factory.auth({ user }), file);
 
-      expect(mocks.media.extractFrame).not.toHaveBeenCalled();
-      expect(mocks.media.generateThumbnail).toHaveBeenCalledWith(file.path, expect.any(Object), expect.any(String));
+      expect(mocks.videoTrim.extractFrame).not.toHaveBeenCalled();
+      expect(mocks.media.decodeImage).toHaveBeenCalledWith(file.path, expect.any(Object));
+      expect(mocks.media.generateThumbnail).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.any(Object),
+        expect.any(String),
+      );
     });
 
     describe('with S3 write backend', () => {
@@ -362,13 +351,13 @@ describe(UserService.name, () => {
           put: vi.fn().mockResolvedValue(void 0),
           getServeStrategy: vi.fn(),
         };
-        (StorageService as any).s3Backend = mockS3Backend;
-        (StorageService as any).writeBackendType = 's3';
+        (storageBackends as any).s3Backend = mockS3Backend;
+        (storageBackends as any).writeBackendType = 's3';
       });
 
       afterEach(() => {
-        (StorageService as any).s3Backend = void 0;
-        (StorageService as any).writeBackendType = 'disk';
+        (storageBackends as any).s3Backend = void 0;
+        (storageBackends as any).writeBackendType = 'disk';
       });
 
       it('should upload profile image to S3 and store relative path', async () => {
@@ -376,7 +365,7 @@ describe(UserService.name, () => {
         const file = { path: '/data/profile/user-id/temp-file.jpg', originalname: 'avatar.jpg' } as Express.Multer.File;
         // The profile image is run through the thumbnail pipeline, which generates a
         // new file named `{uuid}.{thumbnail-format}`. The default thumbnail format is webp.
-        const relativeKey = StorageCore.getRelativeProfileImagePath(user.id, 'random-uuid.webp');
+        const relativeKey = getRelativeProfileImagePath(user.id, 'random-uuid.webp');
 
         mocks.user.get.mockResolvedValue(user);
         mocks.user.update.mockResolvedValue({ ...user, profileImagePath: relativeKey, profileChangedAt: new Date() });
@@ -400,7 +389,7 @@ describe(UserService.name, () => {
         } as Express.Multer.File;
         // Regardless of upload mime, the S3 content type matches the generated thumbnail
         // file extension (default: webp). This guards `mimeTypes.lookup(profileImagePath)`.
-        const relativeKey = StorageCore.getRelativeProfileImagePath(user.id, 'random-uuid.webp');
+        const relativeKey = getRelativeProfileImagePath(user.id, 'random-uuid.webp');
 
         mocks.user.get.mockResolvedValue(user);
         mocks.user.update.mockResolvedValue({ ...user, profileImagePath: relativeKey, profileChangedAt: new Date() });
@@ -486,7 +475,7 @@ describe(UserService.name, () => {
       it('should return response with relative S3 path', async () => {
         const user = factory.userAdmin({ profileImagePath: '' });
         const file = { path: '/data/profile/user-id/temp-file.jpg', originalname: 'avatar.jpg' } as Express.Multer.File;
-        const relativeKey = StorageCore.getRelativeProfileImagePath(user.id, 'temp-file.jpg');
+        const relativeKey = getRelativeProfileImagePath(user.id, 'temp-file.jpg');
         const profileChangedAt = new Date();
 
         mocks.user.get.mockResolvedValue(user);
@@ -553,7 +542,7 @@ describe(UserService.name, () => {
         profileImagePath: '',
         profileChangedAt: expect.any(Date),
       });
-      // FileDelete handler uses resolveBackendForKey to route relative paths to S3
+      // FileDelete handler uses backendFor to route relative paths to S3
       expect(mocks.job.queue).toHaveBeenCalledWith({
         name: JobName.FileDelete,
         data: { files: [s3Path] },
@@ -850,25 +839,71 @@ describe(UserService.name, () => {
 
       beforeEach(() => {
         mockS3Backend = { deletePrefix: vi.fn().mockResolvedValue(void 0) };
-        (StorageService as any).s3Backend = mockS3Backend;
+        (storageBackends as any).s3Backend = mockS3Backend;
+        mocks.storageMigration.hasOtherOwnerFilesUnderPrefix.mockResolvedValue(false);
       });
 
       afterEach(() => {
-        (StorageService as any).s3Backend = void 0;
+        (storageBackends as any).s3Backend = void 0;
       });
 
-      it('should delete the four user-scoped S3 prefixes in addition to disk folders', async () => {
+      it('should delete the five user-scoped S3 prefixes in addition to disk folders', async () => {
         const user = { id: 'deleted-s3-user', deletedAt: makeDeletedAt(10) } as UserAdmin;
         mocks.user.get.mockResolvedValue(user);
 
         await sut.handleUserDelete({ id: user.id });
 
         expect(mocks.storage.unlinkDir).toHaveBeenCalledTimes(5);
-        expect(mockS3Backend.deletePrefix).toHaveBeenCalledTimes(4);
-        expect(mockS3Backend.deletePrefix).toHaveBeenCalledWith(`upload/${user.id}/`);
-        expect(mockS3Backend.deletePrefix).toHaveBeenCalledWith(`profile/${user.id}/`);
-        expect(mockS3Backend.deletePrefix).toHaveBeenCalledWith(`thumbs/${user.id}/`);
-        expect(mockS3Backend.deletePrefix).toHaveBeenCalledWith(`encoded-video/${user.id}/`);
+        expect(mocks.storageMigration.hasOtherOwnerFilesUnderPrefix).toHaveBeenCalledExactlyOnceWith(
+          `library/${user.id}/`,
+          user.id,
+        );
+        expect(mockS3Backend.deletePrefix.mock.calls).toEqual([
+          [`library/${user.id}/`],
+          [`upload/${user.id}/`],
+          [`profile/${user.id}/`],
+          [`thumbs/${user.id}/`],
+          [`encoded-video/${user.id}/`],
+        ]);
+      });
+
+      it('should delete the S3 library prefix under the storage label, as the disk library folder', async () => {
+        // the storage template and a disk-to-S3 storage migration write originals to library/<label>/
+        const user = { id: 'deleted-s3-user', deletedAt: makeDeletedAt(10), storageLabel: 'admin' } as UserAdmin;
+        mocks.user.get.mockResolvedValue(user);
+
+        await sut.handleUserDelete({ id: user.id });
+
+        expect(mocks.storage.unlinkDir).toHaveBeenCalledWith(expect.stringContaining('data/library/admin'), {
+          force: true,
+          recursive: true,
+        });
+        expect(mockS3Backend.deletePrefix).toHaveBeenCalledWith('library/admin/');
+        expect(mockS3Backend.deletePrefix).not.toHaveBeenCalledWith(`library/${user.id}/`);
+        expect(mockS3Backend.deletePrefix).not.toHaveBeenCalledWith(expect.stringMatching(/^backups/));
+      });
+
+      it('should keep the S3 library prefix while another user has assets stored under the label', async () => {
+        // the label was changed without running the template migration and handed to this user: library/admin/
+        // still holds the first user's live originals
+        const user = { id: 'deleted-s3-user', deletedAt: makeDeletedAt(10), storageLabel: 'admin' } as UserAdmin;
+        mocks.user.get.mockResolvedValue(user);
+        mocks.storageMigration.hasOtherOwnerFilesUnderPrefix.mockResolvedValue(true);
+
+        await sut.handleUserDelete({ id: user.id });
+
+        expect(mocks.storageMigration.hasOtherOwnerFilesUnderPrefix).toHaveBeenCalledExactlyOnceWith(
+          'library/admin/',
+          user.id,
+        );
+        expect(mockS3Backend.deletePrefix.mock.calls).toEqual([
+          [`upload/${user.id}/`],
+          [`profile/${user.id}/`],
+          [`thumbs/${user.id}/`],
+          [`encoded-video/${user.id}/`],
+        ]);
+        expect(mocks.logger.warn).toHaveBeenCalledWith(expect.stringContaining('Skipped S3 prefix library/admin/'));
+        expect(mocks.user.delete).toHaveBeenCalledWith(user, true);
       });
 
       it('should still attempt remaining prefixes, disk deletion, and DB cleanup when one S3 prefix fails', async () => {
@@ -878,11 +913,12 @@ describe(UserService.name, () => {
           .mockResolvedValueOnce(void 0)
           .mockRejectedValueOnce(new Error('throttled'))
           .mockResolvedValueOnce(void 0)
+          .mockResolvedValueOnce(void 0)
           .mockResolvedValueOnce(void 0);
 
         await sut.handleUserDelete({ id: user.id });
 
-        expect(mockS3Backend.deletePrefix).toHaveBeenCalledTimes(4);
+        expect(mockS3Backend.deletePrefix).toHaveBeenCalledTimes(5);
         expect(mocks.storage.unlinkDir).toHaveBeenCalledTimes(5);
         expect(mocks.album.deleteAll).toHaveBeenCalledWith(user.id);
         expect(mocks.user.delete).toHaveBeenCalledWith(user, true);
@@ -893,12 +929,13 @@ describe(UserService.name, () => {
     it('should not reach any S3 backend when S3 is not configured (regression guard)', async () => {
       const user = { id: 'disk-only-user', deletedAt: makeDeletedAt(10) } as UserAdmin;
       mocks.user.get.mockResolvedValue(user);
-      expect((StorageService as any).s3Backend).toBeUndefined();
+      expect((storageBackends as any).s3Backend).toBeUndefined();
 
       await sut.handleUserDelete({ id: user.id });
 
       expect(mocks.storage.unlinkDir).toHaveBeenCalledTimes(5);
-      expect((StorageService as any).s3Backend).toBeUndefined();
+      expect((storageBackends as any).s3Backend).toBeUndefined();
+      expect(mocks.storageMigration.hasOtherOwnerFilesUnderPrefix).not.toHaveBeenCalled();
     });
 
     it('should emit AlbumDelete for each owned album before albumRepository.deleteAll (faces F2)', async () => {
@@ -950,7 +987,7 @@ describe(UserService.name, () => {
 
   describe('handleUserSyncUsage', () => {
     afterEach(() => {
-      (StorageService as any).s3Backend = undefined;
+      (storageBackends as any).s3Backend = undefined;
     });
 
     it('should sync usage from S3 prefixes and existing disk folders', async () => {
@@ -961,14 +998,14 @@ describe(UserService.name, () => {
           .mockResolvedValueOnce(100)
           .mockResolvedValueOnce(200)
           .mockResolvedValueOnce(300)
-          .mockResolvedValueOnce(400),
+          .mockResolvedValueOnce(400)
+          .mockResolvedValueOnce(500),
       };
-      (StorageService as any).s3Backend = s3Backend;
+      (storageBackends as any).s3Backend = s3Backend;
       mocks.systemMetadata.get.mockResolvedValue({ storageUsage: { includeDerivatives: true } });
-      (mocks.user as any).setUsage = vi.fn().mockResolvedValue(void 0);
       mocks.user.getList.mockResolvedValue([user]);
-      mocks.asset.getExternalAssetIds.mockResolvedValue(new Set<string>());
-      mocks.storage.getFolderSize
+      mocks.galleryAsset.getExternalAssetIds.mockResolvedValue(new Set<string>());
+      mocks.storageUsage.getFolderSize
         .mockResolvedValueOnce(10)
         .mockResolvedValueOnce(20)
         .mockResolvedValueOnce(30)
@@ -977,7 +1014,7 @@ describe(UserService.name, () => {
 
       await sut.handleUserSyncUsage();
 
-      expect(mocks.storage.getFolderSize.mock.calls).toEqual([
+      expect(mocks.storageUsage.getFolderSize.mock.calls).toEqual([
         ['/data/library/storage-label'],
         ['/data/upload/user-id'],
         ['/data/profile/user-id'],
@@ -985,21 +1022,21 @@ describe(UserService.name, () => {
         ['/data/encoded-video/user-id', expect.any(Function)],
       ]);
       expect(s3Backend.getPrefixUsage.mock.calls).toEqual([
+        ['library/storage-label/'],
         ['upload/user-id/'],
         ['profile/user-id/'],
         ['thumbs/user-id/', expect.any(Function)],
         ['encoded-video/user-id/', expect.any(Function)],
       ]);
-      expect((mocks.user as any).setUsage).toHaveBeenCalledWith(user.id, 1150);
+      expect(mocks.storageUsage.setUsage).toHaveBeenCalledWith(user.id, 1650);
     });
 
     it('should sync disk usage from all managed user folders', async () => {
       const user = factory.userAdmin({ id: 'user-id', storageLabel: 'storage-label' });
       mocks.systemMetadata.get.mockResolvedValue({ storageUsage: { includeDerivatives: true } });
-      (mocks.user as any).setUsage = vi.fn().mockResolvedValue(void 0);
       mocks.user.getList.mockResolvedValue([user]);
-      mocks.asset.getExternalAssetIds.mockResolvedValue(new Set<string>());
-      mocks.storage.getFolderSize
+      mocks.galleryAsset.getExternalAssetIds.mockResolvedValue(new Set<string>());
+      mocks.storageUsage.getFolderSize
         .mockResolvedValueOnce(100)
         .mockResolvedValueOnce(200)
         .mockResolvedValueOnce(300)
@@ -1008,18 +1045,17 @@ describe(UserService.name, () => {
 
       await sut.handleUserSyncUsage();
 
-      expect(mocks.storage.getFolderSize.mock.calls).toEqual([
+      expect(mocks.storageUsage.getFolderSize.mock.calls).toEqual([
         ['/data/library/storage-label'],
         ['/data/upload/user-id'],
         ['/data/profile/user-id'],
         ['/data/thumbs/user-id', expect.any(Function)],
         ['/data/encoded-video/user-id', expect.any(Function)],
       ]);
-      expect((mocks.user as any).setUsage).toHaveBeenCalledWith(user.id, 1500);
+      expect(mocks.storageUsage.setUsage).toHaveBeenCalledWith(user.id, 1500);
     });
 
     it('should return JobStatus.Success', async () => {
-      (mocks.user as any).setUsage = vi.fn().mockResolvedValue(void 0);
       mocks.user.getList.mockResolvedValue([]);
 
       const result = await sut.handleUserSyncUsage();
@@ -1030,14 +1066,13 @@ describe(UserService.name, () => {
     it('should write the walked figure into quota usage and skip the originals-only statement', async () => {
       const user = factory.userAdmin({ id: 'user-id', storageLabel: 'storage-label' });
       mocks.systemMetadata.get.mockResolvedValue({ storageUsage: { includeDerivatives: true } });
-      (mocks.user as any).setUsage = vi.fn().mockResolvedValue(void 0);
       mocks.user.getList.mockResolvedValue([user]);
-      mocks.asset.getExternalAssetIds.mockResolvedValue(new Set<string>());
-      mocks.storage.getFolderSize.mockResolvedValue(100);
+      mocks.galleryAsset.getExternalAssetIds.mockResolvedValue(new Set<string>());
+      mocks.storageUsage.getFolderSize.mockResolvedValue(100);
 
       await expect(sut.handleUserSyncUsage()).resolves.toBe(JobStatus.Success);
 
-      expect((mocks.user as any).setUsage).toHaveBeenCalledWith(user.id, 500);
+      expect(mocks.storageUsage.setUsage).toHaveBeenCalledWith(user.id, 500);
       // Both write quotaUsageInBytes, so running upstream's statement as well would overwrite the
       // walked figure with the originals-only one.
       expect(mocks.user.syncUsage).not.toHaveBeenCalled();
@@ -1046,29 +1081,27 @@ describe(UserService.name, () => {
     it('should skip the physical walk entirely when the toggle is off', async () => {
       const user = factory.userAdmin({ id: 'user-id', storageLabel: 'storage-label' });
       mocks.systemMetadata.get.mockResolvedValue({ storageUsage: { includeDerivatives: false } });
-      (mocks.user as any).setUsage = vi.fn().mockResolvedValue(void 0);
       mocks.user.getList.mockResolvedValue([user]);
 
       await expect(sut.handleUserSyncUsage()).resolves.toBe(JobStatus.Success);
 
       // the nightly job syncs every user, so the repository is called without an id filter
       expect(mocks.user.syncUsage).toHaveBeenCalledWith(undefined);
-      expect(mocks.storage.getFolderSize).not.toHaveBeenCalled();
-      expect((mocks.user as any).setUsage).not.toHaveBeenCalled();
+      expect(mocks.storageUsage.getFolderSize).not.toHaveBeenCalled();
+      expect(mocks.storageUsage.setUsage).not.toHaveBeenCalled();
     });
 
     it('should exclude derivatives belonging to external library assets', async () => {
       const externalId = '0f9b1e2c-4a5d-4c8e-9f10-2b3c4d5e6f70';
       const user = factory.userAdmin({ id: 'user-id', storageLabel: 'storage-label' });
       mocks.systemMetadata.get.mockResolvedValue({ storageUsage: { includeDerivatives: true } });
-      (mocks.user as any).setUsage = vi.fn().mockResolvedValue(void 0);
       mocks.user.getList.mockResolvedValue([user]);
-      mocks.asset.getExternalAssetIds.mockResolvedValue(new Set([externalId]));
-      mocks.storage.getFolderSize.mockResolvedValue(0);
+      mocks.galleryAsset.getExternalAssetIds.mockResolvedValue(new Set([externalId]));
+      mocks.storageUsage.getFolderSize.mockResolvedValue(0);
 
       await sut.handleUserSyncUsage();
 
-      const thumbsCall = mocks.storage.getFolderSize.mock.calls.find(([folder]) => folder.includes('thumbs'))!;
+      const thumbsCall = mocks.storageUsage.getFolderSize.mock.calls.find(([folder]) => folder.includes('thumbs'))!;
       const shouldCount = thumbsCall[1] as (filename: string) => boolean;
       expect(shouldCount(`${externalId}_preview.webp`)).toBe(false);
       expect(shouldCount('0f9b1e2c-4a5d-4c8e-9f10-2b3c4d5e6f71_preview.webp')).toBe(true);

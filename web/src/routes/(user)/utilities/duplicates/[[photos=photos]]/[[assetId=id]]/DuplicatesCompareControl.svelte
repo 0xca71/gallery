@@ -1,28 +1,24 @@
 <script lang="ts">
-  import { lazyComponent } from '$lib/utils/lazy-component.svelte';
-  import { shortcuts } from '$lib/actions/shortcut';
-  import type {
-    SlideshowRandomAssetResolver,
-    SlideshowStepAssetResolver,
-  } from '$lib/components/asset-viewer/AssetViewer.svelte';
-  import DuplicateAsset from './DuplicateAsset.svelte';
-  import Portal from '$lib/elements/Portal.svelte';
-  import { assetViewerManager } from '$lib/managers/asset-viewer-manager.svelte';
-  import { authManager } from '$lib/managers/auth-manager.svelte';
-  import { handlePromiseError } from '$lib/utils';
-  import { getNextAsset, getPreviousAsset } from '$lib/utils/asset-utils';
+  import { shortcuts } from '#lib/actions/shortcut.ts';
+  import Portal from '#lib/elements/Portal.svelte';
+  import { assetViewerManager } from '#lib/managers/asset-viewer-manager.svelte.ts';
+  import { authManager } from '#lib/managers/auth-manager.svelte.ts';
+  import { handlePromiseError } from '#lib/utils.ts';
+  import { getNextAsset, getPreviousAsset } from '#lib/utils/asset-utils.ts';
   import {
     computeDifferingMetadataFields,
     countDifferingMetadataItems,
     type DifferingMetadataFields,
-  } from '$lib/utils/duplicate-utils';
-  import { navigate } from '$lib/utils/navigation';
+  } from '#lib/utils/duplicate-utils.ts';
+  import { lazyComponent } from '#lib/utils/lazy-component.svelte.ts';
+  import { navigate } from '#lib/utils/navigation.ts';
   import { getAssetInfo, type AssetResponseDto } from '@immich/sdk';
   import { Button, Icon } from '@immich/ui';
   import { mdiCheck, mdiChevronDown, mdiChevronUp, mdiImageMultipleOutline, mdiTrashCanOutline } from '@mdi/js';
   import { onDestroy, onMount } from 'svelte';
   import { t } from 'svelte-i18n';
   import { SvelteSet } from 'svelte/reactivity';
+  import DuplicateAsset from './DuplicateAsset.svelte';
 
   interface Props {
     assets: AssetResponseDto[];
@@ -99,21 +95,9 @@
   };
 
   const handleStack = () => {
-    onStack(assets);
-  };
-
-  const resolveSlideshowStepAsset: SlideshowStepAssetResolver = (asset, order) => {
-    return order === 'previous' ? getPreviousAsset(assets, asset) : getNextAsset(assets, asset);
-  };
-
-  const resolveSlideshowRandomAsset: SlideshowRandomAssetResolver = (isPlayable) => {
-    const playableAssets = assets.filter((asset) => isPlayable(asset));
-    if (playableAssets.length === 0) {
-      return;
-    }
-
-    const index = Math.floor(Math.random() * playableAssets.length);
-    return playableAssets[index];
+    const selectedAssets = assets.filter(({ id }) => selectedAssetIds.has(id));
+    const unselectedAssets = assets.filter(({ id }) => !selectedAssetIds.has(id));
+    onStack([...selectedAssets, ...unselectedAssets]);
   };
 
   const assetCursor = $derived({
@@ -124,7 +108,7 @@
 
   // Mounting the viewer through `{#await}` leaves it permanently unreactive on reopen.
   // See lazyComponent().
-  const LazyAssetViewer = lazyComponent(() => import('$lib/components/asset-viewer/AssetViewer.svelte'));
+  const LazyAssetViewer = lazyComponent(() => import('#lib/components/asset-viewer/AssetViewer.svelte'));
 </script>
 
 <svelte:document
@@ -209,7 +193,7 @@
   </div>
 
   {#if hasMore}
-    <div class="flex justify-center pb-2">
+    <div class="flex justify-center">
       <Button size="small" variant="ghost" color="secondary" onclick={() => (showMore = !showMore)}>
         <Icon icon={showMore ? mdiChevronUp : mdiChevronDown} size="18" class="me-1" />
         {showMore
@@ -222,14 +206,12 @@
 
 {#if assetViewerManager.isViewing}
   {#if LazyAssetViewer.current}
-    {@const AssetViewer = LazyAssetViewer.current}
+    {const AssetViewer = $derived(LazyAssetViewer.current)}
     <Portal target="body">
       <AssetViewer
         cursor={assetCursor}
         showNavigation={assets.length > 1}
         {onRandom}
-        {resolveSlideshowStepAsset}
-        {resolveSlideshowRandomAsset}
         onClose={() => {
           assetViewerManager.showAssetViewer(false);
           handlePromiseError(navigate({ targetRoute: 'current', assetId: null }));

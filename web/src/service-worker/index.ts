@@ -1,7 +1,3 @@
-/// <reference types="@sveltejs/kit" />
-/// <reference no-default-lib="true"/>
-/// <reference lib="esnext" />
-/// <reference lib="webworker" />
 import { installMessageListener } from './messaging';
 
 const sw = globalThis as unknown as ServiceWorkerGlobalScope;

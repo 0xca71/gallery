@@ -1,12 +1,10 @@
-import type { AdminConfigDto } from '@immich/sdk';
-import { ReleaseChannel } from '@immich/sdk';
-import '@testing-library/jest-dom';
-import { render, screen } from '@testing-library/svelte';
-import userEvent from '@testing-library/user-event';
+import { ReleaseChannel, type AdminConfigDto } from '@immich/sdk';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { handleSystemConfigSave } from '$lib/services/system-config.service';
+import { render } from 'vitest-browser-svelte';
+import { page, userEvent } from 'vitest/browser';
 import NewVersionCheckSettings from './NewVersionCheckSettings.svelte';
 
+// eslint-disable-next-line unicorn/no-unnecessary-parameters
 const makeConfig = (enabled = true, channel = ReleaseChannel.Stable) =>
   ({
     newVersionCheck: { enabled, channel },
@@ -16,11 +14,10 @@ const mocks = vi.hoisted(() => ({
   featureFlags: { configFile: false },
   systemConfig: { newVersionCheck: { enabled: true, channel: 'stable' } },
   defaultSystemConfig: { newVersionCheck: { enabled: true, channel: 'stable' } },
-  cloneValue: vi.fn(),
-  cloneDefaultValue: vi.fn(),
+  saveConfig: vi.fn(),
 }));
 
-vi.mock(import('$lib/managers/feature-flags-manager.svelte'), () => ({
+vi.mock(import('#lib/managers/feature-flags-manager.svelte.js'), () => ({
   featureFlagsManager: {
     get value() {
       return mocks.featureFlags;
@@ -28,21 +25,18 @@ vi.mock(import('$lib/managers/feature-flags-manager.svelte'), () => ({
   } as never,
 }));
 
-vi.mock(import('$lib/managers/system-config-manager.svelte'), () => ({
-  systemConfigManager: {
-    get value() {
-      return mocks.systemConfig as AdminConfigDto;
+vi.mock(import('#lib/queries/client.js'), async (importOriginal) => ({
+  ...(await importOriginal()),
+  createPreloadedQuery: ((optionsFn: () => { queryKey: readonly unknown[] }) => ({
+    get data() {
+      return optionsFn().queryKey.includes('defaults') ? mocks.defaultSystemConfig : mocks.systemConfig;
     },
-    get defaultValue() {
-      return mocks.defaultSystemConfig as AdminConfigDto;
-    },
-    cloneValue: mocks.cloneValue,
-    cloneDefaultValue: mocks.cloneDefaultValue,
-  } as never,
+  })) as never,
 }));
 
-vi.mock(import('$lib/services/system-config.service'), () => ({
-  handleSystemConfigSave: vi.fn(),
+vi.mock(import('@tanstack/svelte-query'), async (importOriginal) => ({
+  ...(await importOriginal()),
+  createMutation: (() => ({ mutate: mocks.saveConfig, isPending: false })) as never,
 }));
 
 describe('NewVersionCheckSettings', () => {
@@ -51,29 +45,26 @@ describe('NewVersionCheckSettings', () => {
     mocks.featureFlags.configFile = false;
     mocks.systemConfig = makeConfig();
     mocks.defaultSystemConfig = makeConfig();
-    mocks.cloneValue.mockImplementation(() => structuredClone(mocks.systemConfig));
-    mocks.cloneDefaultValue.mockImplementation(() => structuredClone(mocks.defaultSystemConfig));
   });
 
-  it('does not render the release-channel selector (fork override makes it a no-op, LOW #6)', () => {
-    render(NewVersionCheckSettings);
+  it('does not render the release-channel selector (fork override makes it a no-op, LOW #6)', async () => {
+    await render(NewVersionCheckSettings);
 
-    expect(screen.queryByText('admin.version_check_channel')).not.toBeInTheDocument();
-    expect(screen.queryByText('admin.release_channel_stable')).not.toBeInTheDocument();
-    expect(screen.queryByText('admin.release_channel_release_candidate')).not.toBeInTheDocument();
+    expect(page.getByText('admin.version_check_channel', { exact: true }).query()).not.toBeInTheDocument();
+    expect(page.getByText('admin.release_channel_stable', { exact: true }).query()).not.toBeInTheDocument();
+    expect(page.getByText('admin.release_channel_release_candidate', { exact: true }).query()).not.toBeInTheDocument();
   });
 
   it('still renders and saves the version-check enabled toggle', async () => {
-    const user = userEvent.setup();
-    render(NewVersionCheckSettings);
+    await render(NewVersionCheckSettings);
 
-    const toggle = screen.getByRole('switch', { name: 'admin.version_check_enabled_description' });
+    const toggle = page.getByRole('switch', { name: 'admin.version_check_enabled_description', exact: true }).element();
     expect(toggle).toBeChecked();
 
-    await user.click(toggle);
-    await user.click(screen.getByRole('button', { name: 'save' }));
+    await userEvent.click(toggle);
+    await userEvent.click(page.getByRole('button', { name: 'save', exact: true }));
 
-    expect(handleSystemConfigSave).toHaveBeenCalledWith({
+    expect(mocks.saveConfig).toHaveBeenCalledWith({
       newVersionCheck: { enabled: false, channel: ReleaseChannel.Stable },
     });
   });

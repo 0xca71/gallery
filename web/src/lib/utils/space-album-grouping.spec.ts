@@ -1,18 +1,20 @@
-import type { SharedSpaceLinkedAlbumDto } from '@immich/sdk';
-import { get } from 'svelte/store';
-import { AlbumSortBy, SortOrder } from '$lib/stores/preferences.store';
-import { SpaceAlbumGroupBy, spaceAlbumViewSettings } from '$lib/stores/space-album-view-settings.store';
+import { AlbumSortBy, SortOrder, albumViewSettings } from '#lib/stores/preferences.store.ts';
+import { SpaceAlbumGroupBy, spaceAlbumViewSettings } from '#lib/stores/space-album-view-settings.store.ts';
+import {
+  collapseAllAlbumGroups,
+  expandAllAlbumGroups,
+  isAlbumGroupCollapsed,
+  toggleAlbumGroupCollapsing,
+} from '#lib/utils/album-utils.ts';
 import {
   buildSpaceAlbumGroups,
   getSelectedSpaceAlbumGroupOption,
-  isSpaceAlbumGroupCollapsed,
-  toggleSpaceAlbumGroupCollapsing,
-  collapseAllSpaceAlbumGroups,
-  expandAllSpaceAlbumGroups,
   spaceGroupOptionsMetadata,
   type SpaceAlbumGroupingCtx,
-} from '$lib/utils/space-album-grouping';
-import { SpaceAlbumSortBy } from '$lib/utils/space-album-sort';
+} from '#lib/utils/space-album-grouping.ts';
+import { SpaceAlbumSortBy } from '#lib/utils/space-album-sort.ts';
+import type { SharedSpaceLinkedAlbumDto } from '@immich/sdk';
+import { get } from 'svelte/store';
 
 const CTX: SpaceAlbumGroupingCtx = {
   ungrouped: 'Albums',
@@ -133,14 +135,16 @@ it('getSelectedSpaceAlbumGroupOption falls back to None when Year is disabled un
   expect(getSelectedSpaceAlbumGroupOption(s)).toBe(SpaceAlbumGroupBy.None);
 });
 
-it('collapse mutators write only the space store, keyed by groupBy', () => {
+it('upstream collapse mutators given the space store write only the space store, keyed by groupBy', () => {
+  const albumSettings = JSON.stringify(get(albumViewSettings));
   spaceAlbumViewSettings.update((s) => ({ ...s, groupBy: SpaceAlbumGroupBy.Year }));
-  toggleSpaceAlbumGroupCollapsing('2024');
-  expect(isSpaceAlbumGroupCollapsed(get(spaceAlbumViewSettings), '2024')).toBe(true);
-  collapseAllSpaceAlbumGroups(['2024', '2020']);
+  toggleAlbumGroupCollapsing('2024', spaceAlbumViewSettings);
+  expect(isAlbumGroupCollapsed(get(spaceAlbumViewSettings), '2024')).toBe(true);
+  collapseAllAlbumGroups(['2024', '2020'], spaceAlbumViewSettings);
   expect(get(spaceAlbumViewSettings).collapsedGroups.Year.sort()).toEqual(['2020', '2024']);
-  expandAllSpaceAlbumGroups();
+  expandAllAlbumGroups(spaceAlbumViewSettings);
   expect(get(spaceAlbumViewSettings).collapsedGroups.Year).toEqual([]);
+  expect(JSON.stringify(get(albumViewSettings))).toBe(albumSettings);
 });
 
 // S27

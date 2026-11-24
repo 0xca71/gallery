@@ -33,9 +33,9 @@ interface SyncLine {
 }
 
 /**
- * Parses the jsonlines+json response body from POST /sync/stream into a
- * typed array of sync lines. The last line is always SyncCompleteV1.
- */
+Parses the jsonlines+json response body from POST /sync/stream into a
+typed array of sync lines. The last line is always SyncCompleteV1.
+*/
 const parseStream = (text: string): SyncLine[] => {
   return text
     .split('\n')
@@ -44,10 +44,10 @@ const parseStream = (text: string): SyncLine[] => {
 };
 
 /**
- * Sends a /sync/stream request and parses the jsonl response. `reset: true`
- * clears any prior ack state on the server side so the test starts from a
- * known baseline.
- */
+Sends a /sync/stream request and parses the jsonl response. `reset: true`
+clears any prior ack state on the server side so the test starts from a
+known baseline.
+*/
 const syncStream = async (accessToken: string, types: SyncRequestType[], reset = false): Promise<SyncLine[]> => {
   const response = await request(app)
     .post('/sync/stream')
@@ -69,12 +69,12 @@ const syncStream = async (accessToken: string, types: SyncRequestType[], reset =
 };
 
 /**
- * Acks every non-SyncCompleteV1 line in the response. Mirrors the mobile
- * client's behavior of acking each batch as it arrives. The `ack` field
- * on each line is already a fully-qualified "TYPE|updateId[|extraId]"
- * string (see server/src/utils/sync.ts toAck), so it should be sent
- * as-is.
- */
+Acks every non-SyncCompleteV1 line in the response. Mirrors the mobile
+client's behavior of acking each batch as it arrives. The `ack` field
+on each line is already a fully-qualified "TYPE|updateId[|extraId]"
+string (see server/src/utils/sync.ts toAck), so it should be sent
+as-is.
+*/
 const ackAll = async (accessToken: string, lines: SyncLine[]): Promise<void> => {
   const acks = lines.filter((line) => line.type !== 'SyncCompleteV1' && line.ack).map((line) => line.ack);
   if (acks.length === 0) {
@@ -84,10 +84,10 @@ const ackAll = async (accessToken: string, lines: SyncLine[]): Promise<void> => 
 };
 
 /**
- * Links an external library to a shared space by calling the real
- * /shared-spaces/:id/libraries PUT endpoint. The e2e utils helper doesn't
- * wrap this one, so we do it via supertest directly.
- */
+Links an external library to a shared space by calling the real
+/shared-spaces/:id/libraries PUT endpoint. The e2e utils helper doesn't
+wrap this one, so we do it via supertest directly.
+*/
 const linkLibraryToSpace = async (accessToken: string, spaceId: string, libraryId: string): Promise<void> => {
   await request(app)
     .put(`/shared-spaces/${spaceId}/libraries`)
@@ -204,12 +204,10 @@ describe('/sync — library streams', () => {
       expect(lines.at(-1)?.type).toBe('SyncCompleteV1');
     });
 
-    it('rejects malformed SyncRequestType enum values', async () => {
-      const { status } = await request(app)
-        .post('/sync/stream')
-        .set(asBearerAuth(admin.accessToken))
-        .send({ types: ['NotALibraryType'] });
-      expect(status).toBe(400);
+    it('ignores unknown SyncRequestType values instead of rejecting the request', async () => {
+      // a newer client may request types this server does not know; they are dropped, not 400ed
+      const lines = await syncStream(admin.accessToken, ['NotALibraryType' as SyncRequestType], true);
+      expect(lines.filter((l) => l.type !== 'SyncCompleteV1')).toHaveLength(0);
     });
 
     it('an empty types[] array returns immediately with SyncCompleteV1 only', async () => {
@@ -400,11 +398,25 @@ describe('/sync — library streams', () => {
   });
 
   describe('DTO validation and forward-compat', () => {
-    it('mixing a valid and invalid SyncRequestType rejects the whole request', async () => {
-      const { status } = await request(app)
-        .post('/sync/stream')
-        .set(asBearerAuth(admin.accessToken))
-        .send({ types: [SyncRequestType.LibrariesV1, 'NotReal'] });
+    it('mixing a valid and unknown SyncRequestType still streams the valid type', async () => {
+      const library = await utils.createLibrary(admin.accessToken, { ownerId: admin.userId, name: 'Forward Compat' });
+      const lines = await syncStream(
+        admin.accessToken,
+        [SyncRequestType.LibrariesV1, 'NotReal' as SyncRequestType],
+        true,
+      );
+      const ids = lines.filter((l) => l.type === 'LibraryV1').map((l) => (l.data as { id: string }).id);
+      expect(ids).toContain(library.id);
+      expect(lines.every((l) => ['LibraryV1', 'LibraryDeleteV1', 'SyncCompleteV1'].includes(l.type))).toBe(true);
+      await ackAll(admin.accessToken, lines);
+    });
+
+    it.each([
+      { label: 'a non-string element', body: { types: [SyncRequestType.LibrariesV1, 42] } },
+      { label: 'a non-array types', body: { types: SyncRequestType.LibrariesV1 } },
+      { label: 'a missing types', body: {} },
+    ])('rejects $label with 400', async ({ body }) => {
+      const { status } = await request(app).post('/sync/stream').set(asBearerAuth(admin.accessToken)).send(body);
       expect(status).toBe(400);
     });
 

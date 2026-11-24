@@ -1,20 +1,20 @@
-import type { SharedSpaceLinkedAlbumDto } from '@immich/sdk';
-import { groupBy } from 'lodash-es';
-import { get } from 'svelte/store';
-import { AlbumSortBy, SortOrder } from '$lib/stores/preferences.store';
+import { AlbumSortBy, SortOrder } from '#lib/stores/preferences.store.ts';
 import {
   SpaceAlbumGroupBy,
   spaceAlbumViewSettings,
   type SpaceAlbumViewSettings,
-} from '$lib/stores/space-album-view-settings.store';
-import { stringToSortOrder } from '$lib/utils/album-utils';
-import { sortSpaceAlbums } from '$lib/utils/space-album-sort';
+} from '#lib/stores/space-album-view-settings.store.ts';
+import { stringToSortOrder } from '#lib/utils/album-utils.ts';
+import { sortSpaceAlbums } from '#lib/utils/space-album-sort.ts';
+import type { SharedSpaceLinkedAlbumDto } from '@immich/sdk';
+import { groupBy } from 'lodash-es';
+import { get } from 'svelte/store';
 
 /**
- * ----------------------
- * Space Album Grouping
- * ----------------------
- */
+----------------------
+Space Album Grouping
+----------------------
+*/
 
 export interface SpaceAlbumGroup {
   id: string;
@@ -77,60 +77,10 @@ export const getSelectedSpaceAlbumGroupOption = (settings: SpaceAlbumViewSetting
 };
 
 /**
- * --------------------------------
- * Space Album Groups Collapse/Expand
- * --------------------------------
- */
-
-const getCollapsedSpaceAlbumGroups = (settings: SpaceAlbumViewSettings) => {
-  settings.collapsedGroups ??= {};
-  const { collapsedGroups, groupBy: currentGroupBy } = settings;
-  collapsedGroups[currentGroupBy] ??= [];
-  return collapsedGroups[currentGroupBy];
-};
-
-export const isSpaceAlbumGroupCollapsed = (settings: SpaceAlbumViewSettings, groupId: string) => {
-  if (settings.groupBy === SpaceAlbumGroupBy.None) {
-    return false;
-  }
-  return getCollapsedSpaceAlbumGroups(settings).includes(groupId);
-};
-
-export const toggleSpaceAlbumGroupCollapsing = (groupId: string) => {
-  const settings = get(spaceAlbumViewSettings);
-  if (settings.groupBy === SpaceAlbumGroupBy.None) {
-    return;
-  }
-  const collapsedGroups = getCollapsedSpaceAlbumGroups(settings);
-  const groupIndex = collapsedGroups.indexOf(groupId);
-  if (groupIndex === -1) {
-    // Collapse
-    collapsedGroups.push(groupId);
-  } else {
-    // Expand
-    collapsedGroups.splice(groupIndex, 1);
-  }
-  spaceAlbumViewSettings.set(settings);
-};
-
-export const collapseAllSpaceAlbumGroups = (groupIds: string[]) => {
-  spaceAlbumViewSettings.update((settings) => {
-    const collapsedGroups = getCollapsedSpaceAlbumGroups(settings);
-    collapsedGroups.length = 0;
-    collapsedGroups.push(...groupIds);
-    return settings;
-  });
-};
-
-export const expandAllSpaceAlbumGroups = () => {
-  collapseAllSpaceAlbumGroups([]);
-};
-
-/**
- * -----------------------------------------------
- * Build Space Album Groups (pure — no store reads)
- * -----------------------------------------------
- */
+-----------------------------------------------
+Build Space Album Groups (pure — no store reads)
+-----------------------------------------------
+*/
 
 export interface SpaceAlbumGroupingCtx {
   ungrouped: string;

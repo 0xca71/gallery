@@ -3,24 +3,24 @@
 </script>
 
 <script lang="ts">
-  import { page } from '$app/state';
-  import { clickOutside } from '$lib/actions/click-outside';
-  import GlobalSearchInputTrigger from '$lib/components/global-search/global-search-input-trigger.svelte';
-  import NotificationPanel from '$lib/components/shared-components/navigation-bar/NotificationPanel.svelte';
-  import SkipLink from '$lib/elements/SkipLink.svelte';
-  import { authManager } from '$lib/managers/auth-manager.svelte';
-  import { globalSearchManager } from '$lib/managers/global-search-manager.svelte';
-  import { Route } from '$lib/route';
-  import { getGlobalActions } from '$lib/services/app.service';
-  import { mediaQueryManager } from '$lib/stores/media-query-manager.svelte';
-  import { notificationManager } from '$lib/stores/notification-manager.svelte';
-  import { sidebarModeStore } from '$lib/stores/sidebar-mode.svelte';
-  import { sidebarStore } from '$lib/stores/sidebar.svelte';
+  import { clickOutside } from '#lib/actions/click-outside.ts';
+  import GlobalSearchInputTrigger from '#lib/components/global-search/global-search-input-trigger.svelte';
+  import Logo from '#lib/components/shared-components/Logo.svelte';
+  import NotificationPanel from '#lib/components/shared-components/navigation-bar/NotificationPanel.svelte';
+  import SkipLink from '#lib/elements/SkipLink.svelte';
+  import { authManager } from '#lib/managers/auth-manager.svelte.ts';
+  import { globalSearchManager } from '#lib/managers/global-search-manager.svelte.ts';
+  import { getNotificationsQuery } from '#lib/queries/notification.query.ts';
+  import { Route } from '#lib/route.ts';
+  import { getGlobalActions } from '#lib/services/app.service.ts';
+  import { mediaQueryManager } from '#lib/stores/media-query-manager.svelte.ts';
+  import { sidebarModeStore } from '#lib/stores/sidebar-mode.svelte.ts';
+  import { sidebarStore } from '#lib/stores/sidebar.svelte.ts';
   import { ActionButton, Button, IconButton } from '@immich/ui';
-  import Logo from '$lib/components/shared-components/Logo.svelte';
   import { mdiBellBadge, mdiBellOutline, mdiMagnify, mdiMenu, mdiTrayArrowUp } from '@mdi/js';
-  import { onMount } from 'svelte';
+  import { createQuery } from '@tanstack/svelte-query';
   import { t } from 'svelte-i18n';
+  import { page } from '$app/state';
   import ThemeButton from '../ThemeButton.svelte';
   import UserAvatar from '../UserAvatar.svelte';
   import AccountInfoPanel from './AccountInfoPanel.svelte';
@@ -30,12 +30,12 @@
     // TODO: remove once this is only used in <AppShellHeader>
     noBorder?: boolean;
     /**
-     * Opt-in: size the hamburger/column/logo from `sidebarModeStore.layout` (adds the rail
-     * state). Defaults to false so callers with no rail-width sidebar of their own - namely
-     * AdminPageLayout, whose sidebar is bound only to `sidebarStore.isOpen` and pinned open
-     * above 850px regardless of `railOverlayOpen` - keep today's viewport-only behaviour
-     * (hamburger hidden, logo inline, wide column) untouched above 850px.
-     */
+    Opt-in: size the hamburger/column/logo from `sidebarModeStore.layout` (adds the rail
+    state). Defaults to false so callers with no rail-width sidebar of their own - namely
+    AdminPageLayout, whose sidebar is bound only to `sidebarStore.isOpen` and pinned open
+    above 850px regardless of `railOverlayOpen` - keep today's viewport-only behaviour
+    (hamburger hidden, logo inline, wide column) untouched above 850px.
+    */
     railAware?: boolean;
   };
 
@@ -44,15 +44,9 @@
   let shouldShowAccountInfoPanel = $state(false);
   let shouldShowNotificationPanel = $state(false);
   let innerWidth: number = $state(0);
-  const hasUnreadNotifications = $derived(notificationManager.notifications.length > 0);
-
-  onMount(async () => {
-    try {
-      await notificationManager.refresh();
-    } catch (error) {
-      console.error('Failed to load notifications on mount', error);
-    }
-  });
+  const query = createQuery(getNotificationsQuery);
+  const unreadCount = $derived(query.data?.length ?? 0);
+  const hasUnreadNotifications = $derived(unreadCount > 0);
 
   const { Cast } = $derived(getGlobalActions($t));
 
@@ -227,7 +221,7 @@
               <div
                 class="pointer-events-none absolute top-0 right-1 flex size-5 items-center justify-center rounded-full border bg-primary text-[10px] font-bold text-light"
               >
-                {notificationManager.notifications.length}
+                {unreadCount}
               </div>
             {/if}
           </div>

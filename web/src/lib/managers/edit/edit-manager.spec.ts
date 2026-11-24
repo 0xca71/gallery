@@ -1,38 +1,44 @@
-import {
-  AssetEditAction,
-  AssetEditSaveMode,
-  AssetEditSaveStatus,
-  AssetTypeEnum,
-  editAsset,
-  getAssetInfo,
-  removeAssetEdits,
-  getAssetEditSaveCapabilities,
-  getAssetEditSave,
-  saveAssetEdits,
-} from '@immich/sdk';
+import { websocketMock } from '#lib/gallery/__mocks__/websocket.mock.ts';
+import { EditManager, EditToolType } from '#lib/managers/edit/edit-manager.svelte.ts';
+import { eventManager } from '#lib/managers/event-manager.svelte.ts';
+import { getFormatter } from '#lib/utils/i18n.ts';
+import { factory } from '#test/unit/factories.ts';
+import { editAsset, getAssetInfo, removeAssetEdits } from '@immich/sdk';
 import { toastManager } from '@immich/ui';
 import type { MessageFormatter } from 'svelte-i18n';
-import { EditManager, generateIdempotencyKey } from '$lib/managers/edit/edit-manager.svelte';
-import { eventManager } from '$lib/managers/event-manager.svelte';
-import { getFormatter } from '$lib/utils/i18n';
-import { assetFactory } from '@test-data/factories/asset-factory';
-import { websocketMock } from '@test-data/mocks/websocket.mock';
 
-vi.mock('@immich/sdk');
-vi.mock('$lib/stores/websocket');
-vi.mock('$lib/utils/i18n', () => ({
+// Browser mode cannot automock `@immich/sdk` (its build uses `export *`): replace each function with a mock.
+vi.mock('@immich/sdk', async (importOriginal) => {
+  const module = await importOriginal<typeof import('@immich/sdk')>();
+  const mocks = Object.fromEntries(
+    Object.entries(module)
+      .filter(([, value]) => typeof value === 'function')
+      .map(([key]) => [key, vi.fn()]),
+  );
+  return { ...module, ...mocks };
+});
+vi.mock(import('#lib/stores/websocket.ts'), async (importOriginal) => {
+  const module = await importOriginal();
+  return Object.fromEntries(
+    Object.entries(module).map(([key, value]) => [key, typeof value === 'function' ? vi.fn() : value]),
+  ) as unknown as typeof module;
+});
+vi.mock('#lib/utils/i18n.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('#lib/utils/i18n.ts')>()),
   getFormatter: vi.fn(),
   getPreferredLocale: vi.fn(),
 }));
-vi.mock('@immich/ui', () => ({
+// Browser mode rejects an import of a name the mock does not export, so keep the module's other exports.
+vi.mock('@immich/ui', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@immich/ui')>()),
   toastManager: { success: vi.fn(), danger: vi.fn(), primary: vi.fn() },
   modalManager: { show: vi.fn() },
   ConfirmModal: {},
 }));
-vi.mock('$lib/managers/event-manager.svelte', () => ({
+vi.mock('#lib/managers/event-manager.svelte.js', () => ({
   eventManager: { emit: vi.fn(), on: vi.fn() },
 }));
-vi.mock('$lib/managers/edit/transform-manager.svelte', () => ({
+vi.mock('#lib/managers/edit/transform-manager.svelte.js', () => ({
   transformManager: {
     onActivate: vi.fn(),
     onDeactivate: vi.fn(),
@@ -42,10 +48,10 @@ vi.mock('$lib/managers/edit/transform-manager.svelte', () => ({
     edits: [],
   },
 }));
-vi.mock('$lib/components/asset-viewer/editor/transform-tool/transform-tool.svelte', () => ({
+vi.mock('#lib/components/asset-viewer/editor/transform-tool/transform-tool.svelte', () => ({
   default: {},
 }));
-vi.mock('$lib/managers/edit/trim-manager.svelte', () => ({
+vi.mock('#lib/managers/edit/trim-manager.svelte.js', () => ({
   trimManager: {
     onActivate: vi.fn(),
     onDeactivate: vi.fn(),
@@ -55,7 +61,7 @@ vi.mock('$lib/managers/edit/trim-manager.svelte', () => ({
     edits: [],
   },
 }));
-vi.mock('$lib/components/asset-viewer/editor/trim-tool/trim-tool.svelte', () => ({
+vi.mock('#lib/components/asset-viewer/editor/trim-tool/trim-tool.svelte', () => ({
   default: {},
 }));
 
@@ -69,32 +75,6 @@ describe('EditManager', () => {
     editManager = new EditManager();
   });
 
-  afterEach(() => {
-    vi.unstubAllGlobals();
-  });
-
-  describe('generateIdempotencyKey', () => {
-    it('uses the native UUID generator when available', () => {
-      vi.stubGlobal('crypto', { randomUUID: vi.fn(() => 'native-uuid') });
-
-      expect(generateIdempotencyKey()).toBe('native-uuid');
-    });
-
-    it('generates a UUID v4 with getRandomValues when randomUUID is unavailable', () => {
-      const bytes = Uint8Array.from({ length: 16 }, (_, index) => index);
-      vi.stubGlobal('crypto', {
-        getRandomValues: vi.fn((array: Uint8Array) => {
-          array.set(bytes);
-          return array;
-        }),
-      });
-
-      const idempotencyKey = generateIdempotencyKey();
-
-      expect(idempotencyKey).toBe('00010203-0405-4607-8809-0a0b0c0d0e0f');
-    });
-  });
-
   describe('applyEdits', () => {
     it('should return false if no current asset', async () => {
       const result = await editManager.applyEdits();
@@ -102,8 +82,8 @@ describe('EditManager', () => {
     });
 
     it('should call editAsset and emit AssetUpdate on success', async () => {
-      const asset = assetFactory.build();
-      const refreshedAsset = assetFactory.build({ id: asset.id, thumbhash: 'new-thumbhash' });
+      const asset = factory.asset();
+      const refreshedAsset = factory.asset({ id: asset.id, thumbhash: 'new-thumbhash' });
       vi.mocked(editAsset).mockResolvedValue(undefined as never);
       vi.mocked(getAssetInfo).mockResolvedValue(refreshedAsset);
 
@@ -118,8 +98,8 @@ describe('EditManager', () => {
     });
 
     it('should emit AssetUpdate before AssetEditsApplied', async () => {
-      const asset = assetFactory.build();
-      const refreshedAsset = assetFactory.build({ id: asset.id });
+      const asset = factory.asset();
+      const refreshedAsset = factory.asset({ id: asset.id });
       vi.mocked(editAsset).mockResolvedValue(undefined as never);
       vi.mocked(getAssetInfo).mockResolvedValue(refreshedAsset);
 
@@ -135,8 +115,8 @@ describe('EditManager', () => {
     });
 
     it('should call removeAssetEdits when edits are empty', async () => {
-      const asset = assetFactory.build();
-      const refreshedAsset = assetFactory.build({ id: asset.id });
+      const asset = factory.asset();
+      const refreshedAsset = factory.asset({ id: asset.id });
       vi.mocked(removeAssetEdits).mockResolvedValue(undefined as never);
       vi.mocked(getAssetInfo).mockResolvedValue(refreshedAsset);
 
@@ -149,8 +129,28 @@ describe('EditManager', () => {
       expect(editAsset).not.toHaveBeenCalled();
     });
 
+    it('should save through the selected tool when it saves itself, and skip the edits endpoints', async () => {
+      const asset = factory.asset();
+      vi.mocked(getAssetInfo).mockResolvedValue(factory.asset({ id: asset.id }));
+      const save = vi.fn().mockResolvedValue(undefined);
+      editManager.selectedTool = {
+        type: EditToolType.Trim,
+        icon: '',
+        component: {} as never,
+        manager: { ...editManager.tools[1].manager, edits: [], save },
+      };
+
+      editManager.currentAsset = asset;
+      const result = await editManager.applyEdits();
+
+      expect(result).toBe(true);
+      expect(save).toHaveBeenCalledWith(asset.id);
+      expect(editAsset).not.toHaveBeenCalled();
+      expect(removeAssetEdits).not.toHaveBeenCalled();
+    });
+
     it('should return false and show error toast on failure', async () => {
-      const asset = assetFactory.build();
+      const asset = factory.asset();
       vi.mocked(removeAssetEdits).mockRejectedValue(new Error('fail'));
 
       editManager.currentAsset = asset;
@@ -162,8 +162,8 @@ describe('EditManager', () => {
     });
 
     it('should set hasAppliedEdits to true on success', async () => {
-      const asset = assetFactory.build();
-      const refreshedAsset = assetFactory.build({ id: asset.id });
+      const asset = factory.asset();
+      const refreshedAsset = factory.asset({ id: asset.id });
       vi.mocked(editAsset).mockResolvedValue(undefined as never);
       vi.mocked(getAssetInfo).mockResolvedValue(refreshedAsset);
 
@@ -175,8 +175,8 @@ describe('EditManager', () => {
     });
 
     it('should set isApplyingEdits during the operation', async () => {
-      const asset = assetFactory.build();
-      const refreshedAsset = assetFactory.build({ id: asset.id });
+      const asset = factory.asset();
+      const refreshedAsset = factory.asset({ id: asset.id });
       vi.mocked(editAsset).mockResolvedValue(undefined as never);
       vi.mocked(getAssetInfo).mockResolvedValue(refreshedAsset);
 
@@ -188,154 +188,6 @@ describe('EditManager', () => {
 
       await promise;
       expect(editManager.isApplyingEdits).toBe(false);
-    });
-  });
-
-  describe('saveImageEdits', () => {
-    const operation = (
-      status: AssetEditSaveStatus,
-      resultAssetId: string | null = null,
-      error: string | null = null,
-    ) => ({
-      id: 'operation-id',
-      assetId: 'source-id',
-      resultAssetId,
-      mode: AssetEditSaveMode.Copy,
-      status,
-      error,
-    });
-    beforeEach(() => {
-      editManager.currentAsset = assetFactory.build({ id: 'source-id' });
-      vi.mocked(getAssetEditSaveCapabilities).mockResolvedValue({
-        canCopy: true,
-        canOverwrite: true,
-        overwriteUnavailableReason: null,
-        outputFormat: 'png',
-      });
-      vi.mocked(saveAssetEdits).mockResolvedValue(operation(AssetEditSaveStatus.Queued));
-    });
-
-    it('rejects explicit overwrite when overwrite capability is unavailable', async () => {
-      vi.mocked(getAssetEditSaveCapabilities).mockResolvedValue({
-        canCopy: true,
-        canOverwrite: false,
-        overwriteUnavailableReason: 'not_writable',
-        outputFormat: 'jpeg',
-      });
-      expect(await editManager.saveImageEdits(AssetEditSaveMode.Overwrite)).toBe(false);
-      expect(saveAssetEdits).not.toHaveBeenCalled();
-      expect(toastManager.danger).toHaveBeenCalledWith('editor_save_unavailable_not_writable');
-      expect(editManager.hasAppliedEdits).toBe(false);
-    });
-
-    it('opens the independent result and publishes its update after a copy completes', async () => {
-      const result = assetFactory.build({ id: 'copy-id' });
-      vi.mocked(getAssetEditSave).mockResolvedValue(operation(AssetEditSaveStatus.Completed, result.id));
-      vi.mocked(getAssetInfo).mockResolvedValue(result);
-      expect(await editManager.saveImageEdits(AssetEditSaveMode.Copy)).toBe(true);
-      expect(saveAssetEdits).toHaveBeenCalledWith({
-        id: 'source-id',
-        assetEditSaveCreateDto: expect.objectContaining({
-          mode: AssetEditSaveMode.Copy,
-          expectedVersion: editManager.currentAsset!.updatedAt,
-          edits: [],
-        }),
-      });
-      expect(editManager.resultAssetId).toBe('copy-id');
-      expect(eventManager.emit).toHaveBeenCalledWith('AssetUpdate', result);
-      expect(editManager.pendingRequest).toBeNull();
-    });
-
-    it('defaults to overwrite when capabilities allow it and keeps the original identity', async () => {
-      vi.mocked(getAssetEditSave).mockResolvedValue(operation(AssetEditSaveStatus.Completed, 'source-id'));
-      vi.mocked(getAssetInfo).mockResolvedValue(editManager.currentAsset!);
-      expect(await editManager.saveImageEdits()).toBe(true);
-      expect(saveAssetEdits).toHaveBeenCalledWith(
-        expect.objectContaining({
-          assetEditSaveCreateDto: expect.objectContaining({ mode: AssetEditSaveMode.Overwrite }),
-        }),
-      );
-      expect(editManager.resultAssetId).toBe('source-id');
-    });
-
-    it('falls back to copy when no mode is passed and overwrite is unavailable', async () => {
-      vi.mocked(getAssetEditSaveCapabilities).mockResolvedValue({
-        canCopy: true,
-        canOverwrite: false,
-        overwriteUnavailableReason: 'not_writable',
-        outputFormat: 'jpeg',
-      });
-      const result = assetFactory.build({ id: 'copy-id' });
-      vi.mocked(getAssetEditSave).mockResolvedValue(operation(AssetEditSaveStatus.Completed, result.id));
-      vi.mocked(getAssetInfo).mockResolvedValue(result);
-      expect(await editManager.saveImageEdits()).toBe(true);
-      expect(saveAssetEdits).toHaveBeenCalledWith(
-        expect.objectContaining({
-          assetEditSaveCreateDto: expect.objectContaining({ mode: AssetEditSaveMode.Copy }),
-        }),
-      );
-      expect(editManager.resultAssetId).toBe('copy-id');
-    });
-
-    it('reuses the idempotency key if the creation response is lost', async () => {
-      vi.mocked(saveAssetEdits)
-        .mockRejectedValueOnce(new Error('connection lost'))
-        .mockResolvedValueOnce(operation(AssetEditSaveStatus.Queued));
-      expect(await editManager.saveImageEdits()).toBe(false);
-      const first = vi.mocked(saveAssetEdits).mock.calls[0][0];
-      vi.mocked(getAssetEditSave).mockResolvedValue(operation(AssetEditSaveStatus.Completed, 'source-id'));
-      vi.mocked(getAssetInfo).mockResolvedValue(assetFactory.build({ id: 'source-id' }));
-      expect(await editManager.saveImageEdits()).toBe(true);
-      expect(vi.mocked(saveAssetEdits).mock.calls[1][0]).toEqual(first);
-    });
-
-    it('resumes status polling after a disconnect without creating another file', async () => {
-      vi.mocked(getAssetEditSave)
-        .mockRejectedValueOnce(new Error('connection lost'))
-        .mockResolvedValueOnce(operation(AssetEditSaveStatus.Completed, 'source-id'));
-      vi.mocked(getAssetInfo).mockResolvedValue(assetFactory.build({ id: 'source-id' }));
-      expect(await editManager.saveImageEdits()).toBe(false);
-      expect(editManager.pendingSave?.operationId).toBe('operation-id');
-      expect(await editManager.saveImageEdits()).toBe(true);
-      expect(saveAssetEdits).toHaveBeenCalledTimes(1);
-    });
-
-    it.each([AssetEditSaveStatus.Failed, AssetEditSaveStatus.Conflict])(
-      'keeps edits after a %s save',
-      async (status) => {
-        vi.mocked(getAssetEditSave).mockResolvedValue(operation(status, null, 'source_changed'));
-        expect(await editManager.saveImageEdits()).toBe(false);
-        expect(editManager.hasAppliedEdits).toBe(false);
-        expect(editManager.pendingSave).toBeNull();
-        expect(toastManager.danger).toHaveBeenCalledWith('editor_save_failed_source_changed');
-      },
-    );
-
-    it('keeps the operation handle when recovery retains the original backup', async () => {
-      vi.mocked(getAssetEditSave).mockResolvedValue(
-        operation(AssetEditSaveStatus.Publishing, null, 'recovery_required'),
-      );
-      expect(await editManager.saveImageEdits()).toBe(false);
-      expect(editManager.pendingSave?.operationId).toBe('operation-id');
-      expect(toastManager.danger).toHaveBeenCalledWith('editor_save_recovery_required');
-    });
-
-    it('saves a mobile viewer crop directly as an overwrite', async () => {
-      const asset = assetFactory.build({ id: 'source-id', type: AssetTypeEnum.Image });
-      const refreshed = assetFactory.build({ id: 'source-id', type: AssetTypeEnum.Image });
-      const crop = { x: 120, y: 80, width: 640, height: 480 };
-      vi.mocked(getAssetEditSave).mockResolvedValue(operation(AssetEditSaveStatus.Completed, asset.id));
-      vi.mocked(getAssetInfo).mockResolvedValue(refreshed);
-
-      expect(await editManager.saveImageCropFromViewer(asset, crop)).toBe(true);
-      expect(saveAssetEdits).toHaveBeenCalledWith({
-        id: asset.id,
-        assetEditSaveCreateDto: expect.objectContaining({
-          mode: AssetEditSaveMode.Overwrite,
-          edits: [{ action: AssetEditAction.Crop, parameters: crop }],
-        }),
-      });
-      expect(editManager.currentAsset).toBeNull();
     });
   });
 });

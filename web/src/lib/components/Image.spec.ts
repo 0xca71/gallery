@@ -1,8 +1,9 @@
-import { act, fireEvent, render } from '@testing-library/svelte';
-import Image from '$lib/components/Image.svelte';
-import { cancelImageUrl } from '$lib/utils/sw-messaging';
+import Image from '#lib/components/Image.svelte';
+import { cancelImageUrl } from '#lib/utils/sw-messaging.ts';
+import { expect } from 'vitest';
+import { render } from 'vitest-browser-svelte';
 
-vi.mock('$lib/utils/sw-messaging', () => ({
+vi.mock('#lib/utils/sw-messaging.js', () => ({
   cancelImageUrl: vi.fn(),
 }));
 
@@ -11,144 +12,84 @@ describe('Image component', () => {
     vi.clearAllMocks();
   });
 
-  it('renders an img element when src is provided', () => {
-    const { baseElement } = render(Image, { src: '/test.jpg', alt: 'test' });
+  it('renders an img element when src is provided', async () => {
+    const { baseElement } = await render(Image, { src: '/test.jpg', alt: 'test' });
     const img = baseElement.querySelector('img');
     expect(img).not.toBeNull();
     expect(img!.getAttribute('src')).toBe('/test.jpg');
   });
 
-  it('loads images with anonymous CORS by default', () => {
-    const { baseElement } = render(Image, { src: '/test.jpg', alt: 'test' });
+  it('loads images with anonymous CORS by default', async () => {
+    const { baseElement } = await render(Image, { src: '/test.jpg', alt: 'test' });
     const img = baseElement.querySelector('img')!;
 
     expect(img.getAttribute('crossorigin')).toBe('anonymous');
   });
 
-  it('allows callers to override the CORS mode', () => {
-    const { baseElement } = render(Image, { src: '/test.jpg', alt: 'test', crossorigin: 'use-credentials' });
+  it('allows callers to override the CORS mode', async () => {
+    const { baseElement } = await render(Image, { src: '/test.jpg', alt: 'test', crossorigin: 'use-credentials' });
     const img = baseElement.querySelector('img')!;
 
     expect(img.getAttribute('crossorigin')).toBe('use-credentials');
   });
 
-  it('does not render an img element when src is undefined', () => {
-    const { baseElement } = render(Image, { src: undefined });
+  it('does not render an img element when src is undefined', async () => {
+    const { baseElement } = await render(Image, { src: undefined });
     const img = baseElement.querySelector('img');
     expect(img).toBeNull();
   });
 
-  it('calls onStart when src is set', () => {
+  it('calls onStart when src is set', async () => {
     const onStart = vi.fn();
-    render(Image, { src: '/test.jpg', onStart });
+    await render(Image, { src: '/test.jpg', onStart });
     expect(onStart).toHaveBeenCalledOnce();
   });
 
   it('calls onLoad when image loads', async () => {
     const onLoad = vi.fn();
-    const { baseElement } = render(Image, { src: '/test.jpg', onLoad });
+    const { baseElement } = await render(Image, { src: '/test.jpg', onLoad });
     const img = baseElement.querySelector('img')!;
-    await fireEvent.load(img);
+    img.dispatchEvent(new Event('load'));
     expect(onLoad).toHaveBeenCalledOnce();
-  });
-
-  it('waits for decode before reporting the replacement image ready', async () => {
-    const onLoad = vi.fn();
-    const { baseElement } = render(Image, { src: '/test.jpg', decodeBeforeLoad: true, onLoad });
-    const img = baseElement.querySelector('img')!;
-    let decoded!: () => void;
-    vi.spyOn(img, 'decode').mockReturnValue(
-      new Promise<void>((resolve) => {
-        decoded = resolve;
-      }),
-    );
-    await fireEvent.load(img);
-    expect(onLoad).not.toHaveBeenCalled();
-    await act(async () => {
-      decoded();
-      await Promise.resolve();
-    });
-    expect(onLoad).toHaveBeenCalledOnce();
-  });
-
-  it('ignores a late decode after changing images', async () => {
-    const onLoad = vi.fn();
-    const { baseElement, rerender } = render(Image, { src: '/old.jpg', decodeBeforeLoad: true, onLoad });
-    let decoded!: () => void;
-    vi.spyOn(baseElement.querySelector('img')!, 'decode').mockReturnValue(
-      new Promise<void>((resolve) => {
-        decoded = resolve;
-      }),
-    );
-    await fireEvent.load(baseElement.querySelector('img')!);
-    await rerender({ src: '/new.jpg', decodeBeforeLoad: true, onLoad });
-    await act(async () => {
-      decoded();
-      await Promise.resolve();
-    });
-    expect(onLoad).not.toHaveBeenCalled();
-  });
-
-  it('reports decode failure instead of marking the high-resolution layer ready', async () => {
-    const onLoad = vi.fn();
-    const onError = vi.fn();
-    const { baseElement } = render(Image, { src: '/test.jpg', decodeBeforeLoad: true, onLoad, onError });
-    const img = baseElement.querySelector('img')!;
-    vi.spyOn(img, 'decode').mockRejectedValue(new Error('Invalid image'));
-    await fireEvent.load(img);
-    expect(onLoad).not.toHaveBeenCalled();
-    expect(onError).toHaveBeenCalledOnce();
   });
 
   it('calls onError when image fails to load', async () => {
     const onError = vi.fn();
-    const { baseElement } = render(Image, { src: '/test.jpg', onError });
+    const { baseElement } = await render(Image, { src: '/test.jpg', onError });
     const img = baseElement.querySelector('img')!;
-    await fireEvent.error(img);
+    img.dispatchEvent(new Event('error'));
     expect(onError).toHaveBeenCalledOnce();
     expect(onError).toHaveBeenCalledWith(expect.any(Error));
     expect(onError.mock.calls[0][0].message).toBe('Failed to load image: /test.jpg');
   });
 
-  it('calls cancelImageUrl on unmount', () => {
-    const { unmount } = render(Image, { src: '/test.jpg' });
+  it('calls cancelImageUrl on unmount', async () => {
+    const { unmount } = await render(Image, { src: '/test.jpg' });
     expect(cancelImageUrl).not.toHaveBeenCalled();
-    unmount();
+    await unmount();
     expect(cancelImageUrl).toHaveBeenCalledWith('/test.jpg');
   });
 
   it('does not call onLoad after unmount', async () => {
     const onLoad = vi.fn();
-    const { baseElement, unmount } = render(Image, { src: '/test.jpg', onLoad });
+    const { baseElement, unmount } = await render(Image, { src: '/test.jpg', onLoad });
     const img = baseElement.querySelector('img')!;
-    unmount();
-    await fireEvent.load(img);
+    await unmount();
+    img.dispatchEvent(new Event('load'));
     expect(onLoad).not.toHaveBeenCalled();
   });
 
   it('does not call onError after unmount', async () => {
     const onError = vi.fn();
-    const { baseElement, unmount } = render(Image, { src: '/test.jpg', onError });
+    const { baseElement, unmount } = await render(Image, { src: '/test.jpg', onError });
     const img = baseElement.querySelector('img')!;
-    unmount();
-    await fireEvent.error(img);
+    await unmount();
+    img.dispatchEvent(new Event('error'));
     expect(onError).not.toHaveBeenCalled();
   });
 
-  it('passes through additional HTML attributes', () => {
-    const { baseElement } = render(Image, {
-      src: '/test.jpg',
-      alt: 'test alt',
-      class: 'my-class',
-      draggable: false,
-    });
-    const img = baseElement.querySelector('img')!;
-    expect(img.getAttribute('alt')).toBe('test alt');
-    expect(img.getAttribute('draggable')).toBe('false');
-  });
-
   it('updates the image when src changes', async () => {
-    const { baseElement, rerender } = render(Image, { src: '/old.jpg', alt: 'test' });
+    const { baseElement, rerender } = await render(Image, { src: '/old.jpg', alt: 'test' });
     expect(baseElement.querySelector('img')!.getAttribute('src')).toBe('/old.jpg');
 
     await rerender({ src: '/new.jpg', alt: 'test' });
@@ -156,7 +97,7 @@ describe('Image component', () => {
   });
 
   it('cancels the old URL when src changes', async () => {
-    const { rerender } = render(Image, { src: '/old.jpg', alt: 'test' });
+    const { rerender } = await render(Image, { src: '/old.jpg', alt: 'test' });
     expect(cancelImageUrl).not.toHaveBeenCalled();
 
     await rerender({ src: '/new.jpg', alt: 'test' });
@@ -165,7 +106,7 @@ describe('Image component', () => {
 
   it('calls onStart again when src changes', async () => {
     const onStart = vi.fn();
-    const { rerender } = render(Image, { src: '/old.jpg', onStart });
+    const { rerender } = await render(Image, { src: '/old.jpg', onStart });
     expect(onStart).toHaveBeenCalledOnce();
 
     await rerender({ src: '/new.jpg', onStart });
@@ -174,7 +115,7 @@ describe('Image component', () => {
 
   it('does not update when src changes to the same value', async () => {
     const onStart = vi.fn();
-    const { rerender } = render(Image, { src: '/same.jpg', onStart });
+    const { rerender } = await render(Image, { src: '/same.jpg', onStart });
     expect(onStart).toHaveBeenCalledOnce();
 
     await rerender({ src: '/same.jpg', onStart });

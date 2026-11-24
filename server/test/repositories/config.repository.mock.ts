@@ -1,7 +1,7 @@
 import { Mocked, vitest } from 'vitest';
-import type { RepositoryInterface } from 'src/types.js';
 import { DatabaseExtension, ImmichEnvironment, ImmichWorker, LogFormat } from 'src/enum.js';
 import { ConfigRepository, EnvData } from 'src/repositories/config.repository.js';
+import type { RepositoryInterface } from 'src/types.js';
 
 export const envData: EnvData = {
   port: 2283,
@@ -9,14 +9,6 @@ export const envData: EnvData = {
   logFormat: LogFormat.Console,
 
   buildMetadata: {},
-  backup: {
-    s3: {
-      enabled: false,
-      bucket: '',
-      region: 'us-east-1',
-      prefix: 'database',
-    },
-  },
   bull: {
     config: {
       connection: {},
@@ -78,6 +70,7 @@ export const envData: EnvData = {
       admin1: '/build/geodata/admin1CodesASCII.txt',
       admin2: '/build/geodata/admin2Codes.txt',
       cities500: '/build/geodata/cities500.txt',
+      countryInfo: '/build/geodata/countryInfo.txt',
       naturalEarthCountriesPath: 'build/ne_10m_admin_0_countries.geojson',
     },
     web: {
@@ -124,8 +117,6 @@ export const envData: EnvData = {
   noColor: false,
 
   peopleStatistics: false,
-
-  webDeleteToastThreshold: 20,
 };
 
 type MockEnvOverrides = Omit<Partial<EnvData>, 'storage'> & {

@@ -1,15 +1,18 @@
 import {
+  ALL_FILTER_SECTIONS,
+  type FilterPanelConfig,
+  type FilterState,
+} from '#lib/components/filter-panel/filter-panel.ts';
+import { getPhotosPersonFilterId, getPhotosPersonFilterThumbnailUrl } from '#lib/utils/photos-filter-options.ts';
+import { buildRecentlyAddedSuggestionRequest } from '#lib/utils/recently-added-filter-options.ts';
+import { buildSmartSearchFacetsParams, mapSmartSearchFacetsToFilterSuggestions } from '#lib/utils/space-search.ts';
+import {
+  SearchSuggestionType,
   getFilterSuggestions,
   getSearchSuggestions,
   searchSmartFacets,
-  SearchSuggestionType,
   type SmartSearchFacetsResponseDto,
 } from '@immich/sdk';
-import { ALL_FILTER_SECTIONS } from '$lib/components/filter-panel/filter-panel';
-import type { FilterPanelConfig, FilterState } from '$lib/components/filter-panel/filter-panel';
-import { getPhotosPersonFilterId, getPhotosPersonFilterThumbnailUrl } from '$lib/utils/photos-filter-options';
-import { buildRecentlyAddedSuggestionRequest } from '$lib/utils/recently-added-filter-options';
-import { buildSmartSearchFacetsParams, mapSmartSearchFacetsToFilterSuggestions } from '$lib/utils/space-search';
 
 function mapSuggestions(response: Awaited<ReturnType<typeof getFilterSuggestions>>) {
   return {
@@ -31,10 +34,10 @@ function mapSuggestions(response: Awaited<ReturnType<typeof getFilterSuggestions
 }
 
 /**
- * The route's live search state, read at provider call time so it never goes stale.
- * `filters` must be the route's live FilterState — the dependent providers scope their facet
- * query by it, exactly as the Photos page does.
- */
+The route's live search state, read at provider call time so it never goes stale.
+`filters` must be the route's live FilterState — the dependent providers scope their facet
+query by it, exactly as the Photos page does.
+*/
 export type RecentlyAddedSearchContext = { query: string; language: string; filters: FilterState };
 
 function fetchFacets(context: RecentlyAddedSearchContext, filters: FilterState): Promise<SmartSearchFacetsResponseDto> {
@@ -50,15 +53,15 @@ function fetchFacets(context: RecentlyAddedSearchContext, filters: FilterState):
 }
 
 /**
- * Filter-panel config for the Recently Added view: own + partner scope only, so nothing here
- * carries `withSharedSpaces` / `albumId` / `spaceId`.
- *
- * `getSearchContext` is an accessor, not a plain value, because the panel's providers are called
- * later, during user interaction, and must see the query and the live filters as they are at call
- * time — values captured when the config is built would go stale the moment the user edits either.
- * It defaults to `() => undefined`, so a caller that never searches keeps the Slice-2 browse
- * behaviour unchanged.
- */
+Filter-panel config for the Recently Added view: own + partner scope only, so nothing here
+carries `withSharedSpaces` / `albumId` / `spaceId`.
+
+`getSearchContext` is an accessor, not a plain value, because the panel's providers are called
+later, during user interaction, and must see the query and the live filters as they are at call
+time — values captured when the config is built would go stale the moment the user edits either.
+It defaults to `() => undefined`, so a caller that never searches keeps the Slice-2 browse
+behaviour unchanged.
+*/
 export function buildRecentlyAddedFilterConfig(
   getSearchContext: () => RecentlyAddedSearchContext | undefined = () => undefined,
 ): FilterPanelConfig {
@@ -69,10 +72,6 @@ export function buildRecentlyAddedFilterConfig(
   };
 
   return {
-    locationScopeKey: () => {
-      const search = activeSearch();
-      return JSON.stringify(['recently-added', search?.query.trim(), search?.language]);
-    },
     // Derived from the canonical list (#802) so this view cannot drift from the others. `'text'`
     // renders as `<TextFilter>`, editing the description / originalFileName / ocr metadata
     // filters — those already round-trip through the URL and through
@@ -96,15 +95,6 @@ export function buildRecentlyAddedFilterConfig(
       return mapSuggestions(await getFilterSuggestions({}));
     },
     providers: {
-      states: async (country, filterContext) => {
-        const context = activeSearch();
-        if (!context) {
-          return getSearchSuggestions({ $type: SearchSuggestionType.State, country, ...filterContext });
-        }
-        // Smart-search facets currently expose countries/cities but no state facet. Keep the
-        // ordinary timeline path exact and leave the state branch empty in query mode.
-        return [];
-      },
       cities: async (country, filterContext) => {
         const context = activeSearch();
         if (!context) {
@@ -112,12 +102,7 @@ export function buildRecentlyAddedFilterConfig(
         }
         // Scope by the LIVE filters (mirroring Photos' `filters: { ...filters, country }`), not by
         // the panel's FilterContext — see the module design note above.
-        const facets = await fetchFacets(context, {
-          ...context.filters,
-          country,
-          state: filterContext?.state,
-          city: undefined,
-        });
+        const facets = await fetchFacets(context, { ...context.filters, country });
         return facets.cities;
       },
       cameraModels: async (make, filterContext) => {

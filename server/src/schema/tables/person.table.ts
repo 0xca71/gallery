@@ -4,16 +4,15 @@ import {
   Column,
   CreateDateColumn,
   ForeignKeyColumn,
-  type Generated,
   Index,
   Table,
   Timestamp,
   UpdateDateColumn,
+  type Generated,
 } from '@immich/sql-tools';
 import { UpdateIdColumn, UpdatedAtTrigger } from 'src/decorators.js';
-import { person_delete_audit } from 'src/schema/functions.js';
+import { person_delete_audit, person_delete_shares } from 'src/schema/functions.js';
 import { AssetFaceTable } from 'src/schema/tables/asset-face.table.js';
-import { FaceIdentityTable } from 'src/schema/tables/face-identity.table.js';
 import { PersonGroupTable } from 'src/schema/tables/person-group.table.js';
 import { UserTable } from 'src/schema/tables/user.table.js';
 
@@ -30,14 +29,13 @@ import { UserTable } from 'src/schema/tables/user.table.js';
   referencingOldTableAs: 'old',
   when: 'pg_trigger_depth() <= 1',
 })
-@Check({ name: 'person_birthDate_chk', expression: `"birthDate" <= CURRENT_DATE` })
-@Index({
-  name: 'person_ownerId_identityId_key',
-  columns: ['ownerId', 'identityId'],
-  unique: true,
-  where: '"identityId" IS NOT NULL',
+@AfterDeleteTrigger({
+  name: 'person_delete_shares',
+  scope: 'statement',
+  function: person_delete_shares,
+  referencingOldTableAs: 'deleted_rows',
 })
-@Index({ name: 'person_identityId_idx', columns: ['identityId'], where: '"identityId" IS NOT NULL' })
+@Check({ name: 'person_birthDate_chk', expression: `"birthDate" <= CURRENT_DATE` })
 // Option M: Gallery does not adopt upstream's cluster-groups FEATURE — cross-user recognition is
 // answered by shared spaces + `face_identity` instead. That decision means a person_group never
 // holds more than one `person` row, which is what lets the fork keep addressing a person by
@@ -95,15 +93,6 @@ export class PersonTable {
 
   @Column({ type: 'character varying', nullable: true, default: null })
   color!: string | null;
-
-  @Column({ type: 'character varying', default: 'person' })
-  type!: Generated<string>;
-
-  @Column({ type: 'character varying', nullable: true })
-  species!: string | null;
-
-  @ForeignKeyColumn(() => FaceIdentityTable, { onDelete: 'SET NULL', nullable: true, index: false })
-  identityId!: string | null;
 
   @UpdateIdColumn({ index: true })
   updateId!: Generated<string>;

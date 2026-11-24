@@ -1,12 +1,9 @@
 import { Mocked, vitest } from 'vitest';
-import type { RepositoryInterface } from 'src/types.js';
 import { MediaRepository } from 'src/repositories/media.repository.js';
+import type { RepositoryInterface } from 'src/types.js';
 
 export const newMediaRepositoryMock = (): Mocked<RepositoryInterface<MediaRepository>> => {
   return {
-    renderSavedImage: vitest.fn(),
-    writeSavedImageMetadata: vitest.fn(),
-    normalizeSavedSidecar: vitest.fn(),
     generateThumbnail: vitest.fn().mockImplementation(() => Promise.resolve()),
     writeExif: vitest.fn().mockImplementation(() => Promise.resolve()),
     copyTagGroup: vitest.fn().mockImplementation(() => Promise.resolve()),
@@ -22,10 +19,7 @@ export const newMediaRepositoryMock = (): Mocked<RepositoryInterface<MediaReposi
       keyframeAccDuration: [],
       keyframeOwnDuration: [],
     }),
-    extractVideoFrames: vitest.fn().mockResolvedValue([]),
     transcode: vitest.fn(),
-    trim: vitest.fn(),
-    extractFrame: vitest.fn(),
     getImageMetadata: vitest.fn(),
   };
 };

@@ -1,20 +1,28 @@
 import {
   AfterDeleteTrigger,
+  AfterUpdateTrigger,
   Column,
   CreateDateColumn,
   DeleteDateColumn,
   ForeignKeyColumn,
-  type Generated,
   Index,
   PrimaryGeneratedColumn,
   Table,
-  type Timestamp,
+  TriggerFunction,
   UpdateDateColumn,
+  type Generated,
+  type Timestamp,
 } from '@immich/sql-tools';
 import { UpdateIdColumn, UpdatedAtTrigger } from 'src/decorators.js';
 import { AssetStatus, AssetType, AssetVisibility, ChecksumAlgorithm } from 'src/enum.js';
+import { CLEANUP_MONTH_DAY_INDEX_WHERE, MONTH_DAY_SQL } from 'src/gallery/utils/cleanup-sql.js';
 import { asset_checksum_algorithm_enum, asset_visibility_enum, assets_status_enum } from 'src/schema/enums.js';
-import { asset_delete_audit, asset_library_delete_audit } from 'src/schema/functions.js';
+import {
+  asset_delete_audit,
+  asset_face_update_asset_state,
+  asset_is_favorite_after_write,
+  asset_library_delete_audit,
+} from 'src/schema/functions.js';
 import { LibraryTable } from 'src/schema/tables/library.table.js';
 import { StackTable } from 'src/schema/tables/stack.table.js';
 import { UserTable } from 'src/schema/tables/user.table.js';
@@ -28,6 +36,11 @@ import { ASSET_CHECKSUM_CONSTRAINT } from 'src/utils/database.js';
   referencingOldTableAs: 'old',
   when: 'pg_trigger_depth() = 0',
 })
+@AfterUpdateTrigger({
+  scope: 'row',
+  function: asset_face_update_asset_state,
+  when: '(OLD."ownerId", OLD."visibility", OLD."deletedAt") IS DISTINCT FROM (NEW."ownerId", NEW."visibility", NEW."deletedAt")',
+})
 // Gallery-fork: emits per-asset library audit rows for deleted library assets
 // (deleted directly or via cascade from a `library` DELETE). Depth guard keeps
 // emission to a single statement-level pass per cascade chain.
@@ -37,6 +50,17 @@ import { ASSET_CHECKSUM_CONSTRAINT } from 'src/utils/database.js';
   function: asset_library_delete_audit,
   referencingOldTableAs: 'old',
   when: 'pg_trigger_depth() <= 1',
+})
+// Gallery-fork: a write to "isFavorite" from outside the fork's triggers (a stock Immich server)
+// becomes the owner's asset_favorite row. Row level: transition tables rule out a column list, and a
+// statement trigger would materialise every asset UPDATE.
+@TriggerFunction({
+  name: 'asset_is_favorite_after_write',
+  timing: 'after',
+  actions: ['insert', 'update'],
+  scope: 'row',
+  function: asset_is_favorite_after_write,
+  when: 'pg_trigger_depth() = 0',
 })
 // Checksums must be unique per user and library
 @Index({
@@ -58,8 +82,11 @@ import { ASSET_CHECKSUM_CONSTRAINT } from 'src/utils/database.js';
   name: 'asset_localDateTime_month_idx',
   expression: `date_trunc('MONTH'::text, ("localDateTime" AT TIME ZONE 'UTC'::text)) AT TIME ZONE 'UTC'::text`,
 })
+// Gallery-fork: backs the filter panel's taken range (src/utils/asset-filter.ts).
+@Index({ name: 'asset_localDateTime_range_idx', columns: ['localDateTime'] })
 @Index({ columns: ['originalPath', 'libraryId'] })
 @Index({ columns: ['id', 'stackId'] })
+@Index({ columns: ['ownerId', 'updateId'] })
 @Index({
   name: 'asset_originalFilename_trigram_idx',
   using: 'gin',
@@ -69,6 +96,21 @@ import { ASSET_CHECKSUM_CONSTRAINT } from 'src/utils/database.js';
   name: 'asset_id_timeline_notDeleted_idx',
   columns: ['id'],
   where: `visibility = 'timeline' AND "deletedAt" IS NULL`,
+})
+// gallery-fork: Library Cleanup calendar/rewind — see specs/2026-09-23-library-cleanup-design.md
+// The trailing "localDateTime" key lets the calendar count run as an index-only scan that reads the
+// stored month-day value instead of evaluating the expression per row (p95 279 ms -> 25 ms at 500k assets).
+@Index({
+  name: 'asset_localMonthDay_idx',
+  expression: `"ownerId", ${MONTH_DAY_SQL}, "localDateTime"`,
+  where: CLEANUP_MONTH_DAY_INDEX_WHERE,
+})
+// gallery-fork: Library Cleanup keyset paging (bursts windows, screenshots, blurry). Same partial condition
+// as asset_localMonthDay_idx, so only Cleanup queries (which repeat it as literals) can use it.
+@Index({
+  name: 'asset_cleanup_localDateTime_idx',
+  columns: ['ownerId', 'localDateTime', 'id'],
+  where: CLEANUP_MONTH_DAY_INDEX_WHERE,
 })
 // For all assets, each originalpath must be unique per user and library
 export class AssetTable {

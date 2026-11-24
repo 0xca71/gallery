@@ -1,17 +1,18 @@
 <script lang="ts">
-  import SettingButtonsRow from '$lib/components/shared-components/settings/SystemConfigButtonRow.svelte';
-  import SettingInputField from '$lib/components/shared-components/settings/SettingInputField.svelte';
-  import SettingSwitch from '$lib/components/shared-components/settings/SettingSwitch.svelte';
-  import { SettingInputFieldType } from '$lib/constants';
-  import { featureFlagsManager } from '$lib/managers/feature-flags-manager.svelte';
-  import { systemConfigManager } from '$lib/managers/system-config-manager.svelte';
+  import SettingInputField from '#lib/components/shared-components/settings/SettingInputField.svelte';
+  import SettingSwitch from '#lib/components/shared-components/settings/SettingSwitch.svelte';
+  import SettingButtonsRow from '#lib/components/shared-components/settings/SystemConfigButtonRow.svelte';
+  import { SettingInputFieldType } from '#lib/constants.ts';
+  import { featureFlagsManager } from '#lib/managers/feature-flags-manager.svelte.ts';
+  import { createPreloadedQuery } from '#lib/queries/client.ts';
+  import { getAdminConfigQuery } from '#lib/queries/config-admin.query.ts';
+  import { cloneDeep } from 'lodash-es';
   import { t, type Translations } from 'svelte-i18n';
   import { fade } from 'svelte/transition';
 
   // Mirrors the server-side memory-type registry keys.
   const memoryTypeKeys = [
     'on_this_day',
-    'birthday',
     'recent_trip',
     'month_recap',
     'favorites_throwback',
@@ -24,9 +25,11 @@
     'person_throwback',
   ];
 
+  const query = createPreloadedQuery(getAdminConfigQuery);
+  const config = $derived(query.data);
+
   const disabled = $derived(featureFlagsManager.value.configFile);
-  const config = $derived(systemConfigManager.value);
-  let configToEdit = $state(systemConfigManager.cloneValue());
+  let configToEdit = $state(cloneDeep(config));
 
   // Seed the availability map so every known type renders with its effective value
   // (unset keys default to enabled, matching the registry default). `memoryTypes` shares

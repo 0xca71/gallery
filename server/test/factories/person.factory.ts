@@ -1,10 +1,8 @@
-import { Selectable } from 'kysely';
-import { PersonTable } from 'src/schema/tables/person.table.js';
-import { PersonLike } from 'test/factories/types.js';
+import { PersonLike, PersonRow } from 'test/factories/types.js';
 import { newDate, newUuid, newUuidV7 } from 'test/small.factory.js';
 
 export class PersonFactory {
-  private constructor(private readonly value: Selectable<PersonTable>) {}
+  private constructor(private readonly value: PersonRow) {}
 
   static create(dto: PersonLike = {}) {
     return PersonFactory.from(dto).build();
@@ -21,6 +19,9 @@ export class PersonFactory {
       isFavorite: false,
       isHidden: false,
       name: 'person',
+      otherPeople: [],
+      sharedBy: [],
+      sharedWith: [],
       ownerId: newUuid(),
       species: null,
       thumbnailPath: '/data/thumbs/person-thumbnail.jpg',

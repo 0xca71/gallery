@@ -1,9 +1,10 @@
 import { Injectable } from '@nestjs/common';
-import { Insertable, Kysely } from 'kysely';
+import { Insertable, Kysely, sql } from 'kysely';
 import { InjectKysely } from 'nestjs-kysely';
 import { AssetFileType } from 'src/enum.js';
 import { DB } from 'src/schema/index.js';
 import { StorageMigrationLogTable } from 'src/schema/tables/storage-migration-log.table.js';
+import { escapeLikePattern } from 'src/utils/database.js';
 
 export type StorageMigrationDirection = 'toS3' | 'toDisk';
 
@@ -55,6 +56,40 @@ export class StorageMigrationRepository {
       .stream();
   }
 
+  /** Spatial Scene depth maps (specs/2026-10-29-spatial-scene-design.md): derived from the preview, so they move with it. */
+  streamDepthMaps(direction: StorageMigrationDirection) {
+    return this.db
+      .selectFrom('asset_spatial_scene')
+      .select(['assetId', 'path'])
+      .$if(direction === 'toS3', (qb) => qb.where('path', 'like', '/%'))
+      .$if(direction === 'toDisk', (qb) => qb.where('path', 'not like', '/%'))
+      .stream();
+  }
+
+  /** Data Saver video copies (specs/2026-11-01-data-saver-video-design.md): they move with the encoded videos. */
+  streamDataSaverVideos(direction: StorageMigrationDirection) {
+    return this.db
+      .selectFrom('asset_data_saver_video')
+      .select((eb) => ['assetId', eb.ref('path').$castTo<string>().as('path')])
+      .where('path', 'is not', null)
+      .$if(direction === 'toS3', (qb) => qb.where('path', 'like', '/%'))
+      .$if(direction === 'toDisk', (qb) => qb.where('path', 'not like', '/%'))
+      .stream();
+  }
+
+  /**
+  Best frames of video faces (specs/2026-10-31-video-face-frames-design.md): the source person thumbnails are cut
+  from, so they move with them.
+  */
+  streamVideoFaceFrames(direction: StorageMigrationDirection) {
+    return this.db
+      .selectFrom('asset_face_video_frame')
+      .select(['faceId', 'path'])
+      .$if(direction === 'toS3', (qb) => qb.where('path', 'like', '/%'))
+      .$if(direction === 'toDisk', (qb) => qb.where('path', 'not like', '/%'))
+      .stream();
+  }
+
   streamPersonThumbnails(direction: StorageMigrationDirection) {
     return this.db
       .selectFrom('person')
@@ -75,6 +110,49 @@ export class StorageMigrationRepository {
       .stream();
   }
 
+  /** whether any asset, trashed or not, has its original stored as an S3 key */
+  async hasS3Originals(): Promise<boolean> {
+    const row = await this.db
+      .selectFrom('asset')
+      .select('asset.id')
+      .where('asset.originalPath', 'not like', '/%')
+      .limit(1)
+      .executeTakeFirst();
+    return !!row;
+  }
+
+  /** whether an asset not owned by ownerId has its original, or a file of its own (a sidecar), under the key prefix */
+  async hasOtherOwnerFilesUnderPrefix(prefix: string, ownerId: string): Promise<boolean> {
+    // a storage label may contain the LIKE wildcards _ and %, which must match only themselves
+    const likePrefix = `${escapeLikePattern(prefix)}%`;
+    const pattern = sql<string>`${likePrefix} escape '\\'`;
+    const { found } = await this.db
+      .selectNoFrom((eb) =>
+        eb
+          .or([
+            eb.exists(
+              eb
+                .selectFrom('asset')
+                .select('asset.id')
+                .where('asset.ownerId', '!=', ownerId)
+                .where('asset.originalPath', 'like', pattern),
+            ),
+            eb.exists(
+              eb
+                .selectFrom('asset_file')
+                .innerJoin('asset', 'asset.id', 'asset_file.assetId')
+                .select('asset_file.id')
+                .where('asset.ownerId', '!=', ownerId)
+                .where('asset_file.path', 'like', pattern),
+            ),
+          ])
+          .as('found'),
+      )
+      .executeTakeFirstOrThrow();
+
+    return !!found;
+  }
+
   // --- Estimate queries ---
 
   async getOriginalsSizeEstimate(direction: StorageMigrationDirection): Promise<number> {
@@ -93,54 +171,75 @@ export class StorageMigrationRepository {
     const pathFilter = direction === 'toS3' ? 'like' : ('not like' as const);
     const pathPattern = '/%';
 
-    const [originals, assetFiles, encodedVideos, personThumbnails, profileImages] = await Promise.all([
-      this.db
-        .selectFrom('asset')
-        .select((eb) => eb.fn.countAll<number>().as('count'))
-        .where('originalPath', pathFilter, pathPattern)
-        .executeTakeFirstOrThrow(),
+    const [originals, assetFiles, depthMaps, encodedVideos, personThumbnails, videoFaceFrames, profileImages] =
+      await Promise.all([
+        this.db
+          .selectFrom('asset')
+          .select((eb) => eb.fn.countAll<number>().as('count'))
+          .where('originalPath', pathFilter, pathPattern)
+          .executeTakeFirstOrThrow(),
 
-      this.db
-        .selectFrom('asset_file')
-        .select((eb) => [
-          eb.fn.countAll<number>().filterWhere('type', '=', AssetFileType.Thumbnail).as('thumbnails'),
-          eb.fn.countAll<number>().filterWhere('type', '=', AssetFileType.Preview).as('previews'),
-          eb.fn.countAll<number>().filterWhere('type', '=', AssetFileType.FullSize).as('fullsize'),
-          eb.fn.countAll<number>().filterWhere('type', '=', AssetFileType.Sidecar).as('sidecars'),
-        ])
-        .where('path', pathFilter, pathPattern)
-        .executeTakeFirstOrThrow(),
+        this.db
+          .selectFrom('asset_file')
+          .select((eb) => [
+            eb.fn.countAll<number>().filterWhere('type', '=', AssetFileType.Thumbnail).as('thumbnails'),
+            eb.fn.countAll<number>().filterWhere('type', '=', AssetFileType.Preview).as('previews'),
+            eb.fn.countAll<number>().filterWhere('type', '=', AssetFileType.FullSize).as('fullsize'),
+            eb.fn.countAll<number>().filterWhere('type', '=', AssetFileType.Sidecar).as('sidecars'),
+          ])
+          .where('path', pathFilter, pathPattern)
+          .executeTakeFirstOrThrow(),
 
-      this.db
-        .selectFrom('asset_file')
-        .select((eb) => eb.fn.countAll<number>().as('count'))
-        .where('type', '=', AssetFileType.EncodedVideo)
-        .where('path', pathFilter, pathPattern)
-        .executeTakeFirstOrThrow(),
+        this.db
+          .selectFrom('asset_spatial_scene')
+          .select((eb) => eb.fn.countAll<number>().as('count'))
+          .where('path', pathFilter, pathPattern)
+          .executeTakeFirstOrThrow(),
 
-      this.db
-        .selectFrom('person')
-        .select((eb) => eb.fn.countAll<number>().as('count'))
-        .where('thumbnailPath', '!=', '')
-        .where('thumbnailPath', pathFilter, pathPattern)
-        .executeTakeFirstOrThrow(),
+        this.db
+          .selectFrom('asset_file')
+          .select((eb) => eb.fn.countAll<number>().as('count'))
+          .where('type', '=', AssetFileType.EncodedVideo)
+          .where('path', pathFilter, pathPattern)
+          .executeTakeFirstOrThrow(),
 
-      this.db
-        .selectFrom('user')
-        .select((eb) => eb.fn.countAll<number>().as('count'))
-        .where('profileImagePath', '!=', '')
-        .where('profileImagePath', pathFilter, pathPattern)
-        .executeTakeFirstOrThrow(),
-    ]);
+        this.db
+          .selectFrom('person')
+          .select((eb) => eb.fn.countAll<number>().as('count'))
+          .where('thumbnailPath', '!=', '')
+          .where('thumbnailPath', pathFilter, pathPattern)
+          .executeTakeFirstOrThrow(),
+
+        this.db
+          .selectFrom('asset_face_video_frame')
+          .select((eb) => eb.fn.countAll<number>().as('count'))
+          .where('path', pathFilter, pathPattern)
+          .executeTakeFirstOrThrow(),
+
+        this.db
+          .selectFrom('user')
+          .select((eb) => eb.fn.countAll<number>().as('count'))
+          .where('profileImagePath', '!=', '')
+          .where('profileImagePath', pathFilter, pathPattern)
+          .executeTakeFirstOrThrow(),
+      ]);
+    // Data Saver copies move with the encoded videos they sit beside
+    const dataSaverVideos = await this.db
+      .selectFrom('asset_data_saver_video')
+      .select((eb) => eb.fn.countAll<number>().as('count'))
+      .where('path', pathFilter, pathPattern)
+      .executeTakeFirstOrThrow();
 
     return {
       originals: originals.count,
       thumbnails: assetFiles.thumbnails,
-      previews: assetFiles.previews,
+      // depth maps move with the previews they were made from
+      previews: Number(assetFiles.previews) + Number(depthMaps.count),
       fullsize: assetFiles.fullsize,
       sidecars: assetFiles.sidecars,
-      encodedVideos: encodedVideos.count,
-      personThumbnails: personThumbnails.count,
+      encodedVideos: Number(encodedVideos.count) + Number(dataSaverVideos.count),
+      // video face frames move with the person thumbnails cut from them
+      personThumbnails: Number(personThumbnails.count) + Number(videoFaceFrames.count),
       profileImages: profileImages.count,
     };
   }
@@ -175,6 +274,39 @@ export class StorageMigrationRepository {
       .updateTable('asset_file')
       .set({ path: newPath })
       .where('id', '=', fileId)
+      .where('path', '=', oldPath)
+      .executeTakeFirst();
+
+    return Number(result.numUpdatedRows) > 0;
+  }
+
+  async updateDepthMapPath(assetId: string, oldPath: string, newPath: string): Promise<boolean> {
+    const result = await this.db
+      .updateTable('asset_spatial_scene')
+      .set({ path: newPath })
+      .where('assetId', '=', assetId)
+      .where('path', '=', oldPath)
+      .executeTakeFirst();
+
+    return Number(result.numUpdatedRows) > 0;
+  }
+
+  async updateDataSaverVideoPath(assetId: string, oldPath: string, newPath: string): Promise<boolean> {
+    const result = await this.db
+      .updateTable('asset_data_saver_video')
+      .set({ path: newPath })
+      .where('assetId', '=', assetId)
+      .where('path', '=', oldPath)
+      .executeTakeFirst();
+
+    return Number(result.numUpdatedRows) > 0;
+  }
+
+  async updateVideoFaceFramePath(faceId: string, oldPath: string, newPath: string): Promise<boolean> {
+    const result = await this.db
+      .updateTable('asset_face_video_frame')
+      .set({ path: newPath })
+      .where('faceId', '=', faceId)
       .where('path', '=', oldPath)
       .executeTakeFirst();
 

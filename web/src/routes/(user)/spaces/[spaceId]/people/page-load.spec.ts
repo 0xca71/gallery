@@ -1,13 +1,13 @@
+import { sdkMock } from '#lib/gallery/__mocks__/sdk.mock.ts';
+import { PeopleFilterBy, PeopleSortBy, peopleViewSettings } from '#lib/gallery/stores/preferences.store.ts';
 import { SharedSpaceRole } from '@immich/sdk';
-import { sdkMock } from '$lib/__mocks__/sdk.mock';
-import { PeopleFilterBy, PeopleSortBy, peopleViewSettings } from '$lib/stores/preferences.store';
 import { load } from './+page';
 
 const { authenticate } = vi.hoisted(() => ({
   authenticate: vi.fn(),
 }));
 
-vi.mock('$lib/utils/auth', () => ({ authenticate }));
+vi.mock('#lib/utils/auth.js', () => ({ authenticate }));
 
 describe('space people page load', () => {
   const space = {
@@ -66,6 +66,7 @@ describe('space people page load', () => {
     detectedFaceCount: 1980,
   };
 
+  // eslint-disable-next-line unicorn/no-unnecessary-parameters
   const makeEvent = (overrides: { spaceId?: string } = {}) => ({
     url: new URL(`https://gallery.test/spaces/${overrides.spaceId ?? 'space-1'}/people`),
     params: { spaceId: overrides.spaceId ?? 'space-1' },

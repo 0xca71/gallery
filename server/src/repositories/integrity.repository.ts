@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { type Insertable, type Kysely, sql } from 'kysely';
+import { sql, type Insertable, type Kysely } from 'kysely';
 import { InjectKysely } from 'nestjs-kysely';
 import { DummyValue, GenerateSql } from 'src/decorators.js';
 import { AssetFileType, IntegrityReport } from 'src/enum.js';
@@ -108,6 +108,24 @@ export class IntegrityRepository {
           .selectFrom('person')
           .select((eb) => eb.ref('person.thumbnailPath').$castTo<string>().as('path'))
           .where('person.thumbnailPath', 'in', paths),
+      )
+      .union((eb) =>
+        eb
+          .selectFrom('asset_spatial_scene')
+          .select('asset_spatial_scene.path as path')
+          .where('asset_spatial_scene.path', 'in', paths),
+      )
+      .union((eb) =>
+        eb
+          .selectFrom('asset_data_saver_video')
+          .select((eb) => eb.ref('asset_data_saver_video.path').$castTo<string>().as('path'))
+          .where('asset_data_saver_video.path', 'in', paths),
+      )
+      .union((eb) =>
+        eb
+          .selectFrom('asset_face_video_frame')
+          .select('asset_face_video_frame.path as path')
+          .where('asset_face_video_frame.path', 'in', paths),
       )
       .execute();
   }

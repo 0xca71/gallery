@@ -2,7 +2,7 @@ import type { LoginResponseDto } from '@immich/sdk';
 import { updateAsset } from '@immich/sdk';
 import { expect, test } from '@playwright/test';
 import { readFileSync } from 'node:fs';
-import { thumbnailUtils } from 'src/ui/specs/timeline/utils.js';
+import { thumbnailUtils } from 'src/gallery-timeline.js';
 import { asBearerAuth, testAssetDir, utils } from 'src/utils.js';
 
 test.describe('Recently Added', () => {
@@ -335,6 +335,7 @@ test.describe('Recently Added text search', () => {
   async function gotoRecentlyAdded(
     context: import('@playwright/test').BrowserContext,
     page: import('@playwright/test').Page,
+    // eslint-disable-next-line unicorn/no-unnecessary-parameters
     path = '/recently-added',
   ) {
     await utils.setAuthCookies(context, admin.accessToken);
@@ -387,8 +388,9 @@ test.describe('Recently Added text search', () => {
   // outgoing DTO when the caller passes a truthy `withSharedSpaces`; when falsy, the key is
   // omitted entirely (not sent as `false`). Recently Added always passes `withSharedSpaces={false}`
   // (own + partner scope only — see the route-level spec's "does not send shared-space scope to
-  // SmartSearchResults"), while /photos passes `withSharedSpaces={filters.isFavorite === undefined}`,
-  // i.e. `true` by default. So the same query, run on both pages, must produce two different
+  // SmartSearchResults"), while /photos passes `withSharedSpaces={true}` unconditionally (since
+  // #763 made favorites per-user, a Favorites filter no longer narrows the scope there).
+  // So the same query, run on both pages, must produce two different
   // request bodies — that difference *is* the own+partner-vs-shared-spaces scope invariant, and
   // it's fully deterministic (it never touches embeddings or matching).
   test('text search stays within own + partner scope', async ({ context, page }) => {

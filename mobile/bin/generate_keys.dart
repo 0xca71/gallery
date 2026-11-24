@@ -102,12 +102,13 @@ const _kParamTypeOverrides = <String, String>{
   'backup_controller_page_storage_format.total': 'String',
   'backup_controller_page_storage_format.used': 'String',
   'cleanup_found_assets_with_size.size': 'String',
+  'in_year.year': 'String',
 };
 
 final _usedParamTypeOverrides = <String>{};
 
 void main() async {
-  final sourceFile = File('../i18n/en.json');
+  final sourceFile = File('../i18n/gallery/merged/en.json');
   if (!await sourceFile.exists()) {
     stderr.writeln('Source file does not exist');
     return;

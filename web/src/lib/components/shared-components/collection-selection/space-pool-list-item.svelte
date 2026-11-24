@@ -1,19 +1,19 @@
 <script lang="ts">
-  import { longPress } from '$lib/actions/long-press';
-  import { SCROLL_PROPERTIES } from '$lib/components/shared-components/album-selection/album-selection-utils';
-  import { mediaQueryManager } from '$lib/stores/media-query-manager.svelte';
+  import { longPress } from '#lib/actions/long-press.ts';
+  import { SCROLL_PROPERTIES } from '#lib/components/shared-components/album-selection/album-selection-utils.ts';
+  import { mediaQueryManager } from '#lib/stores/media-query-manager.svelte.ts';
   import { Icon } from '@immich/ui';
   import { mdiCheckCircle, mdiImageMultipleOutline } from '@mdi/js';
-  import type { Action } from 'svelte/action';
   import { t } from 'svelte-i18n';
+  import type { Action } from 'svelte/action';
 
   /**
-   * "Add to space" — the pool of an expanded space, offered as a child row alongside that
-   * space's linked albums (#965).
-   *
-   * It carries the same `PickerCollection` as its parent space row, so ticking either one
-   * means the same destination and both show the tick.
-   */
+  "Add to space" — the pool of an expanded space, offered as a child row alongside that
+  space's linked albums (#965).
+  
+  It carries the same `PickerCollection` as its parent space row, so ticking either one
+  means the same destination and both show the tick.
+  */
   interface Props {
     spaceId: string;
     selected: boolean;

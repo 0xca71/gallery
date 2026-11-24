@@ -16,16 +16,6 @@ void main() {
   late MockApiService mockApiService;
   late SharedSpaceApiRepository repository;
 
-  api.SharedSpaceMemberResponseDto member(String userId, api.SharedSpaceRole role) => api.SharedSpaceMemberResponseDto(
-    userId: userId,
-    name: userId,
-    email: '$userId@example.com',
-    role: role,
-    joinedAt: '2024-01-01T00:00:00Z',
-    sharePersonMetadata: true,
-    showInTimeline: true,
-  );
-
   api.SharedSpacePersonResponseDto spacePerson(
     String id, {
     String name = '',
@@ -237,43 +227,6 @@ void main() {
     });
   });
 
-  // Mirrors the web resolveSpaceEditable (person.service.ts): owner/editor may edit Space
-  // people; viewers may not; a membership-lookup failure fails open (the server enforces the
-  // role on every write, so hiding a working action would be worse than showing a rejected one).
-  group('isSpaceEditor', () {
-    test('returns true for an owner', () async {
-      when(() => mockApi.getMembers('space-1')).thenAnswer((_) async => [member('user-1', api.SharedSpaceRole.owner)]);
-
-      expect(await repository.isSpaceEditor('space-1', 'user-1'), isTrue);
-    });
-
-    test('returns true for an editor', () async {
-      when(() => mockApi.getMembers('space-1')).thenAnswer((_) async => [member('user-1', api.SharedSpaceRole.editor)]);
-
-      expect(await repository.isSpaceEditor('space-1', 'user-1'), isTrue);
-    });
-
-    test('returns false for a viewer', () async {
-      when(() => mockApi.getMembers('space-1')).thenAnswer((_) async => [member('user-1', api.SharedSpaceRole.viewer)]);
-
-      expect(await repository.isSpaceEditor('space-1', 'user-1'), isFalse);
-    });
-
-    test('returns false when the user is not a member', () async {
-      when(
-        () => mockApi.getMembers('space-1'),
-      ).thenAnswer((_) async => [member('someone-else', api.SharedSpaceRole.owner)]);
-
-      expect(await repository.isSpaceEditor('space-1', 'user-1'), isFalse);
-    });
-
-    test('fails open (true) when the membership lookup throws', () async {
-      when(() => mockApi.getMembers('space-1')).thenThrow(Exception('network down'));
-
-      expect(await repository.isSpaceEditor('space-1', 'user-1'), isTrue);
-    });
-  });
-
   group('updateSpacePerson', () {
     test('routes name edits to the shared-space endpoint with the right ids', () async {
       when(
@@ -466,6 +419,12 @@ void main() {
   });
 
   group('removeAssets', () {
+    test('returns the IDs the server removed', () async {
+      when(() => mockApi.removeAssets('space-1', any())).thenAnswer((_) async => <String>['asset-1']);
+
+      expect(await repository.removeAssets('space-1', ['asset-1', 'asset-2']), ['asset-1']);
+    });
+
     test('calls removeAssets on API with correct DTO', () async {
       when(() => mockApi.removeAssets('space-1', any())).thenAnswer((_) async => <String>['asset-1']);
 
@@ -475,6 +434,72 @@ void main() {
         () => mockApi.removeAssets(
           'space-1',
           any(that: isA<api.SharedSpaceAssetRemoveDto>().having((d) => d.assetIds, 'assetIds', ['asset-1'])),
+        ),
+      ).called(1);
+    });
+  });
+
+  group('space changes', () {
+    late int changes;
+
+    setUp(() {
+      changes = 0;
+      repository = SharedSpaceApiRepository(mockApiService, onSpaceChanged: () => changes++);
+    });
+
+    test('tells the app once the server has added, removed or edited', () async {
+      when(() => mockApi.addAssets('space-1', any())).thenAnswer((_) async => true);
+      when(() => mockApi.removeAssets('space-1', any())).thenAnswer((_) async => <String>['asset-1']);
+      when(() => mockApi.updateSpace('space-1', any())).thenAnswer(
+        (_) async => api.SharedSpaceResponseDto(
+          id: 'space-1',
+          name: 'Trips',
+          createdAt: '2024-01-01T00:00:00Z',
+          updatedAt: '2024-01-01T00:00:00Z',
+          createdById: 'user-1',
+        ),
+      );
+
+      await repository.addAssets('space-1', ['asset-1']);
+      expect(changes, 1);
+      await repository.removeAssets('space-1', ['asset-1']);
+      expect(changes, 2);
+      await repository.update('space-1', color: api.UserAvatarColor.pink);
+      expect(changes, 3);
+    });
+
+    test('says nothing when the server refuses', () async {
+      when(() => mockApi.addAssets('space-1', any())).thenThrow(api.ApiException(403, 'no'));
+      when(() => mockApi.updateSpace('space-1', any())).thenAnswer((_) async => null);
+
+      await expectLater(repository.addAssets('space-1', ['asset-1']), throwsA(isA<api.ApiException>()));
+      await expectLater(repository.update('space-1', name: 'Trips'), throwsA(anything));
+      expect(changes, 0);
+    });
+
+    test('leaves album links to their own nudge', () async {
+      when(() => mockApi.linkAlbum('album-1', 'space-1')).thenAnswer((_) async {});
+
+      await repository.linkAlbum('space-1', 'album-1');
+      expect(changes, 0);
+    });
+  });
+
+  group('linkedAlbumNames', () {
+    test('names the linked albums that hold the assets, once each and in order', () async {
+      when(() => mockApi.getSharedSpaceAssetLinkedAlbums('space-1', any())).thenAnswer(
+        (_) async => [
+          api.SharedSpaceAssetLinkedAlbumDto(albumId: 'album-1', albumName: 'Trip'),
+          api.SharedSpaceAssetLinkedAlbumDto(albumId: 'album-1', albumName: 'Trip'),
+          api.SharedSpaceAssetLinkedAlbumDto(albumId: 'album-2', albumName: 'Beach'),
+        ],
+      );
+
+      expect(await repository.linkedAlbumNames('space-1', ['asset-1', 'asset-2']), ['Trip', 'Beach']);
+      verify(
+        () => mockApi.getSharedSpaceAssetLinkedAlbums(
+          'space-1',
+          any(that: isA<api.SharedSpaceAssetRemoveDto>().having((d) => d.assetIds, 'assetIds', ['asset-1', 'asset-2'])),
         ),
       ).called(1);
     });

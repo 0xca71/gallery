@@ -1,6 +1,6 @@
 <script lang="ts">
-  import type { NavigationItem, NavigationCategory } from '$lib/managers/navigation-items';
-  import type { ProviderStatus } from '$lib/managers/global-search-manager.svelte';
+  import type { ProviderStatus } from '#lib/managers/global-search-manager.svelte.ts';
+  import type { NavigationCategory, NavigationItem } from '#lib/managers/navigation-items.ts';
   import { Command } from 'bits-ui';
   import { t, type Translations } from 'svelte-i18n';
   import { SvelteMap } from 'svelte/reactivity';
@@ -31,10 +31,12 @@
     const byCategory = new SvelteMap<NavigationCategory, NavigationItem[]>();
     for (const item of status.items) {
       const arr = byCategory.get(item.category) ?? [];
-      if (arr.length < TOP_N) {
-        arr.push(item);
-        byCategory.set(item.category, arr);
+      if (!(arr.length < TOP_N)) {
+        continue;
       }
+
+      arr.push(item);
+      byCategory.set(item.category, arr);
     }
     return ORDER.filter(({ category }) => (byCategory.get(category)?.length ?? 0) > 0).map(
       ({ category, headingKey }) => ({

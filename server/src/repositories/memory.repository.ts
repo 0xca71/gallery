@@ -1,21 +1,35 @@
 import { Injectable } from '@nestjs/common';
-import { type Insertable, type Kysely, type OrderByDirection, type Updateable, sql } from 'kysely';
+import {
+  sql,
+  type ExpressionBuilder,
+  type Insertable,
+  type Kysely,
+  type OrderByDirection,
+  type Updateable,
+} from 'kysely';
 import { jsonArrayFrom } from 'kysely/helpers/postgres';
 import { DateTime } from 'luxon';
 import { InjectKysely } from 'nestjs-kysely';
-import type { IBulkAsset } from 'src/types.js';
 import { Chunked, ChunkedSet, DummyValue, GenerateSql } from 'src/decorators.js';
 import { MemorySearchDto } from 'src/dtos/memory.dto.js';
-import { AssetOrderWithRandom, AssetVisibility, MemoryType } from 'src/enum.js';
+import { AssetFileType, AssetOrderWithRandom, AssetVisibility, MemoryType } from 'src/enum.js';
+import { memoryAccessibleTo } from 'src/gallery/utils/memory-access.js';
+import { projectedDuration } from 'src/gallery/utils/projected-duration.js';
+import { type YearMonthDay } from 'src/repositories/asset.repository.js';
 import { DB } from 'src/schema/index.js';
 import { MemoryTable } from 'src/schema/tables/memory.table.js';
+import type { IBulkAsset } from 'src/types.js';
 import { asUuid } from 'src/utils/database.js';
+import { asLocalTime } from 'src/utils/date.js';
+import { favoriteExistsFor } from 'src/utils/favorite.js';
 import {
-  type TimelineHiddenScope,
   hiddenFromOwnTimeline,
-  spaceAlbumAssetExists,
   timelineHiddenScopeIsEmpty,
+  type TimelineHiddenScope,
 } from 'src/utils/shared-space-album-scope.js';
+
+const asMakeDate = (eb: ExpressionBuilder<DB, 'asset'>, { year, month, day }: YearMonthDay) =>
+  eb.fn('make_date', [sql`${year}::int`, sql`${month}::int`, sql`${day}::int`]);
 
 @Injectable()
 export class MemoryRepository implements IBulkAsset {
@@ -46,22 +60,23 @@ export class MemoryRepository implements IBulkAsset {
   }
 
   /**
-   * #486 hides memories that are scheduled but not yet shown, for callers that say nothing about
-   * `showAt`. immich-28675 turned that into an explicit, three-state request:
-   *
-   * - `isUpcoming: true`  — only the memories #486 hides. Applying #486 too makes the query
-   *   provably empty.
-   * - `isUpcoming: false` — the same thing #486 implies, stated by the caller.
-   * - omitted             — no `showAt` scoping at all.
-   *
-   * The omitted case is why `hideUnshownByDefault` exists rather than a check on `dto`: upstream's
-   * index says "show upcoming memories" by *leaving the parameter out*, which at this level is
-   * indistinguishable from a legacy caller relying on #486. So the default is kept on the fork's
-   * internal owner-scoped path and dropped on `GET /memories`, whose contract is upstream's. A
-   * `for` window (the memory lane) still carries its own `showAt <= for` bound on both paths.
-   */
+  #486 hides memories that are scheduled but not yet shown, for callers that say nothing about
+  `showAt`. immich-28675 turned that into an explicit, three-state request:
+  
+  - `isUpcoming: true`  — only the memories #486 hides. Applying #486 too makes the query
+    provably empty.
+  - `isUpcoming: false` — the same thing #486 implies, stated by the caller.
+  - omitted             — no `showAt` scoping at all.
+  
+  The omitted case is why `hideUnshownByDefault` exists rather than a check on `dto`: upstream's
+  index says "show upcoming memories" by *leaving the parameter out*, which at this level is
+  indistinguishable from a legacy caller relying on #486. So the default is kept on the fork's
+  internal owner-scoped path and dropped on `GET /memories`, whose contract is upstream's. A
+  `for` window (the memory lane) still carries its own `showAt <= for` bound on both paths.
+  */
   private baseSearchBuilder(dto: MemorySearchDto, { hideUnshownByDefault }: { hideUnshownByDefault: boolean }) {
-    const visibleAt = dto.for ?? DateTime.now().toJSDate();
+    // immich-32166: showAt holds a calendar date as UTC midnight, so "now" is the wall clock read as UTC.
+    const visibleAt = dto.for ?? asLocalTime(DateTime.now());
     const hideUnshown = dto.isUpcoming === undefined && (hideUnshownByDefault || dto.for !== undefined);
 
     return this.db
@@ -75,7 +90,7 @@ export class MemoryRepository implements IBulkAsset {
         qb.where((where) => where.or([where('hideAt', 'is', null), where('hideAt', '>=', dto.for!)])),
       )
       .$if(dto.isUpcoming !== undefined, (qb) => {
-        const now = DateTime.now().toJSDate();
+        const now = asLocalTime(DateTime.now());
         return dto.isUpcoming
           ? qb.where('showAt', '>', now)
           : qb.where((where) => where.or([where('showAt', 'is', null), where('showAt', '<=', now)]));
@@ -85,54 +100,7 @@ export class MemoryRepository implements IBulkAsset {
 
   /** Serves `GET /memories`. Follows upstream's contract: `isUpcoming` alone scopes `showAt`. */
   private accessibleSearchBuilder(userId: string, dto: MemorySearchDto) {
-    return this.baseSearchBuilder(dto, { hideUnshownByDefault: false }).where((eb) =>
-      eb.or([
-        eb('memory.ownerId', '=', userId),
-        eb.exists(
-          eb
-            .selectFrom('memory_asset')
-            .innerJoin('asset', 'asset.id', 'memory_asset.assetId')
-            .select('memory_asset.assetId')
-            .whereRef('memory_asset.memoriesId', '=', 'memory.id')
-            .where('asset.visibility', '=', sql.lit(AssetVisibility.Timeline))
-            .where('asset.deletedAt', 'is', null)
-            .where((eb) =>
-              eb.or([
-                eb('asset.ownerId', '=', userId),
-                eb.exists(
-                  eb
-                    .selectFrom('partner')
-                    .select('partner.sharedById')
-                    .where('partner.sharedWithId', '=', userId)
-                    .whereRef('partner.sharedById', '=', 'asset.ownerId'),
-                ),
-                eb.exists(
-                  eb
-                    .selectFrom('shared_space_asset')
-                    .innerJoin('shared_space_member', 'shared_space_member.spaceId', 'shared_space_asset.spaceId')
-                    .select('shared_space_asset.assetId')
-                    .where('shared_space_member.userId', '=', userId)
-                    .whereRef('shared_space_asset.assetId', '=', 'asset.id'),
-                ),
-                eb.exists(
-                  eb
-                    .selectFrom('shared_space_library')
-                    .innerJoin('shared_space_member', 'shared_space_member.spaceId', 'shared_space_library.spaceId')
-                    .select('shared_space_library.libraryId')
-                    .where('shared_space_member.userId', '=', userId)
-                    .whereRef('shared_space_library.libraryId', '=', 'asset.libraryId')
-                    .where('asset.isOffline', '=', false),
-                ),
-                spaceAlbumAssetExists(eb, {
-                  correlateAssetId: 'asset.id',
-                  scope: { memberUserId: userId },
-                  albumTimelineGate: 'space-tab',
-                }),
-              ]),
-            ),
-        ),
-      ]),
-    );
+    return this.baseSearchBuilder(dto, { hideUnshownByDefault: false }).where((eb) => memoryAccessibleTo(eb, userId));
   }
 
   @GenerateSql(
@@ -145,8 +113,9 @@ export class MemoryRepository implements IBulkAsset {
       .executeTakeFirstOrThrow();
   }
 
-  statisticsAccessible(userId: string, dto: MemorySearchDto) {
+  statisticsAccessible(userId: string, dto: MemorySearchDto, types: MemoryType[]) {
     return this.accessibleSearchBuilder(userId, dto)
+      .where('memory.type', 'in', types)
       .select((qb) => qb.fn.countAll<number>().as('total'))
       .executeTakeFirstOrThrow();
   }
@@ -169,6 +138,7 @@ export class MemoryRepository implements IBulkAsset {
           eb
             .selectFrom('asset')
             .selectAll('asset')
+            .select(projectedDuration)
             .innerJoin('memory_asset', 'asset.id', 'memory_asset.assetId')
             .whereRef('memory_asset.memoriesId', '=', 'memory.id')
             .where('asset.visibility', '=', sql.lit(AssetVisibility.Timeline))
@@ -221,65 +191,62 @@ export class MemoryRepository implements IBulkAsset {
       .execute();
   }
 
-  /**
-   * Memories of one owner whose visible window overlaps `window`, with the asset ids they
-   * actually render. The asset filters MUST stay identical to `search` — floors are measured
-   * over what the card shows, and an asset carrying a hidden person's face is not shown.
-   */
-  @GenerateSql({ params: [DummyValue.UUID, { from: DummyValue.DATE, to: DummyValue.DATE }] })
-  getForOverlapReconcile(ownerId: string, window: { from: Date; to: Date }) {
+  private personAssets(ownerId: string, personGroupId: string) {
     return this.db
-      .selectFrom('memory')
-      .select(['memory.id', 'memory.type', 'memory.data', 'memory.isSaved', 'memory.showAt', 'memory.hideAt'])
-      .select((eb) =>
-        jsonArrayFrom(
-          eb
-            .selectFrom('asset')
-            .select(['asset.id'])
-            .innerJoin('memory_asset', 'asset.id', 'memory_asset.assetId')
-            .whereRef('memory_asset.memoriesId', '=', 'memory.id')
-            .where('asset.visibility', '=', sql.lit(AssetVisibility.Timeline))
-            .where('asset.deletedAt', 'is', null)
-            .where((eb) =>
-              eb.not(
-                eb.exists(
-                  eb
-                    .selectFrom('asset_face')
-                    .innerJoin('person', (join) =>
-                      join
-                        .onRef('person.personGroupId', '=', 'asset_face.personGroupId')
-                        .onRef('person.ownerId', '=', 'asset.ownerId'),
-                    )
-                    .select((eb) => eb.val(1).as('one'))
-                    .whereRef('asset_face.assetId', '=', 'asset.id')
-                    .where('person.isHidden', '=', true),
-                ),
-              ),
-            )
-            .orderBy('asset.localDateTime', 'asc'),
-        ).as('assets'),
+      .selectFrom('asset')
+      .where('asset.ownerId', '=', ownerId)
+      .where('asset.visibility', '=', AssetVisibility.Timeline)
+      .where('asset.deletedAt', 'is', null)
+      .where((eb) =>
+        eb.exists((qb) =>
+          qb
+            .selectFrom('asset_face')
+            .whereRef('asset_face.assetId', '=', 'asset.id')
+            .where('asset_face.personGroupId', '=', personGroupId)
+            .where('asset_face.deletedAt', 'is', null)
+            .where('asset_face.isVisible', 'is', true),
+        ),
       )
-      .where('memory.ownerId', '=', ownerId)
-      .where('memory.deletedAt', 'is', null)
-      .where((eb) => eb.or([eb('memory.showAt', 'is', null), eb('memory.showAt', '<=', window.to)]))
-      .where((eb) => eb.or([eb('memory.hideAt', 'is', null), eb('memory.hideAt', '>=', window.from)]))
-      .orderBy('memory.id')
-      .execute();
+      .where((eb) =>
+        eb.exists((qb) =>
+          qb
+            .selectFrom('asset_file')
+            .whereRef('asset_file.assetId', '=', 'asset.id')
+            .where('asset_file.type', '=', AssetFileType.Preview),
+        ),
+      );
   }
 
-  /**
-   * Earliest day any memory becomes visible, across all owners — the start of the one-off
-   * overlap backfill. `coalesce` mirrors `cleanup`, so a memory with no `showAt` still counts.
-   */
-  @GenerateSql()
-  async getOldestMemoryDate(): Promise<Date | null> {
-    const row = await this.db
-      .selectFrom('memory')
-      .select(sql<Date | null>`min(coalesce("showAt", "createdAt"))`.as('oldest'))
-      .where('deletedAt', 'is', null)
-      .executeTakeFirst();
+  @GenerateSql({
+    params: [DummyValue.UUID, DummyValue.UUID, { year: 2000, month: 1, day: 1 }, { year: 2025, month: 1, day: 1 }],
+  })
+  async getPersonBirthdayYears(
+    ownerId: string,
+    personGroupId: string,
+    birthDate: YearMonthDay,
+    until: YearMonthDay,
+  ): Promise<number[]> {
+    const rows = await this.personAssets(ownerId, personGroupId)
+      .where(sql`date_part('month', (asset."localDateTime" at time zone 'UTC')::date)::int`, '=', birthDate.month)
+      .where(sql`date_part('day', (asset."localDateTime" at time zone 'UTC')::date)::int`, '=', birthDate.day)
+      .where((eb) => eb(sql`(asset."localDateTime" at time zone 'UTC')::date`, '>=', asMakeDate(eb, birthDate)))
+      .where((eb) => eb(sql`(asset."localDateTime" at time zone 'UTC')::date`, '<', asMakeDate(eb, until)))
+      .select(sql<number>`date_part('year', (asset."localDateTime" at time zone 'UTC')::date)::int`.as('year'))
+      .distinct()
+      .orderBy(sql`year`, 'desc')
+      .execute();
 
-    return row?.oldest ?? null;
+    return rows.map(({ year }) => year);
+  }
+
+  @GenerateSql({ params: [DummyValue.UUID, DummyValue.UUID, { year: 2000, month: 1, day: 1 }, 5] })
+  getPersonAssetsByDate(ownerId: string, personGroupId: string, date: YearMonthDay, limit: number) {
+    return this.personAssets(ownerId, personGroupId)
+      .select(['asset.id'])
+      .where((eb) => eb(sql`(asset."localDateTime" at time zone 'UTC')::date`, '=', asMakeDate(eb, date)))
+      .orderBy('asset.localDateTime', 'desc')
+      .limit(limit)
+      .execute();
   }
 
   // #1041: same partner-trap-safe shape as `search` above, resolved for the VIEWER (`userId`).
@@ -288,14 +255,18 @@ export class MemoryRepository implements IBulkAsset {
     dto: MemorySearchDto,
     hiddenScope?: TimelineHiddenScope,
     visibleSpaceIds: string[] = [],
+    types?: MemoryType[],
   ) {
     return (
       this.accessibleSearchBuilder(userId, dto)
+        // Before the limit, so a page holds `size` memories the client can decode.
+        .$if(types !== undefined, (qb) => qb.where('memory.type', 'in', types!))
         .select((eb) =>
           jsonArrayFrom(
             eb
               .selectFrom('asset')
               .selectAll('asset')
+              .select(projectedDuration)
               .innerJoin('memory_asset', 'asset.id', 'memory_asset.assetId')
               .whereRef('memory_asset.memoriesId', '=', 'memory.id')
               .where('asset.visibility', '=', sql.lit(AssetVisibility.Timeline))
@@ -320,6 +291,12 @@ export class MemoryRepository implements IBulkAsset {
                   ),
                 ),
               )
+              // #763: userId here is the VIEWER (searchAccessible surfaces memories owned by
+              // others, reachable via partner/space share) — the overlay must be keyed to them,
+              // never to the memory's own ownerId. Gated on `.$if` (always true — userId is a
+              // required param) purely so Kysely infers `isFavoriteForUser` as optional, matching
+              // MapAsset and every other projection site instead of forcing it required here alone.
+              .$if(!!userId, (qb) => qb.select((eb) => favoriteExistsFor(eb, userId).as('isFavoriteForUser')))
               .orderBy('asset.localDateTime', 'asc'),
           ).as('assets'),
         )
@@ -347,12 +324,19 @@ export class MemoryRepository implements IBulkAsset {
   // #1041: `viewerId`/`hiddenScope` are optional — `create`/`update` below return the object right
   // after the caller's own action and pass neither, so their SQL is unchanged. `get()` is the
   // read surface and is the one MemoryService resolves a scope for.
-  @GenerateSql({ params: [DummyValue.UUID] })
+  //
+  // #763: `viewerId` is also the user the favorite overlay resolves for — the caller, not the
+  // memory owner. One id serves both, so the overlay projection keys off it rather than taking a
+  // second parameter that MemoryService would have to pass twice.
+  @GenerateSql({ params: [DummyValue.UUID] }, { name: 'with viewerId', params: [DummyValue.UUID, DummyValue.UUID] })
   get(id: string, viewerId?: string, hiddenScope?: TimelineHiddenScope, visibleSpaceIds: string[] = []) {
     return this.getByIdBuilder(id, viewerId, hiddenScope, visibleSpaceIds).executeTakeFirst();
   }
 
-  async create(memory: Insertable<MemoryTable>, assetIds: Set<string>) {
+  // #763: authUserId is the CALLER's id, used only to project `isFavoriteForUser` onto each
+  // returned memory asset. Optional — memory.service.ts's addAssets/removeAssets call `update`
+  // purely for its side effect and never consume the returned assets, so they omit it.
+  async create(memory: Insertable<MemoryTable>, assetIds: Set<string>, authUserId?: string) {
     const id = await this.db.transaction().execute(async (tx) => {
       const { id } = await tx.insertInto('memory').values(memory).returning('id').executeTakeFirstOrThrow();
 
@@ -364,56 +348,18 @@ export class MemoryRepository implements IBulkAsset {
       return id;
     });
 
-    return this.getByIdBuilder(id).executeTakeFirstOrThrow();
+    return this.getByIdBuilder(id, authUserId).executeTakeFirstOrThrow();
   }
 
   @GenerateSql({ params: [DummyValue.UUID, { ownerId: DummyValue.UUID, isSaved: true }] })
-  async update(id: string, memory: Updateable<MemoryTable>) {
+  async update(id: string, memory: Updateable<MemoryTable>, authUserId?: string) {
     await this.db.updateTable('memory').set(memory).where('id', '=', id).execute();
-    return this.getByIdBuilder(id).executeTakeFirstOrThrow();
+    return this.getByIdBuilder(id, authUserId).executeTakeFirstOrThrow();
   }
 
   @GenerateSql({ params: [DummyValue.UUID] })
   async delete(id: string) {
     await this.db.deleteFrom('memory').where('id', '=', id).execute();
-  }
-
-  /**
-   * Remove the plain `on_this_day` memory a rule memory has just superseded. Scoped to one
-   * owner, one trigger day and one year, and never touches a saved memory.
-   *
-   * Written as an unconditional DELETE ... WHERE rather than a read-then-delete: when the
-   * owner has `on_this_day` disabled, or retention already removed the row, there is simply
-   * nothing to match. That keeps correctness independent of whether the on-this-day loop has
-   * run for the day — it only decides whether this has any effect. (In practice it always
-   * has: the on-this-day loop writes up to 3 days ahead and runs first inside the same lock,
-   * so the row exists before any rule for that day is evaluated.)
-   */
-  @GenerateSql({ params: [{ ownerId: DummyValue.UUID, year: DummyValue.NUMBER, showAt: DummyValue.DATE }] })
-  async deleteOnThisDay({ ownerId, year, showAt }: { ownerId: string; year: number; showAt: Date }) {
-    await this.db
-      .deleteFrom('memory')
-      .where('ownerId', '=', ownerId)
-      .where('type', '=', MemoryType.OnThisDay)
-      .where('isSaved', '=', false)
-      .where('showAt', '=', showAt)
-      .where(sql<string>`memory.data->>'year'`, '=', String(year))
-      .execute();
-  }
-
-  @GenerateSql({ params: [DummyValue.UUID, DummyValue.STRING, DummyValue.STRING] })
-  async hasRuleMemory(ownerId: string, ruleId: string, dedupeKey: string) {
-    const result = await this.db
-      .selectFrom('memory')
-      .select('id')
-      .where('ownerId', '=', ownerId)
-      .where('type', '=', MemoryType.Rule)
-      .where(sql<string>`memory.data->>'ruleId'`, '=', ruleId)
-      .where(sql<string>`memory.data->>'dedupeKey'`, '=', dedupeKey)
-      .where('deletedAt', 'is', null)
-      .executeTakeFirst();
-
-    return !!result;
   }
 
   @GenerateSql({ params: [DummyValue.UUID, [DummyValue.UUID]] })
@@ -469,6 +415,7 @@ export class MemoryRepository implements IBulkAsset {
           eb
             .selectFrom('asset')
             .selectAll('asset')
+            .select(projectedDuration)
             .innerJoin('memory_asset', 'asset.id', 'memory_asset.assetId')
             .whereRef('memory_asset.memoriesId', '=', 'memory.id')
             .orderBy('asset.localDateTime', 'asc')
@@ -481,7 +428,10 @@ export class MemoryRepository implements IBulkAsset {
                   hiddenFromOwnTimeline(eb, hiddenScope!, { kind: 'inline', visibleSpaceIds, viewerId: viewerId! })!,
                 ]),
               ),
-            ),
+            )
+            // #763: `viewerId` is the CALLER — the same id #1041 threads above. Optional, so a call
+            // that omits it (addAssets/removeAssets discard the result) simply skips the projection.
+            .$if(!!viewerId, (qb) => qb.select((eb) => favoriteExistsFor(eb, viewerId!).as('isFavoriteForUser'))),
         ).as('assets'),
       )
       .where('id', '=', id)

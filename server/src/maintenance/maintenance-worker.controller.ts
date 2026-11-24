@@ -3,6 +3,8 @@ import {
   Controller,
   Delete,
   Get,
+  Header,
+  Headers,
   Next,
   Param,
   Post,
@@ -13,9 +15,9 @@ import {
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import type { NextFunction, Request, Response } from 'express';
+import type { IncomingHttpHeaders } from 'node:http';
 import type { DatabaseBackupController as _DatabaseBackupController } from 'src/controllers/database-backup.controller.js';
 import type { ServerController as _ServerController } from 'src/controllers/server.controller.js';
-import type { LoginDetails } from 'src/services/auth.service.js';
 import { DatabaseBackupDeleteDto, DatabaseBackupListResponseDto } from 'src/dtos/database-backup.dto.js';
 import {
   MaintenanceAuthDto,
@@ -26,10 +28,12 @@ import {
 } from 'src/dtos/maintenance.dto.js';
 import { ServerConfigDto, ServerPingResponse, ServerVersionResponseDto } from 'src/dtos/server.dto.js';
 import { ImmichCookie } from 'src/enum.js';
+import { GALLERY_CLIENT_VARY } from 'src/gallery/utils/client-version.js';
 import { MaintenanceRoute } from 'src/maintenance/maintenance-auth.guard.js';
 import { MaintenanceWorkerService } from 'src/maintenance/maintenance-worker.service.js';
 import { GetLoginDetails } from 'src/middleware/auth.guard.js';
 import { LoggingRepository } from 'src/repositories/logging.repository.js';
+import type { LoginDetails } from 'src/services/auth.service.js';
 import { DatabaseBackupService } from 'src/services/database-backup.service.js';
 import { sendFile } from 'src/utils/file.js';
 import { respondWithCookie } from 'src/utils/response.js';
@@ -43,9 +47,7 @@ export class MaintenanceWorkerController {
     private databaseBackupService: DatabaseBackupService,
   ) {}
 
-  /**
-   * {@link _ServerController.getServerConfig }
-   */
+  /** {@link _ServerController.getServerConfig } */
   @Get('server/config')
   getServerConfig(): ServerConfigDto {
     return this.service.getSystemConfig();
@@ -57,22 +59,19 @@ export class MaintenanceWorkerController {
   }
 
   @Get('server/version')
-  getServerVersion(): ServerVersionResponseDto {
-    return this.service.getVersion();
+  @Header('Vary', GALLERY_CLIENT_VARY)
+  getServerVersion(@Headers() headers: IncomingHttpHeaders): ServerVersionResponseDto {
+    return this.service.getVersion(headers);
   }
 
-  /**
-   * {@link _DatabaseBackupController.listDatabaseBackups}
-   */
+  /** {@link _DatabaseBackupController.listDatabaseBackups} */
   @Get('admin/database-backups')
   @MaintenanceRoute()
   listDatabaseBackups(): Promise<DatabaseBackupListResponseDto> {
     return this.databaseBackupService.listBackups();
   }
 
-  /**
-   * {@link _DatabaseBackupController.downloadDatabaseBackup}
-   */
+  /** {@link _DatabaseBackupController.downloadDatabaseBackup} */
   @Get('admin/database-backups/:filename')
   @MaintenanceRoute()
   async downloadDatabaseBackup(
@@ -83,18 +82,14 @@ export class MaintenanceWorkerController {
     await sendFile(res, next, () => this.databaseBackupService.downloadBackup(filename), this.logger);
   }
 
-  /**
-   * {@link _DatabaseBackupController.deleteDatabaseBackup}
-   */
+  /** {@link _DatabaseBackupController.deleteDatabaseBackup} */
   @Delete('admin/database-backups')
   @MaintenanceRoute()
   async deleteDatabaseBackup(@Body() dto: DatabaseBackupDeleteDto): Promise<void> {
     return this.databaseBackupService.deleteBackup(dto.backups);
   }
 
-  /**
-   * {@link _DatabaseBackupController.uploadDatabaseBackup}
-   */
+  /** {@link _DatabaseBackupController.uploadDatabaseBackup} */
   @Post('admin/database-backups/upload')
   @MaintenanceRoute()
   @UseInterceptors(FileInterceptor('file'))

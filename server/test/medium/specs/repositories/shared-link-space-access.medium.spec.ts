@@ -1,15 +1,17 @@
 /**
- * Medium tests for `AccessRepository.asset.checkSharedLinkAccess` — the #1018 space tether.
- *
- * A share link created from inside a space (`shared_link.spaceId`) may serve assets its creator
- * does not own. Those are NOT granted by the `shared_link_asset` row alone: on every read they are
- * re-derived from live space state, so withdrawing a photo from the space, unlinking the album, or
- * the link creator leaving the space all revoke public access immediately.
- *
- * Assets the link creator DOES own are unaffected by any of that — they were always theirs to share.
- */
-import { Kysely } from 'kysely';
+Medium tests for `AccessRepository.asset.checkSharedLinkAccess` — the #1018 space tether.
+
+A share link created from inside a space (`shared_link.spaceId`) may serve assets its creator
+does not own. Those are NOT granted by the `shared_link_asset` row alone: on every read they are
+re-derived from live space state, so withdrawing a photo from the space, unlinking the album, or
+the link creator leaving the space all revoke public access immediately.
+
+Assets the link creator DOES own are unaffected by any of that — they were always theirs to share.
+*/
+import { Kysely, sql } from 'kysely';
+import { randomBytes } from 'node:crypto';
 import { AssetVisibility, SharedLinkType, SharedSpaceRole } from 'src/enum.js';
+import { sharedLinkAlbumMetadataScope } from 'src/gallery/utils/album-metadata-scope.js';
 import { AccessRepository } from 'src/repositories/access.repository.js';
 import { AlbumRepository } from 'src/repositories/album.repository.js';
 import { LoggingRepository } from 'src/repositories/logging.repository.js';
@@ -18,6 +20,7 @@ import { SharedSpaceRepository } from 'src/repositories/shared-space.repository.
 import { DB } from 'src/schema/index.js';
 import { BaseService } from 'src/services/base.service.js';
 import { newMediumService } from 'test/medium.factory.js';
+import { newUuid } from 'test/small.factory.js';
 import { getKyselyDB } from 'test/utils.js';
 
 let defaultDatabase: Kysely<DB>;
@@ -41,9 +44,9 @@ beforeAll(async () => {
 });
 
 /**
- * A space with a sharer (Editor, who makes the link) and a contributor (Editor, who owns the
- * photo). `contributedAsset` is owned by the contributor, never by the sharer.
- */
+A space with a sharer (Editor, who makes the link) and a contributor (Editor, who owns the
+photo). `contributedAsset` is owned by the contributor, never by the sharer.
+*/
 const seedSpace = async () => {
   const { ctx, accessRepo, albumRepo, sharedLinkRepo } = setup();
   const { user: sharer } = await ctx.newUser();
@@ -273,9 +276,9 @@ describe('checkSharedLinkAccess — album link from a space', () => {
 });
 
 /**
- * The count behind the link has to agree with the grid the link renders, so it counts the same
- * contributions — and only the ones belonging to the link's own space.
- */
+The count behind the link has to agree with the grid the link renders, so it counts the same
+contributions — and only the ones belonging to the link's own space.
+*/
 describe('getMetadataForIds — space-scoped contributed arm (#1018)', () => {
   it('counts a contribution made to the given space', async () => {
     const { ctx, albumRepo, sharer, space, contributedAsset, ownAsset } = await seedSpace();
@@ -315,9 +318,9 @@ describe('getMetadataForIds — space-scoped contributed arm (#1018)', () => {
 });
 
 /**
- * The payload the visitor's page is built from (`GET /shared-links/me`) has to list the same assets
- * the access gate serves, or the grid renders holes.
- */
+The payload the visitor's page is built from (`GET /shared-links/me`) has to list the same assets
+the access gate serves, or the grid renders holes.
+*/
 describe('SharedLinkRepository.get — payload (#1018)', () => {
   it('lists an asset contributed by another member on an individual link', async () => {
     const { ctx, sharedLinkRepo, sharer, space, contributedAsset } = await seedSpace();
@@ -351,8 +354,10 @@ describe('SharedLinkRepository.get — payload (#1018)', () => {
     expect(result?.assets).toEqual([]);
   });
 
-  it("lists contributions among an album link's assets", async () => {
-    const { ctx, sharedLinkRepo, sharer, space, contributedAsset, ownAsset } = await seedSpace();
+  // Upstream immich-32412 dropped the album's asset list from the link payload; the album's count is where the
+  // link's scope still shows, through the same scope the access gate applies.
+  it("counts contributions among an album link's assets", async () => {
+    const { ctx, albumRepo, sharer, space, contributedAsset, ownAsset } = await seedSpace();
     const { album } = await ctx.newAlbum({ ownerId: sharer.id }, [ownAsset.id]);
     await ctx.newSharedSpaceAlbum({ spaceId: space.id, albumId: album.id });
     await ctx.newAlbumSpaceAsset({ albumId: album.id, assetId: contributedAsset.id, spaceId: space.id });
@@ -363,13 +368,16 @@ describe('SharedLinkRepository.get — payload (#1018)', () => {
       spaceId: space.id,
     });
 
-    const result = await sharedLinkRepo.get(sharer.id, sharedLink.id);
+    const [metadata] = await albumRepo.getMetadataForIds(
+      [album.id],
+      sharedLinkAlbumMetadataScope({ userId: sharedLink.userId, spaceId: space.id }),
+    );
 
-    expect(result?.album?.assets.map(({ id }) => id).sort()).toEqual([contributedAsset.id, ownAsset.id].sort());
+    expect(metadata.assetCount).toBe(2);
   });
 
-  it('drops contributions from an album link once the creator is demoted to viewer', async () => {
-    const { ctx, sharedLinkRepo, sharer, space, contributedAsset, ownAsset } = await seedSpace();
+  it("drops contributions from an album link's count once the creator is demoted to viewer", async () => {
+    const { ctx, albumRepo, sharer, space, contributedAsset, ownAsset } = await seedSpace();
     const { album } = await ctx.newAlbum({ ownerId: sharer.id }, [ownAsset.id]);
     await ctx.newSharedSpaceAlbum({ spaceId: space.id, albumId: album.id });
     await ctx.newAlbumSpaceAsset({ albumId: album.id, assetId: contributedAsset.id, spaceId: space.id });
@@ -387,14 +395,17 @@ describe('SharedLinkRepository.get — payload (#1018)', () => {
       .where('userId', '=', sharer.id)
       .execute();
 
-    const result = await sharedLinkRepo.get(sharer.id, sharedLink.id);
+    const [metadata] = await albumRepo.getMetadataForIds(
+      [album.id],
+      sharedLinkAlbumMetadataScope({ userId: sharedLink.userId, spaceId: space.id }),
+    );
 
     // The album's own asset survives; only the contributed one goes.
-    expect(result?.album?.assets.map(({ id }) => id)).toEqual([ownAsset.id]);
+    expect(metadata.assetCount).toBe(1);
   });
 
-  it('never lists a hidden contribution', async () => {
-    const { ctx, sharedLinkRepo, sharer, space, ownAsset, contributor } = await seedSpace();
+  it('never counts a hidden contribution', async () => {
+    const { ctx, albumRepo, sharer, space, ownAsset, contributor } = await seedSpace();
     const { asset: hidden } = await ctx.newAsset({ ownerId: contributor.id, visibility: AssetVisibility.Hidden });
     await ctx.newExif({ assetId: hidden.id, make: 'test' });
     const { album } = await ctx.newAlbum({ ownerId: sharer.id }, [ownAsset.id]);
@@ -407,13 +418,16 @@ describe('SharedLinkRepository.get — payload (#1018)', () => {
       spaceId: space.id,
     });
 
-    const result = await sharedLinkRepo.get(sharer.id, sharedLink.id);
+    const [metadata] = await albumRepo.getMetadataForIds(
+      [album.id],
+      sharedLinkAlbumMetadataScope({ userId: sharedLink.userId, spaceId: space.id }),
+    );
 
-    expect(result?.album?.assets.map(({ id }) => id)).toEqual([ownAsset.id]);
+    expect(metadata.assetCount).toBe(1);
   });
 
-  it("lists only the album's own assets when the link carries no space", async () => {
-    const { ctx, sharedLinkRepo, sharer, space, contributedAsset, ownAsset } = await seedSpace();
+  it("counts only the album's own assets when the link carries no space", async () => {
+    const { ctx, albumRepo, sharer, space, contributedAsset, ownAsset } = await seedSpace();
     const { album } = await ctx.newAlbum({ ownerId: sharer.id }, [ownAsset.id]);
     await ctx.newSharedSpaceAlbum({ spaceId: space.id, albumId: album.id });
     await ctx.newAlbumSpaceAsset({ albumId: album.id, assetId: contributedAsset.id, spaceId: space.id });
@@ -424,8 +438,107 @@ describe('SharedLinkRepository.get — payload (#1018)', () => {
       spaceId: null,
     });
 
-    const result = await sharedLinkRepo.get(sharer.id, sharedLink.id);
+    const [metadata] = await albumRepo.getMetadataForIds(
+      [album.id],
+      sharedLinkAlbumMetadataScope({ userId: sharedLink.userId, spaceId: null }),
+    );
 
-    expect(result?.album?.assets.map(({ id }) => id)).toEqual([ownAsset.id]);
+    expect(metadata.assetCount).toBe(1);
+  });
+});
+
+describe('shared_link_space sidecar', () => {
+  it('records the space in shared_link_space and leaves upstream shared_link without a spaceId column', async () => {
+    const { ctx, sharer, space } = await seedSpace();
+    const { sharedLink } = await ctx.newSharedLink({
+      userId: sharer.id,
+      type: SharedLinkType.Individual,
+      spaceId: space.id,
+    });
+    const { sharedLink: plainLink } = await ctx.newSharedLink({ userId: sharer.id, type: SharedLinkType.Individual });
+
+    const rows = await defaultDatabase
+      .selectFrom('shared_link_space')
+      .selectAll()
+      .where('sharedLinkId', 'in', [sharedLink.id, plainLink.id])
+      .execute();
+    expect(rows).toEqual([{ sharedLinkId: sharedLink.id, spaceId: space.id }]);
+
+    const columns = await sql<{ column_name: string }>`
+      SELECT column_name FROM information_schema.columns WHERE table_name = 'shared_link' AND column_name = 'spaceId'
+    `.execute(defaultDatabase);
+    expect(columns.rows).toEqual([]);
+  });
+
+  it('gives the link auth context its space, and none for a plain link', async () => {
+    const { ctx, sharedLinkRepo, sharer, space } = await seedSpace();
+    const { sharedLink } = await ctx.newSharedLink({
+      userId: sharer.id,
+      type: SharedLinkType.Individual,
+      spaceId: space.id,
+    });
+    const { sharedLink: plainLink } = await ctx.newSharedLink({ userId: sharer.id, type: SharedLinkType.Individual });
+
+    await expect(sharedLinkRepo.getByKey(sharedLink.key)).resolves.toMatchObject({ spaceId: space.id });
+    await expect(sharedLinkRepo.getByKey(plainLink.key)).resolves.toMatchObject({ spaceId: null });
+  });
+
+  it("degrades the link to the creator's own assets once the space is deleted", async () => {
+    const { ctx, accessRepo, sharedLinkRepo, sharer, space, contributedAsset, ownAsset } = await seedSpace();
+    await ctx.newSharedSpaceAsset({ spaceId: space.id, assetId: contributedAsset.id });
+    const { sharedLink } = await ctx.newSharedLink({
+      userId: sharer.id,
+      type: SharedLinkType.Individual,
+      spaceId: space.id,
+      assetIds: [contributedAsset.id, ownAsset.id],
+    });
+
+    await defaultDatabase.deleteFrom('shared_space').where('id', '=', space.id).execute();
+
+    await expect(
+      accessRepo.asset.checkSharedLinkAccess(sharedLink.id, new Set([contributedAsset.id, ownAsset.id])),
+    ).resolves.toEqual(new Set([ownAsset.id]));
+    await expect(sharedLinkRepo.getByKey(sharedLink.key)).resolves.toMatchObject({ spaceId: null });
+    await expect(
+      defaultDatabase.selectFrom('shared_link_space').selectAll().where('sharedLinkId', '=', sharedLink.id).execute(),
+    ).resolves.toEqual([]);
+  });
+
+  it('deletes the sidecar row with the link', async () => {
+    const { ctx, sharedLinkRepo, sharer, space } = await seedSpace();
+    const { sharedLink } = await ctx.newSharedLink({
+      userId: sharer.id,
+      type: SharedLinkType.Individual,
+      spaceId: space.id,
+    });
+
+    await sharedLinkRepo.remove(sharedLink.id);
+
+    await expect(
+      defaultDatabase.selectFrom('shared_link_space').selectAll().where('sharedLinkId', '=', sharedLink.id).execute(),
+    ).resolves.toEqual([]);
+  });
+});
+
+describe('SharedLinkRepository.create', () => {
+  it('does not keep the shared_link row when the shared_link_space write fails', async () => {
+    const { ctx, sharedLinkRepo } = setup();
+    const { user } = await ctx.newUser();
+    const key = randomBytes(32);
+
+    // no such space: the shared_link_space insert fails its FK after the shared_link insert
+    await expect(
+      sharedLinkRepo.create({
+        userId: user.id,
+        type: SharedLinkType.Individual,
+        key,
+        allowUpload: false,
+        spaceId: newUuid(),
+      }),
+    ).rejects.toThrow(/shared_link_space_spaceId_fkey/);
+
+    await expect(
+      defaultDatabase.selectFrom('shared_link').select('id').where('key', '=', key).execute(),
+    ).resolves.toEqual([]);
   });
 });

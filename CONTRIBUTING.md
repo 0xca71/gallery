@@ -17,6 +17,10 @@ If you are looking for something to work on, there are discussions and issues wi
 
 We usually do not assign issues to new contributors, since it happens often that a PR is never even opened. Again, reach out on Discord if you fear putting a lot of time into fixing an issue, but ending up with a duplicate PR.
 
+### Opening new issues
+
+If you find bugs or other problems while working on something, we appreciate that you open an issue, if there is no open issue covering the problem yet. To make it easier to debug and fix the issue, please read and fill out the whole issue template.
+
 ## Use of Generative AI
 
 We encourage the use of LLMs and AI coding tools. Some projects ban AI-generated code; our experience is that these tools pay off when the person driving them has a clear spec.
@@ -26,10 +30,6 @@ We encourage the use of LLMs and AI coding tools. Some projects ban AI-generated
 **All PRs must also include tests.** Server test coverage went from 74% to 94%, and not by accident. The spec says _what_ the code should do; the tests show that it does. No tests, no merge.
 
 The "large amount of back-and-forth" that some projects blame on LLM-generated code is, in our experience, a symptom of missing specs and unclear requirements. Solve that, add tests, and it stops mattering which tool wrote the code.
-
-LLMs must not be used to fix GitHub issues labelled good first issue. These issues are generally not urgent, and are intended to be learning opportunities for new contributors to get familiar with the codebase. Whether you are a newcomer or not, fully automating the process of fixing this issue squanders the learning opportunity and doesn’t add much value to the project. Using LLMs to fix issues labelled as “good first issue” is forbidden, and those PRs will be closed automatically.
-
-Misrepresenting LLM use, contribution farming (automated low-effort PRs), or repeatedly hitting auto-close rules may be grounds for a block at maintainer discretion.
 
 ## Feature freezes
 

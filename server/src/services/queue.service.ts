@@ -1,6 +1,4 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
-import type { ArgOf } from 'src/repositories/event.repository.js';
-import type { ConcurrentQueueName, JobItem } from 'src/types.js';
 import { OnEvent } from 'src/decorators.js';
 import { AuthDto } from 'src/dtos/auth.dto.js';
 import { SystemConfig } from 'src/dtos/config.dto.js';
@@ -28,7 +26,9 @@ import {
   QueueCommand,
   QueueName,
 } from 'src/enum.js';
+import type { ArgOf } from 'src/repositories/event.repository.js';
 import { BaseService } from 'src/services/base.service.js';
+import type { ConcurrentQueueName, JobItem } from 'src/types.js';
 import { handlePromiseError } from 'src/utils/misc.js';
 
 const asNightlyTasksCron = (config: SystemConfig) => {
@@ -49,16 +49,18 @@ export class QueueService extends BaseService {
     }
 
     this.nightlyJobsLock = await this.databaseRepository.tryLock(DatabaseLock.NightlyJobs);
-    if (this.nightlyJobsLock) {
-      const cronExpression = asNightlyTasksCron(config);
-      this.logger.debug(`Scheduling nightly jobs for ${cronExpression}`);
-      this.cronRepository.create({
-        name: CronJob.NightlyJobs,
-        expression: cronExpression,
-        start: true,
-        onTick: () => handlePromiseError(this.handleNightlyJobs(), this.logger),
-      });
+    if (!this.nightlyJobsLock) {
+      return;
     }
+
+    const cronExpression = asNightlyTasksCron(config);
+    this.logger.debug(`Scheduling nightly jobs for ${cronExpression}`);
+    this.cronRepository.create({
+      name: CronJob.NightlyJobs,
+      expression: cronExpression,
+      start: true,
+      onTick: () => handlePromiseError(this.handleNightlyJobs(), this.logger),
+    });
   }
 
   @OnEvent({ name: 'ConfigUpdate', server: true })
@@ -68,11 +70,13 @@ export class QueueService extends BaseService {
       return;
     }
 
-    if (this.nightlyJobsLock) {
-      const cronExpression = asNightlyTasksCron(config);
-      this.logger.debug(`Scheduling nightly jobs for ${cronExpression}`);
-      this.cronRepository.update({ name: CronJob.NightlyJobs, expression: cronExpression, start: true });
+    if (!this.nightlyJobsLock) {
+      return;
     }
+
+    const cronExpression = asNightlyTasksCron(config);
+    this.logger.debug(`Scheduling nightly jobs for ${cronExpression}`);
+    this.cronRepository.update({ name: CronJob.NightlyJobs, expression: cronExpression, start: true });
   }
 
   @OnEvent({ name: 'AppBootstrap', priority: BootstrapEventPriority.JobService })
@@ -83,7 +87,7 @@ export class QueueService extends BaseService {
       // workers start. Such orphans permanently wedge a concurrency-1 queue with no user-reachable
       // recovery. Never block worker startup on this maintenance step.
       try {
-        await this.jobRepository.reconcileOrphanedActiveJobs();
+        await this.queueMaintenanceRepository.reconcileOrphanedActiveJobs();
       } catch (error) {
         this.logger.warn(`Failed to reconcile orphaned active jobs on bootstrap: ${error}`);
       }
@@ -193,9 +197,9 @@ export class QueueService extends BaseService {
     const [statistics, isPaused, jobTypes] = await Promise.all([
       this.jobRepository.getJobCounts(name),
       this.jobRepository.isPaused(name),
-      includeJobTypes ? this.jobRepository.getJobTypes(name) : [],
+      includeJobTypes ? this.queueMaintenanceRepository.getJobTypes(name) : [],
     ]);
-    return { name, isPaused, statistics, ...(jobTypes.length > 0 && { jobTypes }) };
+    return { name, isPaused, statistics: { ...statistics, paused: 0 }, ...(jobTypes.length > 0 && { jobTypes }) };
   }
 
   private async start(name: QueueName, { force }: QueueCommandDto): Promise<void> {
@@ -272,6 +276,14 @@ export class QueueService extends BaseService {
         return this.jobRepository.queue({ name: JobName.AssetClassifyQueueAll, data: { force } });
       }
 
+      case QueueName.QualityAnalysis: {
+        return this.jobRepository.queue({ name: JobName.AssetAnalyzeQualityQueueAll, data: { force } });
+      }
+
+      case QueueName.SpatialScene: {
+        return this.jobRepository.queue({ name: JobName.SpatialSceneQueueAll, data: { force } });
+      }
+
       case QueueName.PeopleBackfill: {
         return this.jobRepository.queue({ name: JobName.FaceIdentityBackfill, data: {} });
       }
@@ -308,6 +320,7 @@ export class QueueService extends BaseService {
         { name: JobName.PersonCleanup },
         { name: JobName.MemoryCleanup },
         { name: JobName.SessionCleanup },
+        { name: JobName.AuthChallengeCleanup },
         { name: JobName.HlsSessionCleanup },
         { name: JobName.AuditTableCleanup },
         // L8: low-frequency backstop for the album-grant reconcile mechanism — sweeps every

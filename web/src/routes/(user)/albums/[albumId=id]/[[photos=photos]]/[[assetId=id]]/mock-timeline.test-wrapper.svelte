@@ -1,9 +1,9 @@
 <script lang="ts">
-  import { nextTimelineMountId } from './mock-timeline-mount';
+  import type { TimelineManager } from '#lib/managers/timeline-manager/timeline-manager.svelte.ts';
+  import type { TimelineGrouping } from '#lib/managers/timeline-manager/types.ts';
+  import type { ActivatableTimelineBucket } from '#lib/utils/timeline-zoom-navigation.ts';
   import type { Snippet } from 'svelte';
-  import type { TimelineManager } from '$lib/managers/timeline-manager/timeline-manager.svelte';
-  import type { TimelineGrouping } from '$lib/managers/timeline-manager/types';
-  import type { ActivatableTimelineBucket } from '$lib/utils/timeline-zoom-navigation';
+  import { nextTimelineMountId } from './mock-timeline-mount';
 
   interface Props {
     timelineManager?: TimelineManager | Record<string, unknown>;
@@ -15,6 +15,7 @@
     grouping?: TimelineGrouping;
     onGroupingChange?: (grouping: TimelineGrouping) => void;
     children?: Snippet;
+    empty?: Snippet;
   }
 
   let {
@@ -22,6 +23,7 @@
     options = {},
     album,
     children,
+    empty: emptySnippet,
     onTimelineBucketActivate,
     temporalAnchor,
     onTemporalAnchorResolved,
@@ -31,21 +33,29 @@
 
   const mountId = nextTimelineMountId();
 
+  /**
+  Opt-in empty rendering, keyed on the same `__timelineStubAssetCount` global the sibling
+  bindable-timeline stub uses. Gated on the global being EXPLICITLY 0 rather than on this mock's
+  own `empty` computation, so every spec that does not set it keeps rendering exactly what it
+  rendered before this snippet existed.
+  */
+  const emptyStubGlobals = globalThis as typeof globalThis & { __timelineStubAssetCount?: number };
+  const renderEmptySnippet = $derived(emptyStubGlobals.__timelineStubAssetCount === 0);
+
   $effect(() => {
     if (album?.id === 'without-bound-timeline-manager') {
       return;
     }
 
     const tagIds = Array.isArray(options.tagIds) ? options.tagIds : [];
-    const empty = tagIds.includes('tag-no-match') || album?.assetCount === 0;
+    const empty =
+      tagIds.includes('tag-no-match') || album?.assetCount === 0 || emptyStubGlobals.__timelineStubAssetCount === 0;
     const monthsOnly = album?.id === 'timeline-months-only';
 
     const nextTimelineManager = {
       months: empty ? [] : [{ yearMonth: { year: 2024, month: 4 }, assetsCount: 2 }],
       assetCount: empty || monthsOnly ? 0 : 2,
       isInitialized: true,
-      initTask: { waitUntilCompletion: () => Promise.resolve() },
-      isInitializedForOptions: () => true,
       // Stub is always "settled" for the current options, so empty ⇔ assetCount === 0.
       isEmptyForOptions: () => empty || monthsOnly,
       showAssetOwners: false,
@@ -94,4 +104,7 @@
 </div>
 <div data-testid="mock-disabled-asset" data-asset="asset-in-album" data-disabled="true"></div>
 <div data-testid="mock-timeline-asset-count">{timelineManager?.assetCount ?? 0}</div>
+{#if renderEmptySnippet}
+  {@render emptySnippet?.()}
+{/if}
 {@render children?.()}

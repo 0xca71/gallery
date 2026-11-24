@@ -1,14 +1,8 @@
 import { Controller, Get, Header, Query } from '@nestjs/common';
 import { ApiOkResponse, ApiTags } from '@nestjs/swagger';
-import type { AuthDto } from 'src/dtos/auth.dto.js';
 import { Endpoint, HistoryBuilder } from 'src/decorators.js';
-import {
-  TimeBucketAssetDto,
-  TimeBucketAssetResponseDto,
-  TimeBucketCoverDto,
-  TimeBucketCoverResponseDto,
-  TimeBucketDto,
-} from 'src/dtos/time-bucket.dto.js';
+import type { AuthDto } from 'src/dtos/auth.dto.js';
+import { TimeBucketAssetDto, TimeBucketAssetResponseDto, TimeBucketDto } from 'src/dtos/time-bucket.dto.js';
 import { ApiTag, Permission } from 'src/enum.js';
 import { Auth, Authenticated } from 'src/middleware/auth.guard.js';
 import { TimelineService } from 'src/services/timeline.service.js';
@@ -20,6 +14,8 @@ export class TimelineController {
 
   @Get('buckets')
   @Authenticated({ permission: Permission.AssetRead, sharedLink: true })
+  // Gallery: the web re-requests the same URL after an edit (album stack collapse); a browser must not reuse its copy.
+  @Header('Cache-Control', 'private, no-cache')
   @Endpoint({
     summary: 'Get time buckets',
     description: 'Retrieve a list of all minimal time buckets.',
@@ -33,6 +29,7 @@ export class TimelineController {
   @Authenticated({ permission: Permission.AssetRead, sharedLink: true })
   @ApiOkResponse({ type: TimeBucketAssetResponseDto })
   @Header('Content-Type', 'application/json')
+  @Header('Cache-Control', 'private, no-cache')
   @Endpoint({
     summary: 'Get time bucket',
     description: 'Retrieve a string of all asset ids in a given time bucket.',
@@ -40,17 +37,5 @@ export class TimelineController {
   })
   getTimeBucket(@Auth() auth: AuthDto, @Query() dto: TimeBucketAssetDto) {
     return this.service.getTimeBucket(auth, dto);
-  }
-
-  @Get('bucket-covers')
-  @Authenticated({ permission: Permission.AssetRead, sharedLink: true })
-  @ApiOkResponse({ type: [TimeBucketCoverResponseDto] })
-  @Endpoint({
-    summary: 'Get time bucket covers',
-    description: 'Resolve representative cover assets for the requested time buckets.',
-    history: new HistoryBuilder().added('v1').internal('v1'),
-  })
-  getTimeBucketCovers(@Auth() auth: AuthDto, @Query() dto: TimeBucketCoverDto) {
-    return this.service.getTimeBucketCovers(auth, dto);
   }
 }

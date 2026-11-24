@@ -1,9 +1,10 @@
 import { Injectable } from '@nestjs/common';
-import type { ArgOf } from 'src/repositories/event.repository.js';
 import { JOBS_ASSET_PAGINATION_SIZE, PET_RECOGNITION_MODEL_NAMES } from 'src/constants.js';
 import { OnEvent, OnJob } from 'src/decorators.js';
 import { SystemConfig } from 'src/dtos/config.dto.js';
 import { DatabaseLock, ImmichWorker, JobName, JobStatus, QueueName, SystemMetadataKey, VectorIndex } from 'src/enum.js';
+import { deletePetFrameFiles } from 'src/gallery/utils/video-pet-detector.js';
+import type { ArgOf } from 'src/repositories/event.repository.js';
 import { BaseService } from 'src/services/base.service.js';
 import { JobItem, type JobOf } from 'src/types.js';
 import { isPetDetectionEnabled, isPetRecognitionEnabled } from 'src/utils/misc.js';
@@ -53,9 +54,12 @@ export class PetRecognitionService extends BaseService {
       // pet_search truncate is a belt-and-braces guarantee independent of that delete order.
       // Deliberately a FULL purge (buckets included, rebuilt by the requeue) — broader than a
       // model switch's scoped purge, because the admin Reset button promises exactly that.
-      await this.personRepository.deleteAllPets();
+      // Read before the purge: the cascade removes the frame rows of sampled video pets, not their files.
+      const framePaths = await this.petFaceRepository.getPetFramePaths({ embeddedOnly: false });
+      await this.petFaceRepository.deleteAllPets();
       await this.sharedSpaceRepository.deleteAllPets();
-      await this.personRepository.deleteAllPetSearch();
+      await this.petFaceRepository.deleteAllPetSearch();
+      await deletePetFrameFiles(this.backendMedia, framePaths);
       // Requeued unconditionally, for the same reason the purge is: the rebuild is what stops a
       // reset from leaving the library permanently empty of pets. PetDetectionQueueAll gates itself
       // on pet detection being enabled (and rebuilds species buckets rather than individuals when
@@ -85,7 +89,7 @@ export class PetRecognitionService extends BaseService {
       if (nightly) {
         // getLatestPetDate returns a Date directly (F11) — compared against a parsed Date rather
         // than pg-text vs. an ISO-`T` string, which mis-ordered same-day timestamps.
-        const latestPetDate = await this.personRepository.getLatestPetDate();
+        const latestPetDate = await this.petFaceRepository.getLatestPetDate();
         if (state?.lastRun && latestPetDate && new Date(state.lastRun) > latestPetDate) {
           this.logger.debug('Skipping pet recognition nightly since no pet has been added since the last run');
           return JobStatus.Skipped;
@@ -97,14 +101,14 @@ export class PetRecognitionService extends BaseService {
       // racing the scheduled nightly, or two nightly firings racing a slow run) don't duplicate
       // the fan-out. Placed after the drift check and nightly date-skip above — it must never gate
       // the drift check (F9's non-force half).
-      const { active, delayed, paused, waiting } = await this.jobRepository.getJobCounts(QueueName.PetRecognition);
+      const { active, delayed, waiting } = await this.jobRepository.getJobCounts(QueueName.PetRecognition);
       const hasOtherActivePetRecognitionWork = active > 1;
-      const hasPendingPetRecognitionWork = waiting > 0 || delayed > 0 || paused > 0 || hasOtherActivePetRecognitionWork;
+      const hasPendingPetRecognitionWork = waiting > 0 || delayed > 0 || hasOtherActivePetRecognitionWork;
 
       if (hasPendingPetRecognitionWork) {
         this.logger.debug(
           `Skipping pet recognition queueing because recognition work is already pending ` +
-            `(${active} active, ${waiting} waiting, ${delayed} delayed, ${paused} paused)`,
+            `(${active} active, ${waiting} waiting, ${delayed} delayed)`,
         );
         return JobStatus.Skipped;
       }
@@ -112,13 +116,15 @@ export class PetRecognitionService extends BaseService {
       await this.databaseRepository.prewarm(VectorIndex.Pet);
 
       let jobs: JobItem[] = [];
-      for await (const face of this.personRepository.getUnassignedPetFaces()) {
+      for await (const face of this.petFaceRepository.getUnassignedPetFaces()) {
         jobs.push({ name: JobName.PetRecognition, data: { id: face.id, deferred: false } });
 
-        if (jobs.length >= JOBS_ASSET_PAGINATION_SIZE) {
-          await this.jobRepository.queueAll(jobs);
-          jobs = [];
+        if (!(jobs.length >= JOBS_ASSET_PAGINATION_SIZE)) {
+          continue;
         }
+
+        await this.jobRepository.queueAll(jobs);
+        jobs = [];
       }
       await this.jobRepository.queueAll(jobs);
     }
@@ -140,7 +146,7 @@ export class PetRecognitionService extends BaseService {
       return JobStatus.Skipped;
     }
 
-    const face = await this.personRepository.getPetFaceForRecognition(id);
+    const face = await this.petFaceRepository.getPetFaceForRecognition(id);
     if (!face || !face.asset) {
       this.logger.warn(`Pet face ${id} not found`);
       return JobStatus.Failed;
@@ -166,7 +172,7 @@ export class PetRecognitionService extends BaseService {
     const embedding = face.petSearch.embedding;
     const ownerId = face.asset.ownerId;
 
-    const matches = await this.searchRepository.searchPets({
+    const matches = await this.petFaceRepository.searchPets({
       userIds: [ownerId],
       embedding,
       maxDistance,
@@ -193,7 +199,7 @@ export class PetRecognitionService extends BaseService {
       // result (distance 0 to itself), so it alone fills the window and a genuinely matching
       // sibling face is never returned. Mirrors handleRecognizeFaces's second, hasPerson-scoped
       // search (person.service.ts), which exists for exactly this reason.
-      const matchWithPerson = await this.searchRepository.searchPets({
+      const matchWithPerson = await this.petFaceRepository.searchPets({
         userIds: [ownerId],
         embedding,
         maxDistance,
@@ -231,16 +237,16 @@ export class PetRecognitionService extends BaseService {
   }
 
   /**
-   * The model-switch hook shared by {@link onConfigInit} and {@link onConfigUpdate}. `oldConfig` is
-   * only available from ConfigUpdate — ConfigInit fires at bootstrap with no prior config.
-   *
-   * Runs entirely under `DatabaseLock.PetRecognitionModelSwitch`: `withLock` only serializes
-   * concurrent callers, it does not dedupe, so the FIRST thing done under the lock is a re-read of
-   * the stored state to check idempotency — two ConfigUpdate deliveries (e.g. multiple
-   * non-API workers reacting to the same save) both carry the same stale `oldConfig`, and without
-   * this re-read they would each purge + requeue, double-detecting every asset (both pet writers
-   * are additive).
-   */
+  The model-switch hook shared by {@link onConfigInit} and {@link onConfigUpdate}. `oldConfig` is
+  only available from ConfigUpdate — ConfigInit fires at bootstrap with no prior config.
+  
+  Runs entirely under `DatabaseLock.PetRecognitionModelSwitch`: `withLock` only serializes
+  concurrent callers, it does not dedupe, so the FIRST thing done under the lock is a re-read of
+  the stored state to check idempotency — two ConfigUpdate deliveries (e.g. multiple
+  non-API workers reacting to the same save) both carry the same stale `oldConfig`, and without
+  this re-read they would each purge + requeue, double-detecting every asset (both pet writers
+  are additive).
+  */
   private async handleModelSwitch(newConfig: SystemConfig, oldConfig?: SystemConfig): Promise<void> {
     await this.databaseRepository.withLock(DatabaseLock.PetRecognitionModelSwitch, async () => {
       const state = await this.systemMetadataRepository.get(SystemMetadataKey.PetRecognitionState);
@@ -284,7 +290,7 @@ export class PetRecognitionService extends BaseService {
         return;
       }
 
-      // Scoped purge (species buckets survive — see PersonRepository.purgePetRecognitionArtifacts).
+      // Scoped purge (species buckets survive — see PetFaceRepository.purgePetRecognitionArtifacts).
       // Empty both pet queues first: pending old-model detection jobs would re-embed with mixed
       // state and duplicate faces against the requeued force run below.
       await this.jobRepository.empty(QueueName.PetRecognition, true);
@@ -292,7 +298,9 @@ export class PetRecognitionService extends BaseService {
       // empty() drains waiting/delayed jobs; it does NOT kill an ACTIVE one. An in-flight
       // recognition job can still create a person after this purge — it ends up face-less, and
       // generic person cleanup collects it (see R2.6).
-      await this.personRepository.purgePetRecognitionArtifacts();
+      const framePaths = await this.petFaceRepository.getPetFramePaths({ embeddedOnly: true });
+      await this.petFaceRepository.purgePetRecognitionArtifacts();
+      await deletePetFrameFiles(this.backendMedia, framePaths);
 
       // Stamp state BEFORE any requeue — this is what makes the idempotency re-read above sound.
       const pendingReprocess = recognitionEnabled && !detectionEnabled;
@@ -315,11 +323,11 @@ export class PetRecognitionService extends BaseService {
   }
 
   /**
-   * `ensurePersonIdentity` derives `face_identity.type` from `person.type` (see
-   * FaceIdentityRepository.ensurePersonIdentity), so calling this on a `type: 'pet'` person
-   * stamps the identity `type: 'pet'` — this is what activates the existing shared-space pet
-   * propagation path in shared-space.service.ts (`getPetFacesForAsset` + `processSpaceFaceMatch`).
-   */
+  `ensurePersonIdentity` derives `face_identity.type` from `person.type` (see
+  FaceIdentityRepository.ensurePersonIdentity), so calling this on a `type: 'pet'` person
+  stamps the identity `type: 'pet'` — this is what activates the existing shared-space pet
+  propagation path in shared-space.service.ts (`getPetFacesForAsset` + `processSpaceFaceMatch`).
+  */
   private async linkFaceIdentity(personId: string, assetFaceId: string): Promise<void> {
     const identity = await this.faceIdentityRepository.ensurePersonIdentity(personId);
     await this.faceIdentityRepository.replaceFaceIdentity({
@@ -331,13 +339,15 @@ export class PetRecognitionService extends BaseService {
 
   private async setRepresentativeFaceIfMissing(personId: string, faceId: string): Promise<void> {
     const person = await this.personRepository.getByGroupIdOnly(personId);
-    if (person && !person.faceAssetId) {
-      await this.personRepository.update({ ownerId: person.ownerId, personGroupId: personId, faceAssetId: faceId });
-      await this.jobRepository.queue({
-        name: JobName.PersonGenerateThumbnail,
-        data: { ownerId: person.ownerId, personGroupId: personId },
-      });
+    if (!person || person.faceAssetId) {
+      return;
     }
+
+    await this.personRepository.update({ ownerId: person.ownerId, personGroupId: personId, faceAssetId: faceId });
+    await this.jobRepository.queue({
+      name: JobName.PersonGenerateThumbnail,
+      data: { ownerId: person.ownerId, personGroupId: personId },
+    });
   }
 
   private async queueSharedSpaceFaceMatchesForAsset(assetId: string): Promise<void> {

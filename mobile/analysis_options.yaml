@@ -36,6 +36,7 @@ linter:
     close_sinks: true
     collection_methods_unrelated_type: true
     deprecated_consistency: true
+    deprecated_member_use_from_same_package: true
     discarded_futures: true
     no_adjacent_strings_in_list: true
     no_self_assignments: true
@@ -100,8 +101,34 @@ analyzer:
   errors:
     unawaited_futures: warning
     always_put_control_body_on_new_line: warning
+    deprecated_member_use_from_same_package: error
 
 dart_code_metrics:
+  exclude:
+    unused-code:
+      - '**/*.g.dart'
+      - '**/*.freezed.dart'
+      - '**/*.mapper.dart'
+      - '**/*.drift.dart'
+      - '**/*.gr.dart'
+      - 'lib/data/db/main/database.steps.dart'
+      # Ideally we wouldn't do this, as this allows for non-column used code, but not complaining
+      # about the columns is more important
+      - 'lib/data/db/**/table/**'
+      - 'lib/widgets/photo_view/**'
+      - 'test/drift/**/generated/**'
+      # Gallery: upstream files whose code the fork leaves unused. The check covers fork code;
+      # these stay upstream text instead of carrying `// ignore: unused-code` lines.
+      - 'lib/constants/constants.dart'
+      - 'lib/constants/enums.dart'
+      - 'lib/data/store/person.dart'
+      - 'lib/domain/models/memory.model.dart'
+      - 'lib/extensions/string_extensions.dart'
+      - 'lib/presentation/widgets/search/quick_date_picker.dart'
+      - 'lib/providers/tab.provider.dart'
+      - 'lib/services/search.service.dart'
+      - 'lib/utils/option.dart'
+      - 'lib/widgets/common/feature_check.dart'
   rules:
     - banned-usage:
         entries:
@@ -112,6 +139,12 @@ dart_code_metrics:
             severity: perf
           - name: tr
             description: 'Use context.t.<key> or StaticTranslations.instance.<key> instead of tr().'
+          - type: Locale
+            entries:
+              - name: toLanguageTag
+                description: 'Pass resolvedDateTimeLocale() to DateFormat, not the raw locale. DateFormat throws for locales intl has no date data for (e.g. mi).'
+                exclude-paths:
+                  - 'lib/main.dart'
           - type: String
             entries:
               - name: tr

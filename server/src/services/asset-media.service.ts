@@ -1,8 +1,5 @@
 import { BadRequestException, Injectable, InternalServerErrorException, NotFoundException } from '@nestjs/common';
-import { createReadStream } from 'node:fs';
 import sanitize from 'sanitize-filename';
-import type { UploadFile, UploadRequest } from 'src/types.js';
-import { DiskStorageBackend } from 'src/backends/disk-storage.backend.js';
 import { StorageCore } from 'src/cores/storage.core.js';
 import { Asset, AuthSharedLink } from 'src/database.js';
 import {
@@ -20,7 +17,7 @@ import {
   UploadFieldName,
 } from 'src/dtos/asset-media.dto.js';
 import { AssetDownloadOriginalDto } from 'src/dtos/asset.dto.js';
-import { AuthDto } from 'src/dtos/auth.dto.js';
+import { AuthDto, isEditedOnly, isMetadataHidden } from 'src/dtos/auth.dto.js';
 import {
   AssetFileType,
   AssetVisibility,
@@ -30,10 +27,10 @@ import {
   Permission,
   StorageFolder,
 } from 'src/enum.js';
-import { StorageBackend } from 'src/interfaces/storage-backend.interface.js';
+import { videoPlaybackCacheControl } from 'src/gallery/utils/video-playback.js';
 import { AuthRequest } from 'src/middleware/auth.guard.js';
 import { BaseService } from 'src/services/base.service.js';
-import { StorageService } from 'src/services/storage.service.js';
+import type { UploadFile, UploadRequest } from 'src/types.js';
 import { requireUploadAccess } from 'src/utils/access.js';
 import { asUploadRequest, onBeforeLink } from 'src/utils/asset.util.js';
 import { isAssetChecksumConstraint } from 'src/utils/database.js';
@@ -45,23 +42,14 @@ export interface AssetMediaRedirectResponse {
   targetSize: AssetMediaSize | 'original';
 }
 
-const SKIP_UPLOAD_FILE_CLEANUP = Symbol('skipUploadFileCleanup');
-
-const markUploadFileCleanupSkipped = (error: Error | any) => {
-  if (error && typeof error === 'object') {
-    error[SKIP_UPLOAD_FILE_CLEANUP] = true;
-  }
-};
-
-const shouldSkipUploadFileCleanup = (error: Error | any) =>
-  !!(error && typeof error === 'object' && error[SKIP_UPLOAD_FILE_CLEANUP]);
-
 @Injectable()
 export class AssetMediaService extends BaseService {
   async getUploadAssetIdByChecksum(auth: AuthDto, checksum?: string): Promise<AssetMediaResponseDto | undefined> {
     if (!checksum) {
       return;
     }
+
+    await this.requireAccess({ auth, permission: Permission.AssetUpload, ids: [auth.user.id] });
 
     const assetId = await this.assetRepository.getUploadAssetIdByChecksum(auth.user.id, fromChecksum(checksum));
     if (!assetId) {
@@ -155,20 +143,103 @@ export class AssetMediaService extends BaseService {
       this.requireQuota(auth, file.size);
 
       if (dto.livePhotoVideoId) {
+        if (auth.sharedLink) {
+          const ids = new Set([dto.livePhotoVideoId]);
+          const [assetIds1, assetIds2] = await Promise.all([
+            this.accessRepository.asset.checkSharedLinkAccess(auth.sharedLink.id, ids),
+            this.accessRepository.asset.checkOwnerAccess(auth.user.id, ids, false),
+          ]);
+
+          if (!assetIds1.intersection(assetIds2).has(dto.livePhotoVideoId)) {
+            throw new BadRequestException(`Not found or no ${Permission.AssetUpdate} permission`);
+          }
+        } else {
+          await this.requireAccess({ auth, permission: Permission.AssetUpdate, ids: [dto.livePhotoVideoId] });
+        }
         await onBeforeLink(
           { asset: this.assetRepository, event: this.eventRepository },
           { userId: auth.user.id, livePhotoVideoId: dto.livePhotoVideoId },
         );
       }
-      asset = await this.create(auth.user.id, dto, file, sidecarFile);
+
+      asset = await this.assetRepository.create({
+        ownerId: auth.user.id,
+        libraryId: null,
+
+        checksum: file.checksum,
+        checksumAlgorithm: ChecksumAlgorithm.sha1File,
+        originalPath: file.originalPath,
+
+        fileCreatedAt: dto.fileCreatedAt,
+        fileModifiedAt: dto.fileModifiedAt,
+        localDateTime: dto.fileCreatedAt,
+
+        type: mimeTypes.assetType(file.originalPath),
+        isFavorite: dto.isFavorite,
+        duration: dto.duration || null,
+        visibility: dto.visibility ?? AssetVisibility.Timeline,
+        livePhotoVideoId: dto.livePhotoVideoId,
+        originalFileName: dto.filename || file.originalName,
+      });
+
+      if (dto.metadata?.length) {
+        await this.assetRepository.upsertMetadata(asset.id, dto.metadata);
+      }
+
+      if (sidecarFile) {
+        await this.assetRepository.upsertFile({
+          assetId: asset.id,
+          path: sidecarFile.originalPath,
+          type: AssetFileType.Sidecar,
+        });
+        await this.storageRepository.utimes(sidecarFile.originalPath, new Date(), new Date(dto.fileModifiedAt));
+      }
+      await this.storageRepository.utimes(file.originalPath, new Date(), new Date(dto.fileModifiedAt));
+      await this.assetRepository.upsertExif({
+        exif: { assetId: asset.id, fileSizeInByte: file.size },
+        lockedPropertiesBehavior: 'override',
+      });
+      await this.backendMedia.moveUploadToBackend(asset, file, sidecarFile);
+
+      await this.jobRepository.queue({ name: JobName.AssetExtractMetadata, data: { id: asset.id, source: 'upload' } });
 
       if (auth.sharedLink) {
         await this.addToSharedLink(auth.sharedLink, asset.id);
       }
 
+      await this.eventRepository.emit('AssetCreate', { asset, file });
+
       return { id: asset.id, status: AssetMediaStatus.CREATED };
     } catch (error: any) {
-      return this.handleUploadError(error, auth, file, sidecarFile, asset);
+      // clean up the asset row if one was created, before its files: a failed remove keeps them (#569)
+      if (asset) {
+        await this.assetRepository.remove({ id: asset.id });
+      }
+
+      // clean up files
+      await this.jobRepository.queue({
+        name: JobName.FileDelete,
+        data: { files: [file.originalPath, sidecarFile?.originalPath] },
+      });
+
+      // handle duplicates with a success response
+      if (isAssetChecksumConstraint(error)) {
+        const duplicateId = await this.assetRepository.getUploadAssetIdByChecksum(auth.user.id, file.checksum);
+        if (!duplicateId) {
+          this.logger.error(`Error locating duplicate for checksum constraint`);
+          throw new InternalServerErrorException();
+        }
+
+        if (auth.sharedLink) {
+          await this.addToSharedLink(auth.sharedLink, duplicateId);
+        }
+
+        this.logger.debug(`Duplicate asset upload rejected: existing asset ${duplicateId}`);
+        return { status: AssetMediaStatus.DUPLICATE, id: duplicateId };
+      }
+
+      this.logger.error(`Error uploading file ${error}`, error?.stack);
+      throw error;
     }
   }
 
@@ -180,18 +251,14 @@ export class AssetMediaService extends BaseService {
   ): Promise<ImmichMediaResponse> {
     await this.requireAccess({ auth, permission: Permission.AssetDownload, ids: [id] });
 
-    if (auth.sharedLink) {
-      dto.edited = true;
-    }
-
     const { originalPath, originalFileName, editedPath } = await this.assetRepository.getForOriginal(
       id,
-      dto.edited ?? false,
+      isEditedOnly(auth, dto.edited),
     );
 
     const path = editedPath ?? originalPath!;
 
-    return this.serveFromBackend(
+    return this.backendMedia.serveFromBackend(
       path,
       mimeTypes.lookup(path),
       CacheControl.PrivateWithCache,
@@ -212,23 +279,16 @@ export class AssetMediaService extends BaseService {
       throw new BadRequestException('May not request original file');
     }
 
-    if (auth.sharedLink) {
-      dto.edited = true;
-    }
-
+    const edited = isEditedOnly(auth, dto.edited);
     const size = (dto.size ?? AssetMediaSize.THUMBNAIL) as unknown as AssetFileType;
-    const { originalPath, originalFileName, path } = await this.assetRepository.getForThumbnail(
-      id,
-      size,
-      dto.edited ?? false,
-    );
+    const { originalPath, originalFileName, path } = await this.assetRepository.getForThumbnail(id, size, edited);
 
-    if (size === AssetFileType.FullSize && mimeTypes.isWebSupportedImage(originalPath) && !dto.edited) {
+    if (size === AssetFileType.FullSize && mimeTypes.isWebSupportedImage(originalPath) && !edited) {
       // use original file for web supported images
       return { targetSize: 'original' };
     }
 
-    if (dto.size === AssetMediaSize.FULLSIZE && !path && dto.fallback !== false) {
+    if (dto.size === AssetMediaSize.FULLSIZE && !path) {
       // downgrade to preview if fullsize is not available.
       // e.g. disabled or not yet (re)generated
       return { targetSize: AssetMediaSize.PREVIEW };
@@ -238,11 +298,10 @@ export class AssetMediaService extends BaseService {
       throw new NotFoundException('Asset media not found');
     }
 
-    const fileNameBase =
-      auth.sharedLink && !auth.sharedLink.showExif ? id : getFileNameWithoutExtension(originalFileName);
+    const fileNameBase = isMetadataHidden(auth) ? id : getFileNameWithoutExtension(originalFileName);
     const fileName = `${fileNameBase}_${size}${getFilenameExtension(path)}`;
 
-    return this.serveFromBackend(path, mimeTypes.lookup(path), CacheControl.PrivateWithCache, fileName);
+    return this.backendMedia.serveFromBackend(path, mimeTypes.lookup(path), CacheControl.PrivateWithCache, fileName);
   }
 
   async playbackVideo(auth: AuthDto, id: string, range?: string): Promise<ImmichMediaResponse> {
@@ -256,10 +315,10 @@ export class AssetMediaService extends BaseService {
 
     const filepath = asset.encodedVideoPath || asset.originalPath;
 
-    return this.serveFromBackend(
+    return this.backendMedia.serveFromBackend(
       filepath,
       mimeTypes.lookup(filepath),
-      CacheControl.PrivateWithCache,
+      videoPlaybackCacheControl(asset.encodedVideoPath),
       undefined,
       'inline',
       { range, acceptsRanges: true },
@@ -302,7 +361,7 @@ export class AssetMediaService extends BaseService {
       return;
     }
 
-    const album = await this.albumRepository.getById(sharedLink.albumId, { withAssets: false });
+    const album = await this.albumRepository.getById(sharedLink.albumId);
     if (!album) {
       return;
     }
@@ -314,151 +373,6 @@ export class AssetMediaService extends BaseService {
       userIds,
       recipientIds: userIds,
     });
-  }
-
-  private async handleUploadError(
-    error: any,
-    auth: AuthDto,
-    file: UploadFile,
-    sidecarFile?: UploadFile,
-    asset?: Asset,
-  ): Promise<AssetMediaResponseDto> {
-    // clean up files
-    if (!shouldSkipUploadFileCleanup(error)) {
-      await this.jobRepository.queue({
-        name: JobName.FileDelete,
-        data: { files: [file.originalPath, sidecarFile?.originalPath] },
-      });
-    }
-
-    // handle duplicates with a success response
-    if (isAssetChecksumConstraint(error)) {
-      const duplicateId = await this.assetRepository.getUploadAssetIdByChecksum(auth.user.id, file.checksum);
-      if (!duplicateId) {
-        this.logger.error(`Error locating duplicate for checksum constraint`);
-        throw new InternalServerErrorException();
-      }
-
-      if (auth.sharedLink) {
-        await this.addToSharedLink(auth.sharedLink, duplicateId);
-      }
-
-      this.logger.debug(`Duplicate asset upload rejected: existing asset ${duplicateId}`);
-      return { status: AssetMediaStatus.DUPLICATE, id: duplicateId };
-    }
-
-    // clean up the asset row if it survived create() but a later step failed
-    if (asset) {
-      await this.assetRepository.remove({ id: asset.id });
-    }
-
-    this.logger.error(`Error uploading file ${error}`, error?.stack);
-    throw error;
-  }
-
-  private async create(ownerId: string, dto: AssetMediaCreateDto, file: UploadFile, sidecarFile?: UploadFile) {
-    const asset = await this.assetRepository.create({
-      ownerId,
-      libraryId: null,
-
-      checksum: file.checksum,
-      checksumAlgorithm: ChecksumAlgorithm.sha1File,
-      originalPath: file.originalPath,
-
-      fileCreatedAt: dto.fileCreatedAt,
-      fileModifiedAt: dto.fileModifiedAt,
-      localDateTime: dto.fileCreatedAt,
-
-      type: mimeTypes.assetType(file.originalPath),
-      isFavorite: dto.isFavorite,
-      duration: dto.duration || null,
-      visibility: dto.visibility ?? AssetVisibility.Timeline,
-      livePhotoVideoId: dto.livePhotoVideoId,
-      originalFileName: dto.filename || file.originalName,
-    });
-
-    const backendFiles: string[] = [];
-    let writeBackend: StorageBackend | undefined;
-
-    try {
-      if (dto.metadata?.length) {
-        await this.assetRepository.upsertMetadata(asset.id, dto.metadata);
-      }
-
-      if (sidecarFile) {
-        await this.assetRepository.upsertFile({
-          assetId: asset.id,
-          path: sidecarFile.originalPath,
-          type: AssetFileType.Sidecar,
-        });
-        await this.storageRepository.utimes(sidecarFile.originalPath, new Date(), new Date(dto.fileModifiedAt));
-      }
-      await this.storageRepository.utimes(file.originalPath, new Date(), new Date(dto.fileModifiedAt));
-      await this.assetRepository.upsertExif({
-        exif: { assetId: asset.id, fileSizeInByte: file.size },
-        lockedPropertiesBehavior: 'override',
-      });
-
-      // If S3 backend, upload the file and update the path
-      writeBackend = StorageService.getWriteBackend();
-      if (!(writeBackend instanceof DiskStorageBackend)) {
-        const relativeKey = StorageCore.getRelativeNestedPath(
-          StorageFolder.Upload,
-          ownerId,
-          `${asset.id}${getFilenameExtension(file.originalPath)}`,
-        );
-        const stream = createReadStream(file.originalPath);
-        await writeBackend.put(relativeKey, stream, {
-          contentType: mimeTypes.lookup(file.originalPath),
-        });
-        backendFiles.push(relativeKey);
-        await this.assetRepository.update({ id: asset.id, originalPath: relativeKey });
-        // Clean up the temp local file
-        await this.jobRepository.queue({ name: JobName.FileDelete, data: { files: [file.originalPath] } });
-
-        if (sidecarFile) {
-          const sidecarKey = StorageCore.getRelativeNestedPath(StorageFolder.Upload, ownerId, `${asset.id}.xmp`);
-          await writeBackend.put(sidecarKey, createReadStream(sidecarFile.originalPath));
-          backendFiles.push(sidecarKey);
-          await this.assetRepository.upsertFile({
-            assetId: asset.id,
-            path: sidecarKey,
-            type: AssetFileType.Sidecar,
-          });
-          await this.jobRepository.queue({
-            name: JobName.FileDelete,
-            data: { files: [sidecarFile.originalPath] },
-          });
-        }
-      }
-
-      await this.eventRepository.emit('AssetCreate', { asset, file });
-
-      await this.jobRepository.queue({ name: JobName.AssetExtractMetadata, data: { id: asset.id, source: 'upload' } });
-    } catch (error: Error | any) {
-      try {
-        await this.assetRepository.remove({ id: asset.id });
-        if (backendFiles.length > 0) {
-          for (const file of backendFiles) {
-            try {
-              await writeBackend?.delete(file);
-            } catch (deleteError: Error | any) {
-              this.logger.error(
-                `Failed to delete incomplete upload file ${file} for asset ${asset.id}: ${deleteError}`,
-                deleteError?.stack,
-              );
-            }
-          }
-        }
-      } catch (deleteError: Error | any) {
-        this.logger.error(`Failed to remove incomplete upload asset ${asset.id}: ${deleteError}`, deleteError?.stack);
-        markUploadFileCleanupSkipped(error);
-      }
-
-      throw error;
-    }
-
-    return asset;
   }
 
   private requireQuota(auth: AuthDto, size: number) {

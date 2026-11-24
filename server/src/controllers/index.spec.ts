@@ -57,6 +57,10 @@ const SHARED_LINK_ROUTES = new Set([
   'GET albums/:id',
   'GET albums/:id/map-markers',
   'GET assets/:id',
+  // fork-only: the Spatial Scene depth map, viewable wherever the photo is (AssetView + sharedLink, as thumbnail)
+  'GET assets/:id/depth',
+  // fork-only: the Data Saver copy of a video, playable wherever the video is (AssetView + sharedLink, as playback)
+  'GET assets/:id/video/data-saver',
   'GET assets/:id/original',
   'GET assets/:id/thumbnail',
   'GET assets/:id/video/playback',
@@ -102,7 +106,7 @@ const getRoutes = () => {
         id: `${method} ${path}`,
         label: `${Controller.name}.${name} (${method} /${path})`,
         path,
-        auth: getAuthenticatedOptions(reflector, handler),
+        auth: getAuthenticatedOptions(reflector, [handler]),
       };
     });
   });

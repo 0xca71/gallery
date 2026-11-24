@@ -1,11 +1,13 @@
+import { MediaType, QueryType, validQueryTypes } from '#lib/constants.ts';
+import { Route } from '#lib/route.ts';
+import type { SearchFilter } from '#lib/types.ts';
+import { asLocalTimeISO, parseUtcDate } from '#lib/utils/date-time.ts';
 import { AssetTypeEnum, AssetVisibility, type MetadataSearchDto, type SmartSearchDto } from '@immich/sdk';
 import type { DateTime } from 'luxon';
 import { SvelteSet } from 'svelte/reactivity';
 import { goto } from '$app/navigation';
-import { MediaType, QueryType, validQueryTypes } from '$lib/constants';
-import { Route } from '$lib/route';
-import type { SearchFilter } from '$lib/types';
-import { asLocalTimeISO, parseUtcDate } from '$lib/utils/date-time';
+
+const QUERY_TYPE_STORAGE_KEY = 'searchQueryType';
 
 class SearchManager {
   #filter = $state<SearchFilter>(this.#fromQuery({}));
@@ -20,6 +22,11 @@ class SearchManager {
 
   setQuery(query: MetadataSearchDto | SmartSearchDto) {
     this.#filter = this.#fromQuery(query);
+  }
+
+  setQueryType(queryType: SearchFilter['queryType']) {
+    this.#filter.queryType = queryType;
+    localStorage.setItem(QUERY_TYPE_STORAGE_KEY, queryType);
   }
 
   async submit() {
@@ -79,11 +86,10 @@ class SearchManager {
       display: {
         isArchive: searchQuery.visibility === AssetVisibility.Archive,
         isFavorite: searchQuery.isFavorite ?? false,
-        isNotInAlbum: 'isNotInAlbum' in searchQuery ? (searchQuery.isNotInAlbum ?? false) : false,
+        isNotInAlbum: 'isNotInAlbum' in searchQuery && (searchQuery.isNotInAlbum ?? false),
       },
-      mediaType: searchQuery.isMotion
-        ? MediaType.LivePhoto
-        : searchQuery.type === AssetTypeEnum.Image
+      mediaType:
+        searchQuery.type === AssetTypeEnum.Image
           ? MediaType.Image
           : searchQuery.type === AssetTypeEnum.Video
             ? MediaType.Video
@@ -94,24 +100,10 @@ class SearchManager {
 
   #toQuery(): MetadataSearchDto | SmartSearchDto {
     let type: AssetTypeEnum | undefined = undefined;
-    let isMotion: boolean | undefined = undefined;
-    switch (this.filter.mediaType) {
-      case MediaType.Image: {
-        type = AssetTypeEnum.Image;
-        break;
-      }
-      case MediaType.Video: {
-        type = AssetTypeEnum.Video;
-        break;
-      }
-      case MediaType.LivePhoto: {
-        type = AssetTypeEnum.Image;
-        isMotion = true;
-        break;
-      }
-      case MediaType.All: {
-        break;
-      }
+    if (this.filter.mediaType === MediaType.Image) {
+      type = AssetTypeEnum.Image;
+    } else if (this.filter.mediaType === MediaType.Video) {
+      type = AssetTypeEnum.Video;
     }
 
     const query = this.filter.query || undefined;
@@ -141,7 +133,6 @@ class SearchManager {
       personIds: this.filter.personIds.size > 0 ? [...this.filter.personIds] : undefined,
       tagIds: this.filter.tagIds === null ? null : this.filter.tagIds.size > 0 ? [...this.filter.tagIds] : undefined,
       type,
-      isMotion,
       rating: this.filter.rating,
     };
   }
@@ -159,7 +150,7 @@ class SearchManager {
   }
 
   #defaultQueryType(): QueryType {
-    const storedQueryType = localStorage.getItem('searchQueryType') as QueryType;
+    const storedQueryType = localStorage.getItem(QUERY_TYPE_STORAGE_KEY) as QueryType;
     return validQueryTypes.has(storedQueryType) ? storedQueryType : QueryType.SMART;
   }
 }

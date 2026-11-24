@@ -1,25 +1,25 @@
-import { AssetTypeEnum, getFilterSuggestions, getSearchSuggestions, SearchSuggestionType } from '@immich/sdk';
 import {
   ALL_FILTER_SECTIONS,
   buildFilterContext,
   type FilterPanelConfig,
   type FilterState,
-} from '$lib/components/filter-panel/filter-panel';
-import { getPhotosPersonFilterId, getPhotosPersonFilterThumbnailUrl } from '$lib/utils/photos-filter-options';
+} from '#lib/components/filter-panel/filter-panel.ts';
+import { getPhotosPersonFilterId, getPhotosPersonFilterThumbnailUrl } from '#lib/utils/photos-filter-options.ts';
+import { AssetTypeEnum, SearchSuggestionType, getFilterSuggestions, getSearchSuggestions } from '@immich/sdk';
 
 /**
- * Album *detail* is scoped to a single album, and asset.repository.ts guards both `isInAlbum` and
- * `isNotInAlbum` with `&& !options.albumId` — inside an album the former is a tautology and the
- * latter an always-empty set, so the server drops them. Rendering the section would give the user
- * two controls that do nothing. Every other section is shared with the rest of the app (#802).
- */
+Album *detail* is scoped to a single album, and gallery/utils/time-bucket-filter.ts guards both `isInAlbum` and
+`isNotInAlbum` with `&& !options.albumId` — inside an album the former is a tautology and the
+latter an always-empty set, so the server drops them. Rendering the section would give the user
+two controls that do nothing. Every other section is shared with the rest of the app (#802).
+*/
 const albumDetailSections = ALL_FILTER_SECTIONS.filter((section) => section !== 'albums');
 
 /**
- * The asset *picker* is not album-scoped server-side — `timelineAlbumId` is stripped from the
- * request before it leaves the timeline manager — so the album-membership filters do work here,
- * and "not in any album" is the natural way to find un-filed photos to add.
- */
+The asset *picker* is not album-scoped server-side — `timelineAlbumId` is stripped from the
+request before it leaves the timeline manager — so the album-membership filters do work here,
+and "not in any album" is the natural way to find un-filed photos to add.
+*/
 const albumPickerSections = ALL_FILTER_SECTIONS;
 
 function mapSuggestions(response: Awaited<ReturnType<typeof getFilterSuggestions>>) {
@@ -61,8 +61,8 @@ function toSuggestionRequest(filters: FilterState) {
         : filters.mediaType === 'image'
           ? AssetTypeEnum.Image
           : AssetTypeEnum.Video,
-    isNotInAlbum: filters.isNotInAlbum === true ? true : undefined,
-    isInAlbum: filters.isInAlbum === true ? true : undefined,
+    isNotInAlbum: filters.isNotInAlbum === true || undefined,
+    isInAlbum: filters.isInAlbum === true || undefined,
     takenAfter: context?.takenAfter,
     takenBefore: context?.takenBefore,
   };
@@ -70,7 +70,6 @@ function toSuggestionRequest(filters: FilterState) {
 
 export function buildAlbumDetailFilterConfig(albumId: string): FilterPanelConfig {
   return {
-    locationScopeKey: () => JSON.stringify(['album', albumId]),
     sections: [...albumDetailSections],
     suggestionsProvider: async (filters) =>
       mapSuggestions(await getFilterSuggestions({ albumId, ...toSuggestionRequest(filters) })),
@@ -78,8 +77,6 @@ export function buildAlbumDetailFilterConfig(albumId: string): FilterPanelConfig
     // album scope.
     baselineProvider: async () => mapSuggestions(await getFilterSuggestions({ albumId })),
     providers: {
-      states: (country, context) =>
-        getSearchSuggestions({ $type: SearchSuggestionType.State, albumId, country, ...context }),
       cities: (country, context) =>
         getSearchSuggestions({ $type: SearchSuggestionType.City, albumId, country, ...context }),
       cameraModels: (make, context) =>
@@ -90,13 +87,11 @@ export function buildAlbumDetailFilterConfig(albumId: string): FilterPanelConfig
 
 export function buildAlbumAssetPickerFilterConfig(): FilterPanelConfig {
   return {
-    locationScopeKey: () => 'album-picker',
     sections: [...albumPickerSections],
     suggestionsProvider: async (filters) => mapSuggestions(await getFilterSuggestions(toSuggestionRequest(filters))),
     // #910: the picker is not scoped to anything, so the baseline is a plain, filter-free call.
     baselineProvider: async () => mapSuggestions(await getFilterSuggestions({})),
     providers: {
-      states: (country, context) => getSearchSuggestions({ $type: SearchSuggestionType.State, country, ...context }),
       cities: (country, context) => getSearchSuggestions({ $type: SearchSuggestionType.City, country, ...context }),
       cameraModels: (make, context) =>
         getSearchSuggestions({ $type: SearchSuggestionType.CameraModel, make, ...context }),

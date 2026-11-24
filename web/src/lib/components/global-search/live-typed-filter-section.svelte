@@ -1,13 +1,12 @@
 <script lang="ts">
-  import { createUrl, getPeopleThumbnailUrl } from '$lib/utils';
+  import { getGlobalPersonThumbnailUrl } from '#lib/utils/global-person-route.ts';
   import {
     liveTypedSearchChoiceValue,
     type LiveTypedSearchChoice,
     type LiveTypedSearchKey,
     type LiveTypedSearchPersonPreview,
     type LiveTypedSearchStatus,
-  } from '$lib/utils/typed-search/typed-search-live-suggestions';
-  import type { PersonResponseDto } from '@immich/sdk';
+  } from '#lib/utils/typed-search/typed-search-live-suggestions.ts';
   import { Command } from 'bits-ui';
   import { t, type Translations } from 'svelte-i18n';
 
@@ -40,16 +39,6 @@
   function getPersonPreview(choice: LiveTypedSearchChoice): LiveTypedSearchPersonPreview | null {
     return choice.preview?.kind === 'person' ? choice.preview.data : null;
   }
-
-  function getPersonThumbUrl(person: LiveTypedSearchPersonPreview) {
-    if (person.primaryProfile?.type === 'space-person' && person.primaryProfile.spaceId) {
-      return createUrl(`/shared-spaces/${person.primaryProfile.spaceId}/people/${person.primaryProfile.id}/thumbnail`, {
-        updatedAt: person.updatedAt,
-      });
-    }
-
-    return getPeopleThumbnailUrl({ ...person, id: person.primaryProfile?.id ?? person.id } as PersonResponseDto);
-  }
 </script>
 
 {#if status.status !== 'idle'}
@@ -62,7 +51,7 @@
     <Command.GroupItems>
       {#if status.status === 'ok'}
         {#each status.items as choice (choice.id)}
-          {@const personPreview = getPersonPreview(choice)}
+          {const personPreview = $derived(getPersonPreview(choice))}
           <Command.Item
             value={liveTypedSearchChoiceValue(choice)}
             onSelect={() => onSelect(choice)}
@@ -81,7 +70,7 @@
             >
               {#if personPreview}
                 <img
-                  src={getPersonThumbUrl(personPreview)}
+                  src={getGlobalPersonThumbnailUrl(personPreview)}
                   alt=""
                   class="size-8 shrink-0 rounded-full object-cover"
                   loading="lazy"

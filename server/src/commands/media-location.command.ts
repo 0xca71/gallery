@@ -17,14 +17,16 @@ export class ChangeMediaLocationCommand extends CommandRunner {
     hint = hint ? ` (${hint})` : '';
 
     const paths = await this.service.getSampleFilePaths();
-    if (paths.length > 0) {
-      let message = `  Examples from the database${hint}:\n`;
-      for (const path of paths) {
-        message += `  - ${path}\n`;
-      }
-
-      console.log(`\n${message}`);
+    if (paths.length === 0) {
+      return;
     }
+
+    let message = `  Examples from the database${hint}:\n`;
+    for (const path of paths) {
+      message += `  - ${path}\n`;
+    }
+
+    console.log(`\n${message}`);
   }
 
   async run(): Promise<void> {
@@ -100,7 +102,7 @@ export class PromptConfirmMoveQuestions {
     message: 'Do you want to proceed? [Y/n]',
     name: 'value',
   })
-  value(value: string): boolean {
-    return ['yes', 'y'].includes((value || 'y').toLowerCase());
+  value(value: string = 'y'): boolean {
+    return ['yes', 'y'].includes(value.toLowerCase());
   }
 }

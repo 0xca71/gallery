@@ -1,7 +1,7 @@
 <script lang="ts">
-  import UserAvatar from '$lib/components/shared-components/UserAvatar.svelte';
-  import { getAssetMediaUrl } from '$lib/utils';
-  import { formatTimeAgo } from '$lib/utils/timesince';
+  import UserAvatar from '#lib/components/shared-components/UserAvatar.svelte';
+  import { formatTimeAgo } from '#lib/gallery/utils/time-ago.ts';
+  import { getAssetMediaUrl } from '#lib/utils.ts';
   import { UserAvatarColor, type SharedSpaceActivityResponseDto } from '@immich/sdk';
   import { Button } from '@immich/ui';
   import { mdiChevronDown } from '@mdi/js';
@@ -17,7 +17,15 @@
   let { activities, spaceColor, onLoadMore, hasMore }: Props = $props();
 
   const HIGH_IMPACT_TYPES = new Set(['asset_add', 'asset_remove']);
-  const MEDIUM_TYPES = new Set(['member_join', 'member_leave', 'member_remove', 'member_role_change']);
+  const MEDIUM_TYPES = new Set([
+    'member_join',
+    'member_leave',
+    'member_remove',
+    'member_role_change',
+    'asset_edit',
+    'person_face_assign',
+    'person_face_detach',
+  ]);
 
   function getDayLabel(isoString: string, $t: MessageFormatter): string {
     const date = new Date(isoString);
@@ -47,10 +55,16 @@
       case 'asset_remove': {
         return $t('spaces_activity_removed_photos', { values: { name, count } });
       }
+      case 'asset_edit': {
+        return $t('spaces_activity_edited_photos', { values: { name, count } });
+      }
       case 'member_join': {
-        return $t('spaces_activity_joined_as', {
-          values: { name, role: String(data.role ?? $t('spaces_role_member')) },
-        });
+        const role = String(data.role ?? $t('spaces_role_member'));
+        // Present when the server resolved who added the member; absent for self-joins and deleted inviters.
+        if (typeof data.invitedByName === 'string' && data.invitedByName) {
+          return $t('spaces_activity_added_member_as', { values: { inviter: data.invitedByName, name, role } });
+        }
+        return $t('spaces_activity_joined_as', { values: { name, role } });
       }
       case 'member_leave': {
         return $t('spaces_activity_left_space', { values: { name } });
@@ -88,6 +102,12 @@
         return $t('spaces_activity_merged_people', {
           values: { name, count: Number(data.count ?? 0), personName: String(data.personName ?? '') },
         });
+      }
+      case 'person_face_assign': {
+        return $t('spaces_activity_assigned_faces', { values: { name, count } });
+      }
+      case 'person_face_detach': {
+        return $t('spaces_activity_unassigned_faces', { values: { name, count } });
       }
       default: {
         return $t('spaces_activity_default', { values: { name } });
@@ -200,7 +220,7 @@
               </div>
             </div>
             {#if activity.type === 'asset_add'}
-              {@const assetIds = ((activity.data as Record<string, unknown>).assetIds as string[]) ?? []}
+              {const assetIds = $derived(((activity.data as Record<string, unknown>).assetIds as string[]) ?? [])}
               {#if assetIds.length > 0}
                 <div class="mt-2 flex gap-1.5">
                   {#each assetIds.slice(0, 4) as assetId (assetId)}

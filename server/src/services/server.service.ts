@@ -16,10 +16,14 @@ import {
   UsageByUserDto,
 } from 'src/dtos/server.dto.js';
 import { StorageFolder, SyncRequestType, SystemMetadataKey } from 'src/enum.js';
-import { isActiveDistanceThreshold } from 'src/repositories/search.repository.js';
+import {
+  MEMORY_TYPE_KEYS,
+  getAdminAvailableMemoryTypeKeys,
+} from 'src/gallery/services/memory-rules/memory-type.metadata.js';
+import { isActiveDistanceThreshold } from 'src/gallery/utils/smart-search.js';
+import { spatialSceneServerFeatures } from 'src/gallery/utils/spatial-scene.js';
 import { UserStatsQueryResponse } from 'src/repositories/user.repository.js';
 import { BaseService } from 'src/services/base.service.js';
-import { MEMORY_TYPE_KEYS, getAdminAvailableMemoryTypeKeys } from 'src/services/memory-rules/memory-type.metadata.js';
 import { asHumanReadable } from 'src/utils/bytes.js';
 import { mimeTypes } from 'src/utils/mime-types.js';
 import {
@@ -42,7 +46,7 @@ export class ServerService extends BaseService {
         isOnboarded: true,
       });
     }
-    this.logger.log(`Feature Flags: ${JSON.stringify(await this.getFeatures(), null, 2)}`);
+    this.logger.log(`Feature Flags: ${JSON.stringify(await this.getFeatures())}`);
   }
 
   async getMlHealth(): Promise<ServerMlHealthResponseDto> {
@@ -55,7 +59,7 @@ export class ServerService extends BaseService {
     }
     this.mlHealthInFlight = (async () => {
       try {
-        const { ok } = await this.machineLearningRepository.ping();
+        const { ok } = await this.galleryMachineLearningRepository.ping();
         const value: ServerMlHealthResponseDto = { smartSearchHealthy: ok };
         this.mlHealthCache = { value, expiresAt: Date.now() + 30_000 };
         return value;
@@ -120,9 +124,19 @@ export class ServerService extends BaseService {
     // Cached read — see search.service.ts for rationale. This endpoint is hit on
     // every web-app page load; the uncached buildConfig dominates latency on
     // slower CPUs. Cache invalidates on ConfigUpdate.
-    const { reverseGeocoding, metadata, map, machineLearning, trash, oauth, passwordLogin, notifications, ffmpeg } =
-      await this.getConfig({ withCache: true });
-    const { configFile, peopleStatistics } = this.configRepository.getEnv();
+    const {
+      reverseGeocoding,
+      metadata,
+      map,
+      backup,
+      machineLearning,
+      trash,
+      oauth,
+      passwordLogin,
+      notifications,
+      ffmpeg,
+    } = await this.getConfig({ withCache: true });
+    const { configFile, peopleStatistics, storage } = this.configRepository.getEnv();
 
     return {
       smartSearch: isSmartSearchEnabled(machineLearning),
@@ -131,6 +145,7 @@ export class ServerService extends BaseService {
       facialRecognition: isFacialRecognitionEnabled(machineLearning),
       duplicateDetection: isDuplicateDetectionEnabled(machineLearning),
       map: map.enabled,
+      backups: !!backup.beta,
       reverseGeocoding: reverseGeocoding.enabled,
       importFaces: metadata.faces.import,
       sidecar: true,
@@ -144,10 +159,19 @@ export class ServerService extends BaseService {
       email: notifications.smtp.enabled,
       realtimeTranscoding: ffmpeg.realtime.enabled,
       peopleStatistics,
+      s3Storage: storage.backend === 's3',
       // Capability signal for mobile sync gating: /sync/stream 400s the whole request on any
       // type outside this enum, so clients must know the accepted set before asking. Version
       // numbers can't carry this (RC builds report the bare base version).
       syncRequestTypes: Object.values(SyncRequestType),
+      // Capability signal for mobile date filters: this server reads takenAfter/takenBefore as a
+      // wall-clock range (src/utils/asset-filter.ts). A client sends that shape only when this is set,
+      // and keeps sending device-local instants to an older server that compares fileCreatedAt.
+      localTakenRange: true,
+      searchOptions: true,
+      searchFavoritesAcrossSpaces: true,
+      ...spatialSceneServerFeatures(machineLearning),
+      dataSaverVideo: ffmpeg.dataSaver.enabled,
     };
   }
 
@@ -176,7 +200,6 @@ export class ServerService extends BaseService {
       maintenanceMode: false,
       minFaces: config.machineLearning.facialRecognition.minFaces,
       availableMemoryTypes: MEMORY_TYPE_KEYS.filter((key) => getAdminAvailableMemoryTypeKeys(config.memories).has(key)),
-      webDeleteToastThreshold: this.configRepository.getEnv().webDeleteToastThreshold,
     };
   }
 

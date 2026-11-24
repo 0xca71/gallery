@@ -52,6 +52,7 @@ async function openAlbumsTab(page: Page, spaceId: string) {
 }
 
 // Hop 6: click the linked album's card -> album detail.
+// eslint-disable-next-line unicorn/no-unnecessary-parameters
 async function openAlbumCard(page: Page, spaceId: string, name: string) {
   await page.getByTestId('space-album-card-link').filter({ hasText: name }).click();
   await page.waitForURL(new RegExp(`/spaces/${spaceId}/albums/[^/]+$`));
@@ -78,7 +79,9 @@ async function expectBlockedAt(page: Page, url: string) {
   let blockedText = false;
   try {
     blockedText = await page
-      .locator('text=/access denied|not found|no access|not a member|http 403/i')
+      // SvelteKit 3: an API error thrown by a load (here upstream's (user) layout fetching the asset) renders the
+      // generic "Something went wrong" page; SvelteKit 2 showed the server's "Not found or no access" text.
+      .locator('text=/access denied|not found|no access|not a member|http 403|something went wrong/i')
       .first()
       .isVisible();
   } catch {

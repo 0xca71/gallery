@@ -1,19 +1,22 @@
-import { screen } from '@testing-library/svelte';
-import userEvent from '@testing-library/user-event';
-import { sdkMock } from '$lib/__mocks__/sdk.mock';
-import { createFilterState } from '$lib/components/filter-panel/filter-panel';
-import { renderWithTooltips } from '$tests/helpers';
-import { albumFactory } from '@test-data/factories/album-factory';
-import AlbumMap from '../AlbumMap.svelte';
+import { sdkMock } from '#lib/gallery/__mocks__/sdk.mock.ts';
+import { page, userEvent } from 'vitest/browser';
+
+// The browser links every static import before any module body runs, so a static import of the
+// component (or of any module that imports @immich/sdk) would load the real SDK before sdk.mock.ts
+// registers its vi.mock. Loading them after that registration gives them the mocked module.
+const { default: AlbumMap } = await import('../AlbumMap.svelte');
+const { createFilterState } = await import('#lib/components/filter-panel/filter-panel.ts');
+const { factory } = await import('#test/unit/factories.ts');
+const { renderWithTooltips } = await import('#test/unit/helpers.ts');
 
 const { handleErrorMock, modalShowMock } = vi.hoisted(() => ({
   handleErrorMock: vi.fn(),
   modalShowMock: vi.fn().mockResolvedValue(undefined),
 }));
 
-vi.mock('$lib/utils/handle-error', () => ({ handleError: handleErrorMock }));
+vi.mock('#lib/utils/handle-error.js', () => ({ handleError: handleErrorMock }));
 
-vi.mock('$lib/managers/auth-manager.svelte', () => ({
+vi.mock('#lib/managers/auth-manager.svelte.js', () => ({
   authManager: { isSharedLink: false, params: {} },
 }));
 
@@ -31,9 +34,9 @@ describe('AlbumMap', () => {
   });
 
   it('fetches album-scoped markers honouring the active filters', async () => {
-    const album = albumFactory.build({ id: 'album-1' });
+    const album = factory.album({ id: 'album-1' });
 
-    renderWithTooltips(AlbumMap, { album, filters: { ...createFilterState(), make: 'Apple' } });
+    await renderWithTooltips(AlbumMap, { album, filters: { ...createFilterState(), make: 'Apple' } });
 
     await vi.waitFor(() =>
       expect(sdkMock.getFilteredMapMarkers).toHaveBeenCalledWith(
@@ -42,12 +45,15 @@ describe('AlbumMap', () => {
       ),
     );
     expect(sdkMock.getAlbumMapMarkers).not.toHaveBeenCalled();
-    expect(screen.getByLabelText('map')).toBeInTheDocument();
+    expect(page.getByLabelText('map', { exact: true }).element()).toBeInTheDocument();
   });
 
   it('refetches when the album filters change', async () => {
-    const album = albumFactory.build({ id: 'album-1' });
-    const { rerender } = renderWithTooltips(AlbumMap, { album, filters: { ...createFilterState(), make: 'Apple' } });
+    const album = factory.album({ id: 'album-1' });
+    const { rerender } = await renderWithTooltips(AlbumMap, {
+      album,
+      filters: { ...createFilterState(), make: 'Apple' },
+    });
 
     await vi.waitFor(() => expect(sdkMock.getFilteredMapMarkers).toHaveBeenCalledTimes(1));
 
@@ -73,8 +79,11 @@ describe('AlbumMap', () => {
   // original example) but Finding 2 (#767 fresh instance) made them marker-relevant — see the
   // "refetches" test below — so this now has to pick a field the album map truly never reads.
   it('does not refetch markers when a filter the album map does not read changes (e.g. sortOrder)', async () => {
-    const album = albumFactory.build({ id: 'album-1' });
-    const { rerender } = renderWithTooltips(AlbumMap, { album, filters: { ...createFilterState(), make: 'Apple' } });
+    const album = factory.album({ id: 'album-1' });
+    const { rerender } = await renderWithTooltips(AlbumMap, {
+      album,
+      filters: { ...createFilterState(), make: 'Apple' },
+    });
 
     await vi.waitFor(() => expect(sdkMock.getFilteredMapMarkers).toHaveBeenCalledTimes(1));
 
@@ -92,8 +101,11 @@ describe('AlbumMap', () => {
   // query (buildAlbumMapMarkerOptions -> applyCommonMapFilters), so — unlike sortOrder above —
   // changing one of them IS marker-relevant and must trigger a refetch with the new value applied.
   it('refetches markers when the description filter changes (now marker-relevant)', async () => {
-    const album = albumFactory.build({ id: 'album-1' });
-    const { rerender } = renderWithTooltips(AlbumMap, { album, filters: { ...createFilterState(), make: 'Apple' } });
+    const album = factory.album({ id: 'album-1' });
+    const { rerender } = await renderWithTooltips(AlbumMap, {
+      album,
+      filters: { ...createFilterState(), make: 'Apple' },
+    });
 
     await vi.waitFor(() => expect(sdkMock.getFilteredMapMarkers).toHaveBeenCalledTimes(1));
 
@@ -115,7 +127,7 @@ describe('AlbumMap', () => {
   // in-flight request, and the superseded promise REJECTS. Without a guard that rejection reaches
   // handleError and the user gets an error toast for every character they type into a filter.
   it('does not surface an error when a filter change aborts the in-flight request', async () => {
-    const album = albumFactory.build({ id: 'album-1' });
+    const album = factory.album({ id: 'album-1' });
     let rejectFirst: (error: unknown) => void = () => {};
     sdkMock.getFilteredMapMarkers
       .mockReturnValueOnce(
@@ -125,7 +137,10 @@ describe('AlbumMap', () => {
       )
       .mockResolvedValueOnce([{ id: 'asset-2', lat: 1, lon: 2 }] as never);
 
-    const { rerender } = renderWithTooltips(AlbumMap, { album, filters: { ...createFilterState(), make: 'Apple' } });
+    const { rerender } = await renderWithTooltips(AlbumMap, {
+      album,
+      filters: { ...createFilterState(), make: 'Apple' },
+    });
     await vi.waitFor(() => expect(sdkMock.getFilteredMapMarkers).toHaveBeenCalledTimes(1));
 
     await rerender({
@@ -143,7 +158,7 @@ describe('AlbumMap', () => {
     expect(handleErrorMock).not.toHaveBeenCalled();
 
     // The second response is the one on the map.
-    await userEvent.setup().click(screen.getByLabelText('map'));
+    await userEvent.setup().click(page.getByLabelText('map', { exact: true }).element());
     expect(modalShowMock).toHaveBeenCalledWith(expect.anything(), {
       mapMarkers: [{ id: 'asset-2', lat: 1, lon: 2 }],
     });
@@ -152,7 +167,7 @@ describe('AlbumMap', () => {
   // The other half of the same race: a superseded request that RESOLVES late must not clobber the
   // markers of the request that replaced it.
   it('ignores a stale response that resolves after a newer one', async () => {
-    const album = albumFactory.build({ id: 'album-1' });
+    const album = factory.album({ id: 'album-1' });
     let resolveFirst: (markers: unknown) => void = () => {};
     sdkMock.getFilteredMapMarkers
       .mockReturnValueOnce(
@@ -162,7 +177,10 @@ describe('AlbumMap', () => {
       )
       .mockResolvedValueOnce([{ id: 'fresh', lat: 1, lon: 2 }] as never);
 
-    const { rerender } = renderWithTooltips(AlbumMap, { album, filters: { ...createFilterState(), make: 'Apple' } });
+    const { rerender } = await renderWithTooltips(AlbumMap, {
+      album,
+      filters: { ...createFilterState(), make: 'Apple' },
+    });
     await vi.waitFor(() => expect(sdkMock.getFilteredMapMarkers).toHaveBeenCalledTimes(1));
 
     await rerender({
@@ -176,7 +194,7 @@ describe('AlbumMap', () => {
     // below is the one that does the work.
     resolveFirst([{ id: 'stale', lat: 9, lon: 9 }]);
 
-    await userEvent.setup().click(screen.getByLabelText('map'));
+    await userEvent.setup().click(page.getByLabelText('map', { exact: true }).element());
     expect(modalShowMock).toHaveBeenCalledWith(expect.anything(), { mapMarkers: [{ id: 'fresh', lat: 1, lon: 2 }] });
   });
 
@@ -184,7 +202,7 @@ describe('AlbumMap', () => {
   // must keep using the album endpoint: /gallery/map/markers has no shared-link auth, and E2 says
   // shared links get no filter affordances at all.
   it('falls back to the album endpoint when no filters are provided', async () => {
-    renderWithTooltips(AlbumMap, { album: albumFactory.build({ id: 'album-1' }) });
+    await renderWithTooltips(AlbumMap, { album: factory.album({ id: 'album-1' }) });
 
     await vi.waitFor(() =>
       expect(sdkMock.getAlbumMapMarkers).toHaveBeenCalledWith({ id: 'album-1' }, expect.anything()),

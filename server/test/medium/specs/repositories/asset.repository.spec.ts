@@ -1,16 +1,20 @@
 import { Insertable, Kysely, sql } from 'kysely';
+import { chunk } from 'lodash-es';
+import { JOBS_LIBRARY_PAGINATION_SIZE } from 'src/constants.js';
 import {
   AssetFileType,
   AssetOrder,
   AssetOrderBy,
-  AssetStatus,
   AssetType,
   AssetVisibility,
   SharedSpaceRole,
   TimeBucketSize,
 } from 'src/enum.js';
+import { GalleryAssetRepository } from 'src/gallery/repositories/gallery-asset.repository.js';
+import { MemoryRuleAssetRepository } from 'src/gallery/repositories/memory-rule-asset.repository.js';
 import { AssetRepository } from 'src/repositories/asset.repository.js';
 import { FaceIdentityRepository } from 'src/repositories/face-identity.repository.js';
+import { LibraryRepository } from 'src/repositories/library.repository.js';
 import { LoggingRepository } from 'src/repositories/logging.repository.js';
 import { SharedSpaceRepository } from 'src/repositories/shared-space.repository.js';
 import { TagRepository } from 'src/repositories/tag.repository.js';
@@ -18,7 +22,7 @@ import { DB } from 'src/schema/index.js';
 import { AssetTable } from 'src/schema/tables/asset.table.js';
 import { BaseService } from 'src/services/base.service.js';
 import { upsertTags } from 'src/utils/tag.js';
-import { newMediumService } from 'test/medium.factory.js';
+import { mediumFactory, newMediumService } from 'test/medium.factory.js';
 import { factory } from 'test/small.factory.js';
 import { getKyselyDB } from 'test/utils.js';
 
@@ -34,7 +38,12 @@ const setup = (db?: Kysely<DB>) => {
     real: [],
     mock: [LoggingRepository],
   });
-  return { ctx, sut: ctx.get(AssetRepository) };
+  return {
+    ctx,
+    sut: ctx.get(AssetRepository),
+    galleryAsset: ctx.get(GalleryAssetRepository),
+    memoryRuleAsset: ctx.get(MemoryRuleAssetRepository),
+  };
 };
 
 const seedPeriodAsset = async (
@@ -143,6 +152,13 @@ beforeAll(async () => {
   defaultDatabase = await getKyselyDB();
 });
 
+const newExternalLibrary = async (ctx: ReturnType<typeof setup>['ctx']) => {
+  const { user } = await ctx.newUser();
+  return ctx
+    .get(LibraryRepository)
+    .create({ ownerId: user.id, name: 'library', importPaths: [], exclusionPatterns: [] });
+};
+
 // Metadata extraction is repeatable: probing improves, files get repaired,
 // and a re-run has to be able to correct what an earlier run stored.
 const audioRow = (assetId: string, n: number) => ({
@@ -184,86 +200,28 @@ const keyframeRow = (assetId: string, n: number) => ({
 });
 
 describe(AssetRepository.name, () => {
-  describe('unlinkAndDeleteLivePhoto', () => {
-    it.each([false, true])(
-      'atomically unlinks the photo and marks its video deleted (external=%s)',
-      async (external) => {
-        const { ctx, sut } = setup();
-        const { user } = await ctx.newUser();
-        const { library } = external ? await ctx.newLibrary({ ownerId: user.id }) : { library: null };
-        const { asset: video } = await ctx.newAsset({
-          ownerId: user.id,
-          type: AssetType.Video,
-          libraryId: library?.id ?? null,
-          isExternal: external,
-        });
-        const { asset: photo } = await ctx.newAsset({
-          ownerId: user.id,
-          livePhotoVideoId: video.id,
-          libraryId: library?.id ?? null,
-          isExternal: external,
-        });
-        await ctx.newExif({ assetId: photo.id, livePhotoCID: 'keep-original-metadata' });
-
-        await expect(
-          sut.unlinkAndDeleteLivePhoto({ photoId: photo.id, videoId: video.id, ownerId: user.id }),
-        ).resolves.toBe('success');
-        expect(await sut.getById(photo.id, { exifInfo: true })).toMatchObject({
-          livePhotoVideoId: null,
-          exifInfo: { livePhotoCID: 'keep-original-metadata' },
-        });
-        expect(await sut.getById(video.id)).toMatchObject({ status: AssetStatus.Deleted, deletedAt: expect.any(Date) });
-      },
-    );
-
-    it('keeps both associations and the video when another photo references it', async () => {
+  describe('deleteFile', () => {
+    it('should delete only the requested asset and file type', async () => {
       const { ctx, sut } = setup();
       const { user } = await ctx.newUser();
-      const { asset: video } = await ctx.newAsset({ ownerId: user.id, type: AssetType.Video });
-      const { asset: photo } = await ctx.newAsset({ ownerId: user.id, livePhotoVideoId: video.id });
-      await ctx.newAsset({ ownerId: user.id, livePhotoVideoId: video.id });
+      const { asset } = await ctx.newAsset({ ownerId: user.id });
+      const { asset: other } = await ctx.newAsset({ ownerId: user.id });
+      await sut.upsertFiles([
+        { assetId: asset.id, type: AssetFileType.Sidecar, path: '/photos/photo.jpg.xmp' },
+        { assetId: asset.id, type: AssetFileType.Thumbnail, path: '/photos/thumbnail.jpg' },
+        { assetId: other.id, type: AssetFileType.Sidecar, path: '/photos/other.jpg.xmp' },
+      ]);
+
+      await sut.deleteFile({ assetId: asset.id, type: AssetFileType.Sidecar });
 
       await expect(
-        sut.unlinkAndDeleteLivePhoto({ photoId: photo.id, videoId: video.id, ownerId: user.id }),
-      ).resolves.toBe('shared');
-      expect(await sut.getById(photo.id)).toMatchObject({ livePhotoVideoId: video.id });
-      expect(await sut.getById(video.id)).toMatchObject({ status: AssetStatus.Active, deletedAt: null });
-    });
-
-    it('does not delete a stale association', async () => {
-      const { ctx, sut } = setup();
-      const { user } = await ctx.newUser();
-      const { asset: video } = await ctx.newAsset({ ownerId: user.id, type: AssetType.Video });
-      const { asset: photo } = await ctx.newAsset({ ownerId: user.id });
-
-      await expect(
-        sut.unlinkAndDeleteLivePhoto({ photoId: photo.id, videoId: video.id, ownerId: user.id }),
-      ).resolves.toBe('changed');
-      expect(await sut.getById(video.id)).toMatchObject({ status: AssetStatus.Active, deletedAt: null });
-    });
-
-    it('prevents new links and automatic matches to a video pending permanent deletion', async () => {
-      const { ctx, sut } = setup();
-      const { user } = await ctx.newUser();
-      const { asset: video } = await ctx.newAsset({
-        ownerId: user.id,
-        type: AssetType.Video,
-        status: AssetStatus.Deleted,
-        deletedAt: new Date(),
-      });
-      const { asset: photo } = await ctx.newAsset({ ownerId: user.id });
-      await ctx.newExif({ assetId: video.id, livePhotoCID: 'deleted-video' });
-
-      await expect(sut.update({ id: photo.id, livePhotoVideoId: video.id })).resolves.toBeUndefined();
-      expect(await sut.getById(photo.id)).toMatchObject({ livePhotoVideoId: null });
-      await expect(
-        sut.findLivePhotoMatch({
-          ownerId: user.id,
-          otherAssetId: photo.id,
-          livePhotoCID: 'deleted-video',
-          type: AssetType.Video,
-        }),
-      ).resolves.toBeUndefined();
+        ctx.database
+          .selectFrom('asset_file')
+          .where('assetId', 'in', [asset.id, other.id])
+          .select('path')
+          .orderBy('path')
+          .execute(),
+      ).resolves.toEqual([{ path: '/photos/other.jpg.xmp' }, { path: '/photos/thumbnail.jpg' }]);
     });
   });
 
@@ -324,12 +282,13 @@ describe(AssetRepository.name, () => {
       ]);
     });
 
-    it('keeps takenAfter and takenBefore inclusive for bucket counts', async () => {
+    it('applies takenAfter inclusively and takenBefore exclusively to bucket counts', async () => {
       const { ctx, sut } = setup();
       const { user } = await ctx.newUser();
 
       await createTimelineAsset(ctx, user.id, new Date('2024-01-10T00:00:00.000Z'));
       await createTimelineAsset(ctx, user.id, new Date('2024-01-20T00:00:00.000Z'));
+      // Just past the bound: excluded like the asset exactly on it.
       await createTimelineAsset(ctx, user.id, new Date('2024-01-20T00:00:01.000Z'));
 
       await expect(
@@ -344,7 +303,7 @@ describe(AssetRepository.name, () => {
           },
           factory.auth({ user: { id: user.id } }),
         ),
-      ).resolves.toEqual([expect.objectContaining({ count: 2 })]);
+      ).resolves.toEqual([expect.objectContaining({ count: 1 })]);
 
       const result = await sut.getTimeBuckets(
         {
@@ -356,10 +315,7 @@ describe(AssetRepository.name, () => {
         },
         factory.auth({ user: { id: user.id } }),
       );
-      expect(result).toEqual([
-        expect.objectContaining({ timeBucket: '2024-01-20', count: 1 }),
-        expect.objectContaining({ timeBucket: '2024-01-10', count: 1 }),
-      ]);
+      expect(result).toEqual([expect.objectContaining({ timeBucket: '2024-01-10', count: 1 })]);
       expect(result[0]).not.toHaveProperty('representativeAssetId');
       expect(result[0]).not.toHaveProperty('representativeThumbhash');
       expect(result[0]).not.toHaveProperty('representativeRatio');
@@ -370,9 +326,11 @@ describe(AssetRepository.name, () => {
       const { user } = await ctx.newUser();
 
       const matching = await createTimelineAsset(ctx, user.id, new Date('2024-02-01T12:00:00.000Z'), {
-        isFavorite: true,
         thumbhash: Buffer.from('favorite'),
       });
+      // #763: isFavorite filters against the caller's asset_favorite overlay (authUserId), not the
+      // owner's asset.isFavorite column.
+      await ctx.database.insertInto('asset_favorite').values({ userId: user.id, assetId: matching.id }).execute();
       await ctx.newExif({
         assetId: matching.id,
         latitude: 52.5,
@@ -384,9 +342,7 @@ describe(AssetRepository.name, () => {
         rating: 4,
       });
 
-      const decoy = await createTimelineAsset(ctx, user.id, new Date('2024-02-02T12:00:00.000Z'), {
-        isFavorite: false,
-      });
+      const decoy = await createTimelineAsset(ctx, user.id, new Date('2024-02-02T12:00:00.000Z'));
       await ctx.newExif({
         assetId: decoy.id,
         latitude: 48.8,
@@ -401,6 +357,7 @@ describe(AssetRepository.name, () => {
       const result = await sut.getTimeBuckets(
         {
           userIds: [user.id],
+          authUserId: user.id,
           visibility: AssetVisibility.Timeline,
           bucketSize: TimeBucketSize.Year,
           isFavorite: true,
@@ -730,14 +687,14 @@ describe(AssetRepository.name, () => {
 
   describe('getTimeBucketCovers', () => {
     it('returns an empty list without querying when no buckets are requested', async () => {
-      const { sut } = setup();
+      const { galleryAsset } = setup();
 
-      await expect(sut.getTimeBucketCovers({ timeBuckets: [] })).resolves.toEqual([]);
-      await expect(sut.getTimeBucketCovers({})).resolves.toEqual([]);
+      await expect(galleryAsset.getTimeBucketCovers({ timeBuckets: [] })).resolves.toEqual([]);
+      await expect(galleryAsset.getTimeBucketCovers({})).resolves.toEqual([]);
     });
 
     it('picks the latest asset per requested year bucket for descending order', async () => {
-      const { ctx, sut } = setup();
+      const { ctx, galleryAsset } = setup();
       const { user } = await ctx.newUser();
 
       await createTimelineAsset(ctx, user.id, new Date('2023-02-01T12:00:00.000Z'), {
@@ -751,7 +708,7 @@ describe(AssetRepository.name, () => {
       });
 
       await expect(
-        sut.getTimeBucketCovers({
+        galleryAsset.getTimeBucketCovers({
           userIds: [user.id],
           visibility: AssetVisibility.Timeline,
           bucketSize: TimeBucketSize.Year,
@@ -775,7 +732,7 @@ describe(AssetRepository.name, () => {
     });
 
     it('picks the earliest asset per requested year bucket for ascending order', async () => {
-      const { ctx, sut } = setup();
+      const { ctx, galleryAsset } = setup();
       const { user } = await ctx.newUser();
 
       const older2023 = await createTimelineAsset(ctx, user.id, new Date('2023-02-01T12:00:00.000Z'), {
@@ -786,7 +743,7 @@ describe(AssetRepository.name, () => {
       });
 
       await expect(
-        sut.getTimeBucketCovers({
+        galleryAsset.getTimeBucketCovers({
           userIds: [user.id],
           visibility: AssetVisibility.Timeline,
           bucketSize: TimeBucketSize.Year,
@@ -804,7 +761,7 @@ describe(AssetRepository.name, () => {
     });
 
     it('uses fileCreatedAt as a tie-break, matching the bucket representative pick', async () => {
-      const { ctx, sut } = setup();
+      const { ctx, galleryAsset } = setup();
       const { user } = await ctx.newUser();
 
       const laterTimeEarlierCreated = await createTimelineAsset(ctx, user.id, new Date('2024-07-01T23:00:00.000Z'), {
@@ -816,7 +773,7 @@ describe(AssetRepository.name, () => {
 
       // Same day in DESC: latest localDate ties (both 2024-07-01), so latest fileCreatedAt wins.
       await expect(
-        sut.getTimeBucketCovers({
+        galleryAsset.getTimeBucketCovers({
           userIds: [user.id],
           visibility: AssetVisibility.Timeline,
           bucketSize: TimeBucketSize.Day,
@@ -829,7 +786,7 @@ describe(AssetRepository.name, () => {
 
       // ASC tie-break: earliest fileCreatedAt wins.
       await expect(
-        sut.getTimeBucketCovers({
+        galleryAsset.getTimeBucketCovers({
           userIds: [user.id],
           visibility: AssetVisibility.Timeline,
           bucketSize: TimeBucketSize.Day,
@@ -842,13 +799,13 @@ describe(AssetRepository.name, () => {
     });
 
     it('omits requested buckets that have no matching assets', async () => {
-      const { ctx, sut } = setup();
+      const { ctx, galleryAsset } = setup();
       const { user } = await ctx.newUser();
 
       const only2024 = await createTimelineAsset(ctx, user.id, new Date('2024-06-01T12:00:00.000Z'));
 
       await expect(
-        sut.getTimeBucketCovers({
+        galleryAsset.getTimeBucketCovers({
           userIds: [user.id],
           visibility: AssetVisibility.Timeline,
           bucketSize: TimeBucketSize.Year,
@@ -859,7 +816,7 @@ describe(AssetRepository.name, () => {
     });
 
     it('honours owner and visibility filters', async () => {
-      const { ctx, sut } = setup();
+      const { ctx, galleryAsset } = setup();
       const { user } = await ctx.newUser();
       const { user: otherUser } = await ctx.newUser();
 
@@ -870,7 +827,7 @@ describe(AssetRepository.name, () => {
       await createTimelineAsset(ctx, otherUser.id, new Date('2024-08-01T12:00:00.000Z'));
 
       await expect(
-        sut.getTimeBucketCovers({
+        galleryAsset.getTimeBucketCovers({
           userIds: [user.id],
           visibility: AssetVisibility.Timeline,
           bucketSize: TimeBucketSize.Year,
@@ -881,14 +838,14 @@ describe(AssetRepository.name, () => {
     });
 
     it('picks the representative for a month bucket spanning a year boundary', async () => {
-      const { ctx, sut } = setup();
+      const { ctx, galleryAsset } = setup();
       const { user } = await ctx.newUser();
 
       const decAsset = await createTimelineAsset(ctx, user.id, new Date('2023-12-15T12:00:00.000Z'));
       await createTimelineAsset(ctx, user.id, new Date('2024-01-10T12:00:00.000Z')); // must be excluded
 
       await expect(
-        sut.getTimeBucketCovers({
+        galleryAsset.getTimeBucketCovers({
           userIds: [user.id],
           visibility: AssetVisibility.Timeline,
           bucketSize: TimeBucketSize.Month,
@@ -911,7 +868,7 @@ describe(AssetRepository.name, () => {
       [TimeBucketSize.Month, '12345-06-01'],
       [TimeBucketSize.Day, '12345-06-01'],
     ])('resolves %s covers for expanded-year buckets, which Postgres renders unsigned', async (bucketSize, bucket) => {
-      const { ctx, sut } = setup();
+      const { ctx, galleryAsset } = setup();
       const { user } = await ctx.newUser();
 
       const asset = await createTimelineAsset(ctx, user.id, new Date('2024-06-01T12:00:00.000Z'), {
@@ -926,7 +883,7 @@ describe(AssetRepository.name, () => {
         .execute();
 
       await expect(
-        sut.getTimeBucketCovers({
+        galleryAsset.getTimeBucketCovers({
           userIds: [user.id],
           visibility: AssetVisibility.Timeline,
           bucketSize,
@@ -981,7 +938,7 @@ describe(AssetRepository.name, () => {
 
   describe('getMemoryLocationClusters', () => {
     it('should group previewable timeline assets by country and city within the requested window', async () => {
-      const { ctx, sut } = setup();
+      const { ctx, memoryRuleAsset } = setup();
       const { user } = await ctx.newUser();
 
       const addAsset = async ({
@@ -1016,7 +973,7 @@ describe(AssetRepository.name, () => {
         withPreview: false,
       });
 
-      const result = await sut.getMemoryLocationClusters(user.id, {
+      const result = await memoryRuleAsset.getMemoryLocationClusters(user.id, {
         takenAfter: new Date('2026-04-01T00:00:00Z'),
         takenBefore: new Date('2026-04-30T23:59:59Z'),
       });
@@ -1033,7 +990,7 @@ describe(AssetRepository.name, () => {
 
   describe('getMemoryAssetsForLocation', () => {
     it('should return previewable timeline assets for the requested country and city, including city=null', async () => {
-      const { ctx, sut } = setup();
+      const { ctx, memoryRuleAsset } = setup();
       const { user } = await ctx.newUser();
       const takenAfter = new Date('2026-04-01T00:00:00Z');
       const takenBefore = new Date('2026-04-30T23:59:59Z');
@@ -1064,7 +1021,7 @@ describe(AssetRepository.name, () => {
       ]);
 
       await expect(
-        sut.getMemoryAssetsForLocation(user.id, {
+        memoryRuleAsset.getMemoryAssetsForLocation(user.id, {
           country: 'France',
           city: 'Paris',
           takenAfter,
@@ -1073,7 +1030,7 @@ describe(AssetRepository.name, () => {
       ).resolves.toEqual([expect.objectContaining({ id: parisAsset.id })]);
 
       await expect(
-        sut.getMemoryAssetsForLocation(user.id, {
+        memoryRuleAsset.getMemoryAssetsForLocation(user.id, {
           country: 'France',
           city: null,
           takenAfter,
@@ -1083,82 +1040,15 @@ describe(AssetRepository.name, () => {
     });
   });
 
-  describe('getMemoryAssetsForPerson', () => {
-    it('should return previewable timeline assets for the person before the cutoff and deduplicate multiple faces', async () => {
-      const { ctx, sut } = setup();
-      const { user } = await ctx.newUser();
-      const { person } = await ctx.newPerson({ ownerId: user.id, name: 'Alice' });
-      const cutoff = new Date('2026-04-23T23:59:59Z');
-
-      const { asset: matchingAsset } = await ctx.newAsset({
-        ownerId: user.id,
-        visibility: AssetVisibility.Timeline,
-        localDateTime: new Date('2025-04-01T12:00:00Z'),
-      });
-      const { asset: duplicateFaceAsset } = await ctx.newAsset({
-        ownerId: user.id,
-        visibility: AssetVisibility.Timeline,
-        localDateTime: new Date('2024-04-01T12:00:00Z'),
-      });
-      const { asset: hiddenFaceAsset } = await ctx.newAsset({
-        ownerId: user.id,
-        visibility: AssetVisibility.Timeline,
-        localDateTime: new Date('2023-04-01T12:00:00Z'),
-      });
-      const { asset: missingPreviewAsset } = await ctx.newAsset({
-        ownerId: user.id,
-        visibility: AssetVisibility.Timeline,
-        localDateTime: new Date('2022-04-01T12:00:00Z'),
-      });
-      const { asset: afterCutoffAsset } = await ctx.newAsset({
-        ownerId: user.id,
-        visibility: AssetVisibility.Timeline,
-        localDateTime: new Date('2026-05-01T12:00:00Z'),
-      });
-
-      await Promise.all([
-        ctx.newJobStatus({ assetId: matchingAsset.id }),
-        ctx.newJobStatus({ assetId: duplicateFaceAsset.id }),
-        ctx.newJobStatus({ assetId: hiddenFaceAsset.id }),
-        ctx.newJobStatus({ assetId: missingPreviewAsset.id }),
-        ctx.newJobStatus({ assetId: afterCutoffAsset.id }),
-        ctx.newAssetFile({ assetId: matchingAsset.id, type: AssetFileType.Preview, path: 'matching-preview.jpg' }),
-        ctx.newAssetFile({
-          assetId: duplicateFaceAsset.id,
-          type: AssetFileType.Preview,
-          path: 'duplicate-preview.jpg',
-        }),
-        ctx.newAssetFile({ assetId: hiddenFaceAsset.id, type: AssetFileType.Preview, path: 'hidden-preview.jpg' }),
-        ctx.newAssetFile({ assetId: afterCutoffAsset.id, type: AssetFileType.Preview, path: 'after-preview.jpg' }),
-        ctx.newAssetFace({ assetId: matchingAsset.id, personGroupId: person.personGroupId, isVisible: true }),
-        ctx.newAssetFace({ assetId: duplicateFaceAsset.id, personGroupId: person.personGroupId, isVisible: true }),
-        ctx.newAssetFace({ assetId: duplicateFaceAsset.id, personGroupId: person.personGroupId, isVisible: true }),
-        ctx.newAssetFace({ assetId: hiddenFaceAsset.id, personGroupId: person.personGroupId, isVisible: false }),
-        ctx.newAssetFace({ assetId: missingPreviewAsset.id, personGroupId: person.personGroupId, isVisible: true }),
-        ctx.newAssetFace({ assetId: afterCutoffAsset.id, personGroupId: person.personGroupId, isVisible: true }),
-      ]);
-
-      const result = await sut.getMemoryAssetsForPerson(user.id, person.personGroupId, cutoff);
-
-      expect(result.map(({ id }) => id).toSorted()).toEqual([duplicateFaceAsset.id, matchingAsset.id].toSorted());
-      expect(result).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({ id: matchingAsset.id, localDateTime: new Date('2025-04-01T12:00:00Z') }),
-          expect.objectContaining({ id: duplicateFaceAsset.id, localDateTime: new Date('2024-04-01T12:00:00Z') }),
-        ]),
-      );
-    });
-  });
-
   describe('getMemoryAssetsForPeriod', () => {
     it('filters by month across years and returns the correct UTC year', async () => {
-      const { ctx, sut } = setup();
+      const { ctx, memoryRuleAsset } = setup();
       const { user } = await ctx.newUser();
       await seedPeriodAsset(ctx, user.id, { localDateTime: new Date('2023-07-10T12:00:00Z') });
       await seedPeriodAsset(ctx, user.id, { localDateTime: new Date('2022-07-20T12:00:00Z') });
       await seedPeriodAsset(ctx, user.id, { localDateTime: new Date('2023-06-10T12:00:00Z') }); // wrong month
 
-      const result = await sut.getMemoryAssetsForPeriod(user.id, {
+      const result = await memoryRuleAsset.getMemoryAssetsForPeriod(user.id, {
         months: [7],
         takenBefore: new Date('2026-01-01T00:00:00Z'),
       });
@@ -1168,14 +1058,14 @@ describe(AssetRepository.name, () => {
     });
 
     it('unions multiple months', async () => {
-      const { ctx, sut } = setup();
+      const { ctx, memoryRuleAsset } = setup();
       const { user } = await ctx.newUser();
       await seedPeriodAsset(ctx, user.id, { localDateTime: new Date('2023-06-10T12:00:00Z') });
       await seedPeriodAsset(ctx, user.id, { localDateTime: new Date('2023-07-10T12:00:00Z') });
       await seedPeriodAsset(ctx, user.id, { localDateTime: new Date('2023-08-10T12:00:00Z') });
       await seedPeriodAsset(ctx, user.id, { localDateTime: new Date('2023-09-10T12:00:00Z') }); // excluded
 
-      const result = await sut.getMemoryAssetsForPeriod(user.id, {
+      const result = await memoryRuleAsset.getMemoryAssetsForPeriod(user.id, {
         months: [6, 7, 8],
         takenBefore: new Date('2026-01-01T00:00:00Z'),
       });
@@ -1184,13 +1074,13 @@ describe(AssetRepository.name, () => {
     });
 
     it('narrows to a day-of-month across years', async () => {
-      const { ctx, sut } = setup();
+      const { ctx, memoryRuleAsset } = setup();
       const { user } = await ctx.newUser();
       await seedPeriodAsset(ctx, user.id, { localDateTime: new Date('2023-07-15T12:00:00Z') });
       await seedPeriodAsset(ctx, user.id, { localDateTime: new Date('2022-07-15T12:00:00Z') });
       await seedPeriodAsset(ctx, user.id, { localDateTime: new Date('2023-07-16T12:00:00Z') }); // wrong day
 
-      const result = await sut.getMemoryAssetsForPeriod(user.id, {
+      const result = await memoryRuleAsset.getMemoryAssetsForPeriod(user.id, {
         months: [7],
         day: 15,
         takenBefore: new Date('2026-01-01T00:00:00Z'),
@@ -1200,7 +1090,7 @@ describe(AssetRepository.name, () => {
     });
 
     it('returns only favorites when favoritesOnly is set', async () => {
-      const { ctx, sut } = setup();
+      const { ctx, memoryRuleAsset } = setup();
       const { user } = await ctx.newUser();
       const fav = await seedPeriodAsset(ctx, user.id, {
         localDateTime: new Date('2023-07-10T12:00:00Z'),
@@ -1208,7 +1098,7 @@ describe(AssetRepository.name, () => {
       });
       await seedPeriodAsset(ctx, user.id, { localDateTime: new Date('2023-07-11T12:00:00Z'), isFavorite: false });
 
-      const result = await sut.getMemoryAssetsForPeriod(user.id, {
+      const result = await memoryRuleAsset.getMemoryAssetsForPeriod(user.id, {
         months: [7],
         favoritesOnly: true,
         takenBefore: new Date('2026-01-01T00:00:00Z'),
@@ -1219,12 +1109,12 @@ describe(AssetRepository.name, () => {
     });
 
     it('excludes assets taken after takenBefore', async () => {
-      const { ctx, sut } = setup();
+      const { ctx, memoryRuleAsset } = setup();
       const { user } = await ctx.newUser();
       await seedPeriodAsset(ctx, user.id, { localDateTime: new Date('2023-07-10T12:00:00Z') });
       await seedPeriodAsset(ctx, user.id, { localDateTime: new Date('2025-07-10T12:00:00Z') }); // after cutoff
 
-      const result = await sut.getMemoryAssetsForPeriod(user.id, {
+      const result = await memoryRuleAsset.getMemoryAssetsForPeriod(user.id, {
         months: [7],
         takenBefore: new Date('2024-01-01T00:00:00Z'),
       });
@@ -1234,7 +1124,7 @@ describe(AssetRepository.name, () => {
     });
 
     it('returns city and country for geotagged assets and nulls for ungeotagged', async () => {
-      const { ctx, sut } = setup();
+      const { ctx, memoryRuleAsset } = setup();
       const { user } = await ctx.newUser();
       await seedPeriodAsset(ctx, user.id, {
         localDateTime: new Date('2023-07-10T12:00:00Z'),
@@ -1247,7 +1137,7 @@ describe(AssetRepository.name, () => {
         city: null,
       });
 
-      const result = await sut.getMemoryAssetsForPeriod(user.id, {
+      const result = await memoryRuleAsset.getMemoryAssetsForPeriod(user.id, {
         months: [7],
         takenBefore: new Date('2026-01-01T00:00:00Z'),
       });
@@ -1261,7 +1151,7 @@ describe(AssetRepository.name, () => {
     });
 
     it('excludes assets without a preview, deleted, non-timeline, and other owners; orders by localDateTime asc', async () => {
-      const { ctx, sut } = setup();
+      const { ctx, memoryRuleAsset } = setup();
       const { user } = await ctx.newUser();
       const { user: other } = await ctx.newUser();
       const first = await seedPeriodAsset(ctx, user.id, { localDateTime: new Date('2023-07-05T12:00:00Z') });
@@ -1274,7 +1164,7 @@ describe(AssetRepository.name, () => {
       });
       await seedPeriodAsset(ctx, other.id, { localDateTime: new Date('2023-07-10T12:00:00Z') });
 
-      const result = await sut.getMemoryAssetsForPeriod(user.id, {
+      const result = await memoryRuleAsset.getMemoryAssetsForPeriod(user.id, {
         months: [7],
         takenBefore: new Date('2026-01-01T00:00:00Z'),
       });
@@ -1283,7 +1173,7 @@ describe(AssetRepository.name, () => {
     });
 
     it('returns type and duration on each row', async () => {
-      const { ctx, sut } = setup();
+      const { ctx, memoryRuleAsset } = setup();
       const { user } = await ctx.newUser();
       const image = await seedPeriodAsset(ctx, user.id, {
         localDateTime: new Date('2023-07-10T12:00:00Z'),
@@ -1296,7 +1186,7 @@ describe(AssetRepository.name, () => {
         duration: 5000,
       });
 
-      const result = await sut.getMemoryAssetsForPeriod(user.id, {
+      const result = await memoryRuleAsset.getMemoryAssetsForPeriod(user.id, {
         months: [7],
         takenBefore: new Date('2026-01-01T00:00:00Z'),
       });
@@ -1310,7 +1200,7 @@ describe(AssetRepository.name, () => {
     });
 
     it('type: AssetType.Video returns only videos', async () => {
-      const { ctx, sut } = setup();
+      const { ctx, memoryRuleAsset } = setup();
       const { user } = await ctx.newUser();
       await seedPeriodAsset(ctx, user.id, {
         localDateTime: new Date('2023-07-10T12:00:00Z'),
@@ -1328,7 +1218,7 @@ describe(AssetRepository.name, () => {
         duration: 8000,
       });
 
-      const result = await sut.getMemoryAssetsForPeriod(user.id, {
+      const result = await memoryRuleAsset.getMemoryAssetsForPeriod(user.id, {
         months: [7],
         type: AssetType.Video,
         takenBefore: new Date('2026-01-01T00:00:00Z'),
@@ -1342,7 +1232,7 @@ describe(AssetRepository.name, () => {
     });
 
     it('omitting type returns both images and videos', async () => {
-      const { ctx, sut } = setup();
+      const { ctx, memoryRuleAsset } = setup();
       const { user } = await ctx.newUser();
       await seedPeriodAsset(ctx, user.id, {
         localDateTime: new Date('2023-07-10T12:00:00Z'),
@@ -1360,7 +1250,7 @@ describe(AssetRepository.name, () => {
         duration: 8000,
       });
 
-      const result = await sut.getMemoryAssetsForPeriod(user.id, {
+      const result = await memoryRuleAsset.getMemoryAssetsForPeriod(user.id, {
         months: [7],
         takenBefore: new Date('2026-01-01T00:00:00Z'),
       });
@@ -1369,7 +1259,7 @@ describe(AssetRepository.name, () => {
     });
 
     it('returns a video with a null duration', async () => {
-      const { ctx, sut } = setup();
+      const { ctx, memoryRuleAsset } = setup();
       const { user } = await ctx.newUser();
       const video = await seedPeriodAsset(ctx, user.id, {
         localDateTime: new Date('2023-07-10T12:00:00Z'),
@@ -1377,7 +1267,7 @@ describe(AssetRepository.name, () => {
         duration: null,
       });
 
-      const result = await sut.getMemoryAssetsForPeriod(user.id, {
+      const result = await memoryRuleAsset.getMemoryAssetsForPeriod(user.id, {
         months: [7],
         takenBefore: new Date('2026-01-01T00:00:00Z'),
       });
@@ -1388,12 +1278,12 @@ describe(AssetRepository.name, () => {
     });
 
     it('includes an asset exactly on takenBefore', async () => {
-      const { ctx, sut } = setup();
+      const { ctx, memoryRuleAsset } = setup();
       const { user } = await ctx.newUser();
       const takenBefore = new Date('2023-07-10T12:00:00Z');
       const asset = await seedPeriodAsset(ctx, user.id, { localDateTime: takenBefore });
 
-      const result = await sut.getMemoryAssetsForPeriod(user.id, {
+      const result = await memoryRuleAsset.getMemoryAssetsForPeriod(user.id, {
         months: [7],
         takenBefore,
       });
@@ -1405,7 +1295,7 @@ describe(AssetRepository.name, () => {
   describe('getMemoryFacesForPeriod', () => {
     describe('given assets in and out of the requested months', () => {
       it('then returns only rows in the requested months, unioning multi-month filters', async () => {
-        const { ctx, sut } = setup();
+        const { ctx, memoryRuleAsset } = setup();
         const { user } = await ctx.newUser();
         const person = await seedPerson(ctx, user.id, { name: 'Anna' });
 
@@ -1418,7 +1308,7 @@ describe(AssetRepository.name, () => {
         const september = await seedPeriodAsset(ctx, user.id, { localDateTime: new Date('2023-09-10T12:00:00Z') });
         await seedFace(ctx, september.id, person.personGroupId); // excluded — wrong month
 
-        const result = await sut.getMemoryFacesForPeriod(user.id, {
+        const result = await memoryRuleAsset.getMemoryFacesForPeriod(user.id, {
           months: [6, 7, 8],
           takenBefore: new Date('2026-01-01T00:00:00Z'),
         });
@@ -1429,7 +1319,7 @@ describe(AssetRepository.name, () => {
 
     describe('given an asset with two named subjects', () => {
       it('then returns one row per (asset, person)', async () => {
-        const { ctx, sut } = setup();
+        const { ctx, memoryRuleAsset } = setup();
         const { user } = await ctx.newUser();
         const asset = await seedPeriodAsset(ctx, user.id, { localDateTime: new Date('2023-06-10T12:00:00Z') });
         const anna = await seedPerson(ctx, user.id, { name: 'Anna' });
@@ -1437,7 +1327,7 @@ describe(AssetRepository.name, () => {
         await seedFace(ctx, asset.id, anna.personGroupId);
         await seedFace(ctx, asset.id, ben.personGroupId);
 
-        const result = await sut.getMemoryFacesForPeriod(user.id, {
+        const result = await memoryRuleAsset.getMemoryFacesForPeriod(user.id, {
           months: [6],
           takenBefore: new Date('2026-01-01T00:00:00Z'),
         });
@@ -1450,7 +1340,7 @@ describe(AssetRepository.name, () => {
 
     describe('given an asset taken after takenBefore', () => {
       it('then excludes that asset', async () => {
-        const { ctx, sut } = setup();
+        const { ctx, memoryRuleAsset } = setup();
         const { user } = await ctx.newUser();
         const person = await seedPerson(ctx, user.id, { name: 'Anna' });
         const early = await seedPeriodAsset(ctx, user.id, { localDateTime: new Date('2023-06-10T12:00:00Z') });
@@ -1458,7 +1348,7 @@ describe(AssetRepository.name, () => {
         const late = await seedPeriodAsset(ctx, user.id, { localDateTime: new Date('2025-06-10T12:00:00Z') });
         await seedFace(ctx, late.id, person.personGroupId);
 
-        const result = await sut.getMemoryFacesForPeriod(user.id, {
+        const result = await memoryRuleAsset.getMemoryFacesForPeriod(user.id, {
           months: [6],
           takenBefore: new Date('2024-01-01T00:00:00Z'),
         });
@@ -1470,7 +1360,7 @@ describe(AssetRepository.name, () => {
 
     describe('given an asset at a UTC month/year boundary', () => {
       it('then extracts the year in UTC', async () => {
-        const { ctx, sut } = setup();
+        const { ctx, memoryRuleAsset } = setup();
         const { user } = await ctx.newUser();
         const person = await seedPerson(ctx, user.id, { name: 'Anna' });
         // Local time is Dec 31 23:30 in UTC-1, but the stored localDateTime column (interpreted
@@ -1478,7 +1368,7 @@ describe(AssetRepository.name, () => {
         const asset = await seedPeriodAsset(ctx, user.id, { localDateTime: new Date('2024-01-01T00:30:00Z') });
         await seedFace(ctx, asset.id, person.personGroupId);
 
-        const result = await sut.getMemoryFacesForPeriod(user.id, {
+        const result = await memoryRuleAsset.getMemoryFacesForPeriod(user.id, {
           months: [1],
           takenBefore: new Date('2026-01-01T00:00:00Z'),
         });
@@ -1489,7 +1379,7 @@ describe(AssetRepository.name, () => {
 
     describe('given exclusion cases', () => {
       it('excludes unnamed people, hidden people, invisible faces, soft-deleted faces, assets without a preview, soft-deleted assets, non-timeline assets, and another owner entirely; includes pets; orders by localDateTime asc', async () => {
-        const { ctx, sut } = setup();
+        const { ctx, memoryRuleAsset } = setup();
         const { user } = await ctx.newUser();
         const { user: other } = await ctx.newUser();
 
@@ -1552,7 +1442,7 @@ describe(AssetRepository.name, () => {
         const petAsset = await seedPeriodAsset(ctx, user.id, { localDateTime: new Date('2023-06-16T12:00:00Z') });
         await seedFace(ctx, petAsset.id, pet.personGroupId);
 
-        const result = await sut.getMemoryFacesForPeriod(user.id, {
+        const result = await memoryRuleAsset.getMemoryFacesForPeriod(user.id, {
           months: [6],
           takenBefore: new Date('2026-01-01T00:00:00Z'),
         });
@@ -1889,7 +1779,7 @@ describe(AssetRepository.name, () => {
       expect(JSON.parse(bucket.assets).id).toEqual([match.id]);
     });
 
-    it('projects owner-scoped isFavorite, isImage and ratio for matched assets', async () => {
+    it('projects isImage and ratio for matched assets', async () => {
       const { ctx, sut } = setup();
       const { user } = await ctx.newUser();
       const auth = factory.auth({ user: { id: user.id } });
@@ -1897,7 +1787,6 @@ describe(AssetRepository.name, () => {
       const { asset } = await ctx.newAsset({
         ownerId: user.id,
         type: AssetType.Image,
-        isFavorite: true,
         fileCreatedAt: new Date('2026-03-08T12:00:00.000Z'),
         localDateTime: new Date('2026-03-08T12:00:00.000Z'),
       });
@@ -1911,45 +1800,68 @@ describe(AssetRepository.name, () => {
       const parsed = JSON.parse(bucket.assets);
       expect(parsed.id).toEqual([asset.id]);
       expect(parsed.isImage).toEqual([true]);
-      expect(parsed.isFavorite).toEqual([true]);
+    });
+
+    it('reports isFavorite from the asset_favorite overlay for the requesting user (#763, E24)', async () => {
+      const { ctx, sut } = setup();
+      const { user } = await ctx.newUser();
+      const auth = factory.auth({ user: { id: user.id } });
+
+      const { asset } = await ctx.newAsset({
+        ownerId: user.id,
+        type: AssetType.Image,
+        fileCreatedAt: new Date('2026-03-08T12:00:00.000Z'),
+        localDateTime: new Date('2026-03-08T12:00:00.000Z'),
+      });
+      await ctx.newExif({ assetId: asset.id, timeZone: 'UTC' });
+
+      // Insert the overlay row directly (bypassing the write path, which is unchanged in this
+      // slice) so the read is exercised against the overlay in isolation from asset.isFavorite,
+      // which is never set here and stays at its default `false`.
+      await ctx.database.insertInto('asset_favorite').values({ userId: user.id, assetId: asset.id }).execute();
+
+      const withFavorite = await sut.getTimeBucket(
+        '2026-03-01',
+        { userIds: [user.id], visibility: AssetVisibility.Timeline },
+        auth,
+      );
+      expect(JSON.parse(withFavorite.assets).isFavorite).toEqual([true]);
+
+      // Flip via the overlay only, and confirm the projection follows it (not a stale column read).
+      await ctx.database
+        .deleteFrom('asset_favorite')
+        .where('userId', '=', user.id)
+        .where('assetId', '=', asset.id)
+        .execute();
+
+      const withoutFavorite = await sut.getTimeBucket(
+        '2026-03-01',
+        { userIds: [user.id], visibility: AssetVisibility.Timeline },
+        auth,
+      );
+      expect(JSON.parse(withoutFavorite.assets).isFavorite).toEqual([false]);
+    });
+  });
+
+  describe('getStatistics', () => {
+    it('counts only the callers own asset_favorite overlay rows (#763, E22)', async () => {
+      const { ctx, sut } = setup();
+      const { user } = await ctx.newUser();
+
+      const { asset: assetX } = await ctx.newAsset({ ownerId: user.id, visibility: AssetVisibility.Timeline });
+      await ctx.newAsset({ ownerId: user.id, visibility: AssetVisibility.Timeline });
+
+      await ctx.database.insertInto('asset_favorite').values({ userId: user.id, assetId: assetX.id }).execute();
+
+      const stats = await sut.getStatistics(user.id, { isFavorite: true });
+      expect(stats[AssetType.Image]).toEqual(1);
+
+      const nonFavoriteStats = await sut.getStatistics(user.id, { isFavorite: false });
+      expect(nonFavoriteStats[AssetType.Image]).toEqual(1);
     });
   });
 
   describe('upsertExif', () => {
-    it.each([
-      { latitude: 30.6, longitude: 114.18, locked: false, address: 'saved' },
-      { latitude: 31.6, longitude: 114.18, locked: false, address: null },
-      { latitude: 31.6, longitude: 115, locked: true, address: 'saved' },
-    ])(
-      'keeps detailed addresses consistent with effective GPS ($latitude/$longitude, locked=$locked)',
-      async ({ latitude, longitude, locked, address }) => {
-        const { ctx, sut } = setup();
-        const { user } = await ctx.newUser();
-        const { asset } = await ctx.newAsset({ ownerId: user.id });
-        await sut.upsertExif({
-          exif: {
-            assetId: asset.id,
-            latitude: 30.6,
-            longitude: 114.18,
-            formattedAddress: 'saved',
-            lockedProperties: locked ? ['latitude', 'longitude'] : [],
-          },
-          lockedPropertiesBehavior: 'override',
-        });
-        await sut.upsertExif({ exif: { assetId: asset.id, latitude, longitude }, lockedPropertiesBehavior: 'skip' });
-        const exif = await ctx.database
-          .selectFrom('asset_exif')
-          .select(['latitude', 'longitude', 'formattedAddress'])
-          .where('assetId', '=', asset.id)
-          .executeTakeFirstOrThrow();
-        expect(exif).toEqual({
-          latitude: locked ? 30.6 : latitude,
-          longitude: locked ? 114.18 : longitude,
-          formattedAddress: address,
-        });
-      },
-    );
-
     it('should replace stored audio metadata on a second extraction', async () => {
       const { ctx, sut } = setup();
       const { user } = await ctx.newUser();
@@ -2239,6 +2151,60 @@ describe(AssetRepository.name, () => {
           .where('assetId', '=', asset.id)
           .executeTakeFirstOrThrow(),
       ).resolves.toEqual({ lockedProperties: null });
+    });
+  });
+
+  describe('findLivePhotoMatch', () => {
+    type LibraryKind = 'upload' | 'external' | 'other external';
+
+    const setupLivePhoto = async ({ still, motion }: { still: LibraryKind; motion: LibraryKind }) => {
+      const { ctx, sut } = setup();
+      const { user } = await ctx.newUser();
+      const newLibrary = () =>
+        ctx
+          .get(LibraryRepository)
+          .create({ ownerId: user.id, name: 'library', importPaths: [], exclusionPatterns: [] });
+      const [external, otherExternal] = await Promise.all([newLibrary(), newLibrary()]);
+      const libraryIds = { upload: null, external: external.id, 'other external': otherExternal.id };
+      const livePhotoCID = 'live-photo-cid';
+
+      const [{ asset: stillAsset }, { asset: motionAsset }] = await Promise.all([
+        ctx.newAsset({ ownerId: user.id, type: AssetType.Image, libraryId: libraryIds[still] }),
+        ctx.newAsset({ ownerId: user.id, type: AssetType.Video, libraryId: libraryIds[motion] }),
+      ]);
+      await Promise.all([
+        ctx.newExif({ assetId: stillAsset.id, livePhotoCID }),
+        ctx.newExif({ assetId: motionAsset.id, livePhotoCID }),
+      ]);
+
+      const match = await sut.findLivePhotoMatch({
+        ownerId: user.id,
+        libraryId: libraryIds[still],
+        livePhotoCID,
+        otherAssetId: stillAsset.id,
+        type: AssetType.Video,
+      });
+
+      return { match, motionAsset };
+    };
+
+    it.each<LibraryKind>(['upload', 'external'])(
+      'should match a motion video in the same %s library',
+      async (library) => {
+        const { match, motionAsset } = await setupLivePhoto({ still: library, motion: library });
+
+        expect(match).toEqual({ id: motionAsset.id, ownerId: motionAsset.ownerId });
+      },
+    );
+
+    it.each<{ still: LibraryKind; motion: LibraryKind }>([
+      { still: 'upload', motion: 'external' },
+      { still: 'external', motion: 'upload' },
+      { still: 'external', motion: 'other external' },
+    ])('should not match a still in the $still library to a motion video in the $motion library', async (libraries) => {
+      const { match } = await setupLivePhoto(libraries);
+
+      expect(match).toBeUndefined();
     });
   });
 
@@ -2687,6 +2653,95 @@ describe(AssetRepository.name, () => {
     });
   });
 
+  // #867: the Explore "Places" strip is fed by getAssetIdByCity, which only ever looked at
+  // `asset.ownerId`. A space viewer therefore got no tile for a city that exists only on assets
+  // shared with them, even though the same city showed up in the location filter and the filtered
+  // timeline returned those assets. Each test runs on its own database because the `cities` CTE
+  // and the `maxFields` limit are global — a city left behind by another test in this file would
+  // otherwise compete for the limited slots.
+  describe('getAssetIdByCity — shared-space scope (issue #867)', () => {
+    const exploreOptions = { minAssetsPerField: 1, maxFields: 12 };
+
+    it('surfaces a city that only exists on an asset shared directly into a timeline-enabled space', async () => {
+      const { ctx, sut } = setup(await getKyselyDB());
+      const { user: owner } = await ctx.newUser();
+      const { user: member } = await ctx.newUser();
+      const { space } = await ctx.newSharedSpace({ createdById: owner.id });
+      await ctx.newSharedSpaceMember({ spaceId: space.id, userId: member.id, role: SharedSpaceRole.Viewer });
+
+      const { asset } = await ctx.newAsset({ ownerId: owner.id });
+      await ctx.newExif({ assetId: asset.id, city: 'Reykjavik' });
+      await ctx.newSharedSpaceAsset({ spaceId: space.id, assetId: asset.id, addedById: owner.id });
+
+      const withSpace = await sut.getAssetIdByCity(member.id, {
+        ...exploreOptions,
+        timelineSpaceIds: [space.id],
+      });
+      expect(withSpace.items).toEqual([{ value: 'Reykjavik', data: asset.id }]);
+
+      // Without the space scope the member is back to their own (empty) library.
+      const ownOnly = await sut.getAssetIdByCity(member.id, exploreOptions);
+      expect(ownOnly.items).toEqual([]);
+    });
+
+    it('surfaces a city from an album linked into the space, and hides it when the link is off-timeline', async () => {
+      const { ctx, sut } = setup(await getKyselyDB());
+      const { user: owner } = await ctx.newUser();
+      const { user: member } = await ctx.newUser();
+      const { space } = await ctx.newSharedSpace({ createdById: owner.id });
+      await ctx.newSharedSpaceMember({ spaceId: space.id, userId: member.id, role: SharedSpaceRole.Viewer });
+
+      const { asset } = await ctx.newAsset({ ownerId: owner.id });
+      await ctx.newExif({ assetId: asset.id, city: 'Reykjavik' });
+      const { result: album } = await ctx.newAlbum({ ownerId: owner.id }, [asset.id]);
+      await ctx.newSharedSpaceAlbum({ spaceId: space.id, albumId: album.id, showInTimeline: true });
+
+      const shown = await sut.getAssetIdByCity(member.id, { ...exploreOptions, timelineSpaceIds: [space.id] });
+      expect(shown.items).toEqual([{ value: 'Reykjavik', data: asset.id }]);
+
+      // A member who hid this album from their timeline must not get its cities back on Explore.
+      await ctx.database
+        .updateTable('shared_space_album')
+        .set({ showInTimeline: false })
+        .where('spaceId', '=', space.id)
+        .where('albumId', '=', album.id)
+        .execute();
+
+      const hidden = await sut.getAssetIdByCity(member.id, { ...exploreOptions, timelineSpaceIds: [space.id] });
+      expect(hidden.items).toEqual([]);
+    });
+
+    it('does not leak a city from a space the viewer does not belong to', async () => {
+      const { ctx, sut } = setup(await getKyselyDB());
+      const { user: owner } = await ctx.newUser();
+      const { user: outsider } = await ctx.newUser();
+      const { space } = await ctx.newSharedSpace({ createdById: owner.id });
+
+      const { asset } = await ctx.newAsset({ ownerId: owner.id });
+      await ctx.newExif({ assetId: asset.id, city: 'Reykjavik' });
+      await ctx.newSharedSpaceAsset({ spaceId: space.id, assetId: asset.id, addedById: owner.id });
+
+      // The outsider resolves no timeline spaces, so the space arm is never armed for them.
+      const result = await sut.getAssetIdByCity(outsider.id, exploreOptions);
+      expect(result.items).toEqual([]);
+    });
+
+    it('excludes hidden and archived space assets from the strip', async () => {
+      const { ctx, sut } = setup(await getKyselyDB());
+      const { user: owner } = await ctx.newUser();
+      const { user: member } = await ctx.newUser();
+      const { space } = await ctx.newSharedSpace({ createdById: owner.id });
+      await ctx.newSharedSpaceMember({ spaceId: space.id, userId: member.id, role: SharedSpaceRole.Viewer });
+
+      const { asset: archived } = await ctx.newAsset({ ownerId: owner.id, visibility: AssetVisibility.Archive });
+      await ctx.newExif({ assetId: archived.id, city: 'Reykjavik' });
+      await ctx.newSharedSpaceAsset({ spaceId: space.id, assetId: archived.id, addedById: owner.id });
+
+      const result = await sut.getAssetIdByCity(member.id, { ...exploreOptions, timelineSpaceIds: [space.id] });
+      expect(result.items).toEqual([]);
+    });
+  });
+
   describe('getTimeBucket with spacePersonIds', () => {
     it('should only return assets whose matching face is visible and not deleted when filtering by spacePersonId', async () => {
       const { ctx, sut } = setup();
@@ -2800,112 +2855,158 @@ describe(AssetRepository.name, () => {
     });
   });
 
-  // #867: the Explore "Places" strip is fed by getAssetIdByCity, which only ever looked at
-  // `asset.ownerId`. A space viewer therefore got no tile for a city that exists only on assets
-  // shared with them, even though the same city showed up in the location filter and the filtered
-  // timeline returned those assets. Each test runs on its own database because the `cities` CTE
-  // and the `maxFields` limit are global — a city left behind by another test in this file would
-  // otherwise compete for the limited slots.
-  describe('getAssetIdByCity — shared-space scope (issue #867)', () => {
-    const exploreOptions = { minAssetsPerField: 1, maxFields: 12 };
+  describe('detectOfflineExternalAssets', () => {
+    it('should offline the assets the matcher rejects and return how many it offlined', async () => {
+      const { ctx, sut } = setup();
+      const [library, otherLibrary] = await Promise.all([newExternalLibrary(ctx), newExternalLibrary(ctx)]);
+      const deletedAt = new Date('2020-01-01T00:00:00.000Z');
+      const newExternalAsset = (originalPath: string, dto: Partial<Insertable<AssetTable>> = {}) =>
+        ctx.newAsset({ ownerId: library.ownerId, libraryId: library.id, isExternal: true, originalPath, ...dto });
+      const [{ asset: kept }, { asset: rejected }, { asset: alreadyOffline }, { asset: otherLibraryAsset }] =
+        await Promise.all([
+          newExternalAsset('/keep/a.jpg'),
+          newExternalAsset('/reject/b.jpg'),
+          newExternalAsset('/reject/c.jpg', { isOffline: true, deletedAt }),
+          ctx.newAsset({
+            ownerId: otherLibrary.ownerId,
+            libraryId: otherLibrary.id,
+            isExternal: true,
+            originalPath: '/reject/d.jpg',
+          }),
+        ]);
 
-    it('surfaces a city that only exists on an asset shared directly into a timeline-enabled space', async () => {
-      const { ctx, sut } = setup(await getKyselyDB());
-      const { user: owner } = await ctx.newUser();
-      const { user: member } = await ctx.newUser();
-      const { space } = await ctx.newSharedSpace({ createdById: owner.id });
-      await ctx.newSharedSpaceMember({ spaceId: space.id, userId: member.id, role: SharedSpaceRole.Viewer });
+      await expect(sut.detectOfflineExternalAssets(library.id, (path) => path.startsWith('/keep/'))).resolves.toBe(1);
 
-      const { asset } = await ctx.newAsset({ ownerId: owner.id });
-      await ctx.newExif({ assetId: asset.id, city: 'Reykjavik' });
-      await ctx.newSharedSpaceAsset({ spaceId: space.id, assetId: asset.id, addedById: owner.id });
-
-      const withSpace = await sut.getAssetIdByCity(member.id, {
-        ...exploreOptions,
-        timelineSpaceIds: [space.id],
-      });
-      expect(withSpace.items).toEqual([{ value: 'Reykjavik', data: asset.id }]);
-
-      // Without the space scope the member is back to their own (empty) library.
-      const ownOnly = await sut.getAssetIdByCity(member.id, exploreOptions);
-      expect(ownOnly.items).toEqual([]);
+      await expect(sut.getById(kept.id)).resolves.toMatchObject({ isOffline: false, deletedAt: null });
+      await expect(sut.getById(rejected.id)).resolves.toMatchObject({ isOffline: true, deletedAt: expect.any(Date) });
+      await expect(sut.getById(alreadyOffline.id)).resolves.toMatchObject({ isOffline: true, deletedAt });
+      await expect(sut.getById(otherLibraryAsset.id)).resolves.toMatchObject({ isOffline: false, deletedAt: null });
     });
 
-    it('surfaces a city from an album linked into the space, and hides it when the link is off-timeline', async () => {
-      const { ctx, sut } = setup(await getKyselyDB());
-      const { user: owner } = await ctx.newUser();
-      const { user: member } = await ctx.newUser();
-      const { space } = await ctx.newSharedSpace({ createdById: owner.id });
-      await ctx.newSharedSpaceMember({ spaceId: space.id, userId: member.id, role: SharedSpaceRole.Viewer });
+    it('should offline each asset once when the same library is checked concurrently', async () => {
+      const { ctx, sut } = setup();
+      const library = await newExternalLibrary(ctx);
+      const assets = Array.from({ length: JOBS_LIBRARY_PAGINATION_SIZE * 2 }, (_, index) =>
+        mediumFactory.assetInsert({
+          ownerId: library.ownerId,
+          libraryId: library.id,
+          isExternal: true,
+          originalPath: `/reject/${index}.jpg`,
+        }),
+      );
+      for (const batch of chunk(assets, 1000)) {
+        await sut.createAll(batch);
+      }
 
-      const { asset } = await ctx.newAsset({ ownerId: owner.id });
-      await ctx.newExif({ assetId: asset.id, city: 'Reykjavik' });
-      const { result: album } = await ctx.newAlbum({ ownerId: owner.id }, [asset.id]);
-      await ctx.newSharedSpaceAlbum({ spaceId: space.id, albumId: album.id, showInTimeline: true });
+      const counts = await Promise.all([
+        sut.detectOfflineExternalAssets(library.id, () => false),
+        sut.detectOfflineExternalAssets(library.id, () => false),
+      ]);
 
-      const shown = await sut.getAssetIdByCity(member.id, { ...exploreOptions, timelineSpaceIds: [space.id] });
-      expect(shown.items).toEqual([{ value: 'Reykjavik', data: asset.id }]);
-
-      // A member who hid this album from their timeline must not get its cities back on Explore.
-      await ctx.database
-        .updateTable('shared_space_album')
-        .set({ showInTimeline: false })
-        .where('spaceId', '=', space.id)
-        .where('albumId', '=', album.id)
-        .execute();
-
-      const hidden = await sut.getAssetIdByCity(member.id, { ...exploreOptions, timelineSpaceIds: [space.id] });
-      expect(hidden.items).toEqual([]);
-    });
-
-    it('does not leak a city from a space the viewer does not belong to', async () => {
-      const { ctx, sut } = setup(await getKyselyDB());
-      const { user: owner } = await ctx.newUser();
-      const { user: outsider } = await ctx.newUser();
-      const { space } = await ctx.newSharedSpace({ createdById: owner.id });
-
-      const { asset } = await ctx.newAsset({ ownerId: owner.id });
-      await ctx.newExif({ assetId: asset.id, city: 'Reykjavik' });
-      await ctx.newSharedSpaceAsset({ spaceId: space.id, assetId: asset.id, addedById: owner.id });
-
-      // The outsider resolves no timeline spaces, so the space arm is never armed for them.
-      const result = await sut.getAssetIdByCity(outsider.id, exploreOptions);
-      expect(result.items).toEqual([]);
-    });
-
-    it('excludes hidden and archived space assets from the strip', async () => {
-      const { ctx, sut } = setup(await getKyselyDB());
-      const { user: owner } = await ctx.newUser();
-      const { user: member } = await ctx.newUser();
-      const { space } = await ctx.newSharedSpace({ createdById: owner.id });
-      await ctx.newSharedSpaceMember({ spaceId: space.id, userId: member.id, role: SharedSpaceRole.Viewer });
-
-      const { asset: archived } = await ctx.newAsset({ ownerId: owner.id, visibility: AssetVisibility.Archive });
-      await ctx.newExif({ assetId: archived.id, city: 'Reykjavik' });
-      await ctx.newSharedSpaceAsset({ spaceId: space.id, assetId: archived.id, addedById: owner.id });
-
-      const result = await sut.getAssetIdByCity(member.id, { ...exploreOptions, timelineSpaceIds: [space.id] });
-      expect(result.items).toEqual([]);
-    });
+      expect(counts[0] + counts[1]).toBe(assets.length);
+    }, 60_000);
   });
 
   describe('getExternalAssetIds', () => {
     it('returns only assets belonging to an external library', async () => {
-      const { ctx, sut } = setup();
+      const { ctx, galleryAsset } = setup();
       const { user } = await ctx.newUser();
       const { library } = await ctx.newLibrary({ ownerId: user.id });
       const { asset: external } = await ctx.newAsset({ ownerId: user.id, libraryId: library.id });
       await ctx.newAsset({ ownerId: user.id });
 
-      await expect(sut.getExternalAssetIds(user.id)).resolves.toEqual(new Set([external.id]));
+      await expect(galleryAsset.getExternalAssetIds(user.id)).resolves.toEqual(new Set([external.id]));
     });
 
     it('returns an empty set for a user with no external library', async () => {
-      const { ctx, sut } = setup();
+      const { ctx, galleryAsset } = setup();
       const { user } = await ctx.newUser();
       await ctx.newAsset({ ownerId: user.id });
 
-      await expect(sut.getExternalAssetIds(user.id)).resolves.toEqual(new Set());
+      await expect(galleryAsset.getExternalAssetIds(user.id)).resolves.toEqual(new Set());
+    });
+  });
+
+  // #763 slice 1b Task 2 — mapAsset now reads `isFavoriteForUser` exclusively (slice 1b Task 1).
+  // These queries must project the per-user asset_favorite overlay onto the returned row, keyed
+  // to the CALLER (authUserId), not to the asset owner.
+  describe('getById (#763)', () => {
+    it('projects isFavoriteForUser for the requesting user, independent of the owner', async () => {
+      const { ctx, sut } = setup();
+      const { user: owner } = await ctx.newUser();
+      const { user: viewer } = await ctx.newUser();
+      const { asset } = await ctx.newAsset({ ownerId: owner.id });
+
+      await ctx.database.insertInto('asset_favorite').values({ userId: viewer.id, assetId: asset.id }).execute();
+
+      const asOwner = await sut.getById(asset.id, {}, owner.id);
+      expect(asOwner?.isFavoriteForUser).toBe(false);
+
+      const asViewer = await sut.getById(asset.id, {}, viewer.id);
+      expect(asViewer?.isFavoriteForUser).toBe(true);
+    });
+
+    it('leaves isFavoriteForUser unset when no authUserId is supplied (fail-safe)', async () => {
+      const { ctx, sut } = setup();
+      const { user } = await ctx.newUser();
+      const { asset } = await ctx.newAsset({ ownerId: user.id });
+      await ctx.database.insertInto('asset_favorite').values({ userId: user.id, assetId: asset.id }).execute();
+
+      const result = await sut.getById(asset.id);
+      expect(result?.isFavoriteForUser).toBeUndefined();
+    });
+  });
+
+  describe('getByIdsWithAllRelationsButStacks (#763)', () => {
+    it('projects isFavoriteForUser for the requesting user, independent of the owner', async () => {
+      const { ctx, sut } = setup();
+      const { user: owner } = await ctx.newUser();
+      const { user: viewer } = await ctx.newUser();
+      const { asset } = await ctx.newAsset({ ownerId: owner.id });
+
+      await ctx.database.insertInto('asset_favorite').values({ userId: viewer.id, assetId: asset.id }).execute();
+
+      const [asOwner] = await sut.getByIdsWithAllRelationsButStacks([asset.id], owner.id, owner.id);
+      expect(asOwner.isFavoriteForUser).toBe(false);
+
+      const [asViewer] = await sut.getByIdsWithAllRelationsButStacks([asset.id], viewer.id, viewer.id);
+      expect(asViewer.isFavoriteForUser).toBe(true);
+    });
+
+    it('leaves isFavoriteForUser unset without an authUserId, matching background-job callers', async () => {
+      const { ctx, sut } = setup();
+      const { user } = await ctx.newUser();
+      const { asset } = await ctx.newAsset({ ownerId: user.id });
+      await ctx.database.insertInto('asset_favorite').values({ userId: user.id, assetId: asset.id }).execute();
+
+      const [result] = await sut.getByIdsWithAllRelationsButStacks([asset.id]);
+      expect(result.isFavoriteForUser).toBeUndefined();
+    });
+  });
+
+  describe('update (#763)', () => {
+    it('projects isFavoriteForUser for the supplied authUserId after writing a column', async () => {
+      const { ctx, sut } = setup();
+      const { user: owner } = await ctx.newUser();
+      const { user: viewer } = await ctx.newUser();
+      const { asset } = await ctx.newAsset({ ownerId: owner.id, isOffline: false });
+      await ctx.database.insertInto('asset_favorite').values({ userId: viewer.id, assetId: asset.id }).execute();
+
+      const asOwner = await sut.update({ id: asset.id, isOffline: false }, owner.id);
+      expect(asOwner?.isFavoriteForUser).toBe(false);
+
+      const asViewer = await sut.update({ id: asset.id, isOffline: false }, viewer.id);
+      expect(asViewer?.isFavoriteForUser).toBe(true);
+    });
+
+    it('projects isFavoriteForUser via the getById fallback when there is nothing to set', async () => {
+      const { ctx, sut } = setup();
+      const { user } = await ctx.newUser();
+      const { asset } = await ctx.newAsset({ ownerId: user.id });
+      await ctx.database.insertInto('asset_favorite').values({ userId: user.id, assetId: asset.id }).execute();
+
+      const result = await sut.update({ id: asset.id }, user.id);
+      expect(result?.isFavoriteForUser).toBe(true);
     });
   });
 });

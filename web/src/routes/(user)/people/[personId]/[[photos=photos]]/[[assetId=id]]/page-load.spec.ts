@@ -1,5 +1,5 @@
+import { sdkMock } from '#lib/gallery/__mocks__/sdk.mock.ts';
 import { Type, type PersonResponseDto } from '@immich/sdk';
-import { sdkMock } from '$lib/__mocks__/sdk.mock';
 import { load } from './+page';
 
 const { authenticate, getFormatter } = vi.hoisted(() => ({
@@ -7,10 +7,13 @@ const { authenticate, getFormatter } = vi.hoisted(() => ({
   getFormatter: vi.fn(),
 }));
 
-vi.mock('$lib/utils/auth', () => ({ authenticate }));
-vi.mock('$lib/utils/i18n', () => ({ getFormatter }));
+vi.mock('#lib/utils/auth.js', () => ({ authenticate }));
+vi.mock('#lib/utils/i18n.js', () => ({ getFormatter }));
 
 const makePerson = (overrides: Partial<PersonResponseDto> = {}): PersonResponseDto => ({
+  otherPeople: [],
+  sharedBy: [],
+  sharedWith: [],
   id: 'person-1',
   name: 'Alice',
   birthDate: null,

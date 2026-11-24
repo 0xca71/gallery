@@ -1,13 +1,17 @@
 import { Kysely } from 'kysely';
-import type { AssetResponseDto } from 'src/dtos/asset-response.dto.js';
 import { StorageCore } from 'src/cores/storage.core.js';
+import type { AssetResponseDto } from 'src/dtos/asset-response.dto.js';
 import { AssetEditAction } from 'src/dtos/editing.dto.js';
 import { AssetFileType, AssetMetadataKey, AssetStatus, AssetVisibility, JobName, SharedLinkType } from 'src/enum.js';
+import { GalleryDuplicateRepository } from 'src/gallery/repositories/gallery-duplicate.repository.js';
 import { AccessRepository } from 'src/repositories/access.repository.js';
 import { AlbumRepository } from 'src/repositories/album.repository.js';
 import { AssetEditRepository } from 'src/repositories/asset-edit.repository.js';
+import { AssetFavoriteRepository } from 'src/repositories/asset-favorite.repository.js';
 import { AssetJobRepository } from 'src/repositories/asset-job.repository.js';
 import { AssetRepository } from 'src/repositories/asset.repository.js';
+import { ConfigRepository } from 'src/repositories/config.repository.js';
+import { DuplicateRepository } from 'src/repositories/duplicate.repository.js';
 import { EventRepository } from 'src/repositories/event.repository.js';
 import { JobRepository } from 'src/repositories/job.repository.js';
 import { LoggingRepository } from 'src/repositories/logging.repository.js';
@@ -19,7 +23,9 @@ import { SharedLinkRepository } from 'src/repositories/shared-link.repository.js
 import { SharedSpaceRepository } from 'src/repositories/shared-space.repository.js';
 import { StackRepository } from 'src/repositories/stack.repository.js';
 import { StorageRepository } from 'src/repositories/storage.repository.js';
+import { SystemMetadataRepository } from 'src/repositories/system-metadata.repository.js';
 import { UserRepository } from 'src/repositories/user.repository.js';
+import { WebsocketRepository } from 'src/repositories/websocket.repository.js';
 import { DB } from 'src/schema/index.js';
 import { AssetService } from 'src/services/asset.service.js';
 import { newMediumService } from 'test/medium.factory.js';
@@ -28,23 +34,41 @@ import { getKyselyDB } from 'test/utils.js';
 
 let defaultDatabase: Kysely<DB>;
 
+// eslint-disable-next-line unicorn/no-unnecessary-parameters
 const setup = (db?: Kysely<DB>) => {
-  return newMediumService(AssetService, {
+  const result = newMediumService(AssetService, {
     database: db || defaultDatabase,
     real: [
       AssetRepository,
       AssetEditRepository,
+      AssetFavoriteRepository,
       AssetJobRepository,
       AlbumRepository,
       AccessRepository,
+      DuplicateRepository,
+      GalleryDuplicateRepository,
       PersonRepository,
       SharedLinkAssetRepository,
       SharedSpaceRepository,
       StackRepository,
       UserRepository,
+      // the Spatial Scene overlay reads the system config
+      ConfigRepository,
+      SystemMetadataRepository,
     ],
-    mock: [EventRepository, LoggingRepository, JobRepository, StorageRepository, OcrRepository, MapRepository],
+    mock: [
+      EventRepository,
+      LoggingRepository,
+      JobRepository,
+      StorageRepository,
+      OcrRepository,
+      MapRepository,
+      WebsocketRepository,
+    ],
   });
+  // immich-31777 pushes on_asset_update when updateAll writes no metadata (a visibility-only change).
+  result.ctx.getMock(WebsocketRepository).clientSend.mockReturnValue();
+  return result;
 };
 
 beforeAll(async () => {
@@ -96,6 +120,29 @@ describe(AssetService.name, () => {
       await ctx.newExif({ assetId: asset.id, fileSizeInByte: 12_345 });
       const auth = factory.auth({ user: { id: user.id } });
       await expect(sut.getStatistics(auth, {})).resolves.toEqual({ images: 1, total: 1, videos: 0 });
+    });
+  });
+
+  // #763 slice 1b Task 2 — mapAsset now reads `isFavoriteForUser` exclusively (slice 1b Task 1);
+  // `get` must thread the CALLER's id (auth.user.id) into the repository projection, not the
+  // asset owner's.
+  describe('get (#763)', () => {
+    it('E1 — a space member sees their own favorite, independent of the owner', async () => {
+      const { sut, ctx } = setup();
+      const { user: owner } = await ctx.newUser();
+      const { user: member } = await ctx.newUser();
+      const { space } = await ctx.newSharedSpace({ createdById: owner.id });
+      const { asset } = await ctx.newAsset({ ownerId: owner.id });
+      await ctx.newSharedSpaceAsset({ spaceId: space.id, assetId: asset.id, addedById: owner.id });
+      await ctx.newSharedSpaceMember({ spaceId: space.id, userId: member.id, role: 'viewer' });
+
+      await ctx.database.insertInto('asset_favorite').values({ userId: member.id, assetId: asset.id }).execute();
+
+      const memberAuth = factory.auth({ user: { id: member.id } });
+      await expect(sut.get(memberAuth, asset.id)).resolves.toMatchObject({ isFavorite: true });
+
+      const ownerAuth = factory.auth({ user: { id: owner.id } });
+      await expect(sut.get(ownerAuth, asset.id)).resolves.toMatchObject({ isFavorite: false });
     });
   });
 
@@ -233,6 +280,34 @@ describe(AssetService.name, () => {
       await expect(assetRepo.getById(newAsset.id)).resolves.toEqual(expect.objectContaining({ isFavorite: true }));
     });
 
+    it("should not copy another user's favorite of the source", async () => {
+      const { sut, ctx } = setup();
+      const assetFavoriteRepo = ctx.get(AssetFavoriteRepository);
+
+      const { user: owner } = await ctx.newUser();
+      const { user: otherUser } = await ctx.newUser();
+      const { space } = await ctx.newSharedSpace({ createdById: owner.id });
+      const { asset: oldAsset } = await ctx.newAsset({ ownerId: owner.id });
+      const { asset: newAsset } = await ctx.newAsset({ ownerId: owner.id });
+      await ctx.newSharedSpaceAsset({ spaceId: space.id, assetId: oldAsset.id, addedById: owner.id });
+      await ctx.newSharedSpaceAsset({ spaceId: space.id, assetId: newAsset.id, addedById: owner.id });
+      await ctx.newSharedSpaceMember({ spaceId: space.id, userId: otherUser.id, role: 'viewer' });
+
+      // otherUser favorited the source; the owner did not, so the copied column stays false.
+      await assetFavoriteRepo.addAll(otherUser.id, [oldAsset.id]);
+
+      await ctx.newExif({ assetId: oldAsset.id, description: 'foo' });
+      await ctx.newExif({ assetId: newAsset.id, description: 'bar' });
+
+      const ownerAuth = factory.auth({ user: { id: owner.id } });
+      await sut.copy(ownerAuth, { sourceId: oldAsset.id, targetId: newAsset.id });
+
+      await expect(sut.get(ownerAuth, newAsset.id)).resolves.toEqual(expect.objectContaining({ isFavorite: false }));
+
+      const otherAuth = factory.auth({ user: { id: otherUser.id } });
+      await expect(sut.get(otherAuth, newAsset.id)).resolves.toEqual(expect.objectContaining({ isFavorite: false }));
+    });
+
     it('should copy sidecar file', async () => {
       // StorageCore is a module-level singleton (see cores/storage.core.ts), so it keeps the
       // mocked StorageRepository from whichever medium test ran first. Reset it before setup()
@@ -334,8 +409,9 @@ describe(AssetService.name, () => {
 
       await sut.handleAssetDeletion({ id: asset1.id, deleteOnDisk: true });
 
-      // new primary asset is picked
-      await expect(ctx.get(StackRepository).getById(stack.id)).resolves.toMatchObject({ primaryAssetId: asset2.id });
+      // new primary asset is picked from the survivors; the lookup does not order them
+      const updated = await ctx.get(StackRepository).getById(stack.id);
+      expect([asset2.id, asset3.id]).toContain(updated?.primaryAssetId);
     });
 
     it('should delete a stacked primary asset (3 trashed assets)', async () => {
@@ -394,6 +470,22 @@ describe(AssetService.name, () => {
       await expect(sut.update(factory.auth({ user: otherUser }), asset.id, {})).rejects.toThrow(
         'Not found or no asset.update access',
       );
+    });
+
+    // #763 slice 1b Task 2 — the update return path feeds mapAsset, which now reads
+    // `isFavoriteForUser` exclusively; `update` must thread auth.user.id into the repository
+    // projection so the response reflects the CALLER's own overlay, not the owner's.
+    it('projects isFavoriteForUser for the requesting user (#763)', async () => {
+      const { sut, ctx } = setup();
+      ctx.getMock(JobRepository).queue.mockResolvedValue();
+      const { user } = await ctx.newUser();
+      const auth = factory.auth({ user });
+      const { asset } = await ctx.newAsset({ ownerId: user.id });
+      await ctx.database.insertInto('asset_favorite').values({ userId: user.id, assetId: asset.id }).execute();
+
+      await expect(sut.update(auth, asset.id, { description: 'updated' })).resolves.toMatchObject({
+        isFavorite: true,
+      });
     });
 
     it('should automatically lock lockable columns', async () => {
@@ -485,6 +577,35 @@ describe(AssetService.name, () => {
   });
 
   describe('updateAll', () => {
+    it("should not join another owner's duplicate group", async () => {
+      const { sut, ctx } = setup();
+      const { user } = await ctx.newUser();
+      const { user: other } = await ctx.newUser();
+      const duplicateId = factory.uuid();
+      const { asset: theirs } = await ctx.newAsset({ ownerId: other.id, duplicateId });
+      await ctx.newExif({ assetId: theirs.id, fileSizeInByte: 1000 });
+      const { asset: mine } = await ctx.newAsset({ ownerId: user.id });
+
+      await expect(sut.updateAll(factory.auth({ user }), { ids: [mine.id], duplicateId })).rejects.toThrow(
+        'Duplicate grouping can only join a group of assets you own',
+      );
+      await expect(ctx.get(AssetRepository).getById(mine.id)).resolves.toMatchObject({ duplicateId: null });
+    });
+
+    it("should not join another owner's duplicate group whose only asset is trashed", async () => {
+      const { sut, ctx } = setup();
+      const { user } = await ctx.newUser();
+      const { user: other } = await ctx.newUser();
+      const duplicateId = factory.uuid();
+      await ctx.newAsset({ ownerId: other.id, duplicateId, deletedAt: new Date() });
+      const { asset: mine } = await ctx.newAsset({ ownerId: user.id });
+
+      await expect(sut.updateAll(factory.auth({ user }), { ids: [mine.id], duplicateId })).rejects.toThrow(
+        'Duplicate grouping can only join a group of assets you own',
+      );
+      await expect(ctx.get(AssetRepository).getById(mine.id)).resolves.toMatchObject({ duplicateId: null });
+    });
+
     it('should automatically lock lockable columns', async () => {
       const { sut, ctx } = setup();
       ctx.getMock(JobRepository).queueAll.mockResolvedValue();
