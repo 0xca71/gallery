@@ -174,9 +174,14 @@ const createTimeline = (page: Page, data: MockData) => {
         await page.getByRole('menuitem', { name: 'to_archive', exact: true }).click();
       },
 
-      trash: async () => {
-        await page.getByLabel('menu', { exact: true }).click();
-        await page.getByRole('menuitem', { name: 'delete', exact: true }).click();
+      trash: async (context: 'photos' | 'album') => {
+        // Photos exposes Delete directly; the album route keeps it in the overflow menu.
+        if (context === 'album') {
+          await page.getByLabel('menu', { exact: true }).click();
+          await page.getByRole('menuitem', { name: 'delete', exact: true }).click();
+        } else {
+          await page.getByRole('button', { name: 'delete', exact: true }).click();
+        }
       },
 
       changeDate: async () => {

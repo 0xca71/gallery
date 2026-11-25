@@ -72,6 +72,61 @@ final Map<String, Map<String, Object?>> openApiPatches = {
   'AdminConfigDto': {
     'passkey': {'enabled': false, 'domain': null, 'additionalDomains': const []},
   },
+  // Older Gallery servers omit these sections. Keep the server defaults, with new features off.
+  // Raw JSON also retains explicit false values for flags the generator represents as nullable.
+  'AdminConfigFFmpegDto': {
+    'dataSaver': const {'enabled': false, 'targetVideoCodec': 'hevc', 'targetResolution': '720', 'maxBitrate': '1500k'},
+  },
+  'AdminConfigFacialRecognitionDto': {
+    'video': const {
+      'enabled': false,
+      'sampleInterval': 2,
+      'sceneDetection': true,
+      'maxFrames': 1800,
+      'tiledDetection': false,
+      'maxDistance': 0.5,
+      'minFaceSize': 20,
+      'minSightings': 1,
+      'createPeople': true,
+      'minRecognitionScore': 0.75,
+    },
+  },
+  'AdminConfigJobDto': {
+    'qualityAnalysis': const {'concurrency': 2},
+    'spatialScene': const {'concurrency': 1},
+  },
+  'AdminConfigMachineLearningDto': {
+    'spatialScene': const {
+      'enabled': false,
+      'modelName': 'depth-anything-v2-small',
+      'offer': 'suitable',
+      'minBoundarySharpness': 0.03,
+      'minEdgeDensity': 0.02,
+      'minForegroundRatio': 0.01,
+      'maxForegroundRatio': 0.75,
+      'minFaceHeight': 0.03,
+    },
+  },
+  'AdminConfigPetDetectionDto': {
+    'video': const {
+      'enabled': false,
+      'sampleInterval': 2,
+      'sceneDetection': true,
+      'maxFrames': 900,
+      'maxDistance': 0.55,
+      'minSightings': 2,
+    },
+  },
+  'QueuesResponseLegacyDto': {
+    'qualityAnalysis': const {
+      'jobCounts': {'active': 0, 'completed': 0, 'delayed': 0, 'failed': 0, 'paused': 0, 'waiting': 0},
+      'queueStatus': {'isActive': false, 'isPaused': false},
+    },
+    'spatialScene': const {
+      'jobCounts': {'active': 0, 'completed': 0, 'delayed': 0, 'failed': 0, 'paused': 0, 'waiting': 0},
+      'queueStatus': {'isActive': false, 'isPaused': false},
+    },
+  },
   'UserConfigDto': {
     'notifications': UserConfigNotificationsDto(smtp: UserConfigSmtpDto(enabled: false)).toJson(),
     'passkey': {'enabled': false},

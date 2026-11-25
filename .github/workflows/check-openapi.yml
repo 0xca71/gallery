@@ -33,12 +33,42 @@ jobs:
           sparse-checkout-cone-mode: false
           persist-credentials: false
 
+      - name: Select reviewed contract transition
+        id: compatibility
+        run: |
+          base_sha=$(git -C .openapi-base rev-parse HEAD)
+          if [ "$base_sha" = "1c46717072304506da0efb36fe038fc173387845" ]; then
+            echo 'err_ignore=open-api/compatibility/gallery-2026-11-upgrade.txt' >> "$GITHUB_OUTPUT"
+            echo 'Using exact findings reviewed for the Gallery 2026-11 contract upgrade; custom changes remain checked against the pinned official contract.'
+          fi
+
+      - name: Checkout reviewed official contract
+        if: steps.compatibility.outputs.err_ignore != ''
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: 94f05b13f3cd3adcb0663c273c192fea898b79d8
+          path: .openapi-official
+          sparse-checkout: open-api/immich-openapi-specs.json
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Check custom changes against reviewed official contract
+        if: steps.compatibility.outputs.err_ignore != ''
+        uses: oasdiff/oasdiff-action/breaking@9ce3a29eb0e6478dd0140932a678c7fb59d08f22 # v0.1.20
+        with:
+          base: .openapi-official/open-api/immich-openapi-specs.json
+          revision: open-api/immich-openapi-specs.json
+          err-ignore: ${{ steps.compatibility.outputs.err_ignore }}
+          fail-on: ERR
+          review: false
+
       - name: Check for breaking API changes
         uses: oasdiff/oasdiff-action/breaking@9ce3a29eb0e6478dd0140932a678c7fb59d08f22 # v0.1.20
         with:
           base: .openapi-base/open-api/immich-openapi-specs.json
           revision: open-api/immich-openapi-specs.json
           fail-on: ERR
+          err-ignore: ${{ steps.compatibility.outputs.err_ignore }}
           review: false
 
   check-mobile-patches:

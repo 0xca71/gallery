@@ -1,13 +1,19 @@
+import 'dart:convert';
+
+import 'package:crop_image/crop_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:immich_mobile/domain/models/asset/base_asset.model.dart';
+import 'package:immich_mobile/domain/models/asset_edit.model.dart';
 import 'package:immich_mobile/models/server_info/server_version.model.dart';
 import 'package:immich_mobile/presentation/actions/action.dart';
 import 'package:immich_mobile/presentation/actions/action.widget.dart';
 import 'package:immich_mobile/presentation/actions/edit_asset.action.dart';
 import 'package:immich_mobile/presentation/actions/edit_datetime.action.dart';
 import 'package:immich_mobile/presentation/actions/edit_location.action.dart';
+import 'package:immich_mobile/presentation/pages/edit/edit.page.dart';
+import 'package:immich_mobile/presentation/pages/edit/editor.provider.dart';
 import 'package:immich_mobile/providers/server_info.provider.dart';
 import 'package:immich_mobile/utils/option.dart';
 import 'package:immich_ui/immich_ui.dart';
@@ -115,6 +121,71 @@ void main() {
     });
   });
 
+  group('EditImagePage rotation requests', () {
+    for (final entry in <int, double?>{-450: 270, -360: null, -90: 270, 0: null, 90: 90, 450: 90, 720: null}.entries) {
+      testWidgets('saves ${entry.key} degrees as ${entry.value ?? 'no rotation'}', (tester) async {
+        final image = Image.memory(
+          base64Decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='),
+        );
+        List<AssetEdit>? appliedEdits;
+        await tester.pumpTestWidget(
+          context,
+          Builder(
+            builder: (pageContext) => ElevatedButton(
+              onPressed: () => Navigator.of(pageContext).push(
+                MaterialPageRoute<void>(
+                  builder: (_) => EditImagePage(
+                    image: image,
+                    applyEdits: (edits) async {
+                      appliedEdits = List.of(edits);
+                    },
+                  ),
+                ),
+              ),
+              child: const Text('Open editor'),
+            ),
+          ),
+          overrides: [editorStateProvider.overrideWith(() => _SeededEditor(entry.key))],
+        );
+        // The engine's image decoding needs real async time; fake-time pumping only animates
+        // CropImage's loading spinner. Populate the cache before mounting its image listener.
+        Object? imageError;
+        await tester.runAsync(
+          () => precacheImage(
+            image.image,
+            tester.element(find.text('Open editor')),
+            onError: (error, _) => imageError = error,
+          ),
+        );
+        expect(imageError, isNull);
+        await tester.tap(find.text('Open editor'));
+        await tester.pumpAndSettle();
+        final decodedImage = tester.widget<CropImage>(find.byType(CropImage)).controller!.getImage();
+        expect(decodedImage, isNotNull);
+        expect(decodedImage!.width, 1);
+        expect(decodedImage.height, 1);
+        await tester.tap(find.byIcon(Icons.done_rounded));
+        await tester.pumpAndSettle();
+
+        expect(appliedEdits, isNotNull);
+        if (entry.value == null) {
+          expect(appliedEdits, isEmpty);
+        } else {
+          final edit = appliedEdits!.single as RotateEdit;
+          expect(edit.parameters.angle, isA<double>());
+          expect(edit.parameters.toJson(), {'angle': entry.value});
+        }
+        expect(find.text('Open editor'), findsOneWidget);
+        // Let the successful save toast finish its three-second lifetime and FToast's fade
+        // naturally, including timers that remain after the editor route has popped.
+        await tester.pump(const Duration(seconds: 3));
+        await tester.pump(const Duration(milliseconds: 350));
+        await tester.pumpAndSettle();
+        expect(find.byIcon(Icons.check_circle_rounded), findsNothing);
+      });
+    }
+  });
+
   group('EditLocationAction', () {
     testWidgets('offers to edit an owned remote asset', (tester) async {
       await pumpAction(tester, const EditLocationAction(source: .timeline), {owned()});
@@ -169,4 +240,13 @@ void main() {
       verify(() => assetService.update([mine.id], dateTime: const Some(picked))).called(1);
     });
   });
+}
+
+class _SeededEditor extends EditorProvider {
+  _SeededEditor(this.angle);
+
+  final int angle;
+
+  @override
+  EditorState build() => EditorState(rotationAngle: angle, originalWidth: 1, originalHeight: 1, hasUnsavedEdits: true);
 }

@@ -22,12 +22,17 @@ const previewNames = () => [...document.querySelectorAll('a.text-center > p')].m
 test.beforeEach(async ({ api, data, router }) => {
   peopleViewSettings.set({ sortBy: PeopleSortBy.PhotoCount });
   data.addPeople(people);
-  api.on({ getExploreData: () => ({ json: [] }) });
+  api.on({ getExploreData: () => ({ json: [] }), searchRandom: () => ({ json: [] }) });
   await router.goto(Route.explore());
 });
 
-test.afterEach(() => {
+test.afterEach(async ({ api }) => {
   peopleViewSettings.set({ sortBy: PeopleSortBy.PhotoCount });
+  await vi.waitFor(() =>
+    expect(api.searchRandom).toHaveBeenCalledWith({
+      body: { visibility: 'timeline', withSharedSpaces: true, size: 24 },
+    }),
+  );
 });
 
 test('sorts by photo count before slicing the preview, keeping favorites first', async ({ api, render }) => {

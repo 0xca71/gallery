@@ -14,6 +14,10 @@ vi.mock('@immich/sdk', async (originalImport) => {
     }
   }
 
+  // Filtered timelines load temporal picker buckets independently of the rendered timeline.
+  // Keep the async default in vi.fn itself so resetAllMocks restores the response contract.
+  mocks.getTimeBuckets = vi.fn((): Promise<sdk.TimeBucketsResponseDto[]> => Promise.resolve([]));
+
   const mock = { ...module, ...mocks };
   return { ...mock, default: mock };
 });

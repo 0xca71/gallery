@@ -107,15 +107,19 @@ test.describe('OCR bounding boxes', () => {
     await expect(box).toBeVisible();
     const initial = (await box.boundingBox())!;
 
-    const { width, height } = page.viewportSize()!;
-    await page.mouse.move(width / 2, height / 2);
-    await page.mouse.wheel(0, -3);
+    const image = (await app.viewer.image('preview').boundingBox())!;
+    await page.mouse.move(image.x + image.width / 2, image.y + image.height / 2);
+    // Plain wheel navigates between assets; Alt+wheel zooms the current photo.
+    await page.keyboard.down('Alt');
+    await page.mouse.wheel(0, -150);
+    await page.keyboard.up('Alt');
 
     await expect(async () => {
       const zoomed = (await box.boundingBox())!;
       expect(zoomed.width).toBeGreaterThan(initial.width);
       expect(zoomed.height).toBeGreaterThan(initial.height);
     }).toPass({ timeout: 2000 });
+    await expect(page).toHaveURL(Route.viewAsset({ id: asset.id }));
   });
 
   test('button is hidden for an asset without recognized text', async ({ page, data, app }) => {

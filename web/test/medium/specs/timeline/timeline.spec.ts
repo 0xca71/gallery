@@ -375,7 +375,7 @@ test.describe('timeline', () => {
       expect(await app.timeline.position(next)).not.toEqual(position);
 
       await app.timeline.select(asset);
-      await app.timeline.selectionBar.trash();
+      await app.timeline.selectionBar.trash('photos');
       await expect(app.timeline.thumbnail(asset)).toHaveCount(0);
       await expect.poll(() => app.timeline.position(next)).toEqual(position);
       expect(api.deleteAssets).toHaveBeenCalledWith({ body: { force: false, ids: [asset.id] } });
@@ -399,7 +399,7 @@ test.describe('timeline', () => {
       await page.goto(Route.viewAlbum({ id: album.id }));
 
       await app.timeline.select(asset);
-      await app.timeline.selectionBar.trash();
+      await app.timeline.selectionBar.trash('album');
       await expect(app.timeline.thumbnail(asset)).toHaveCount(0);
       expect(api.deleteAssets).toHaveBeenCalledWith({ body: { force: false, ids: [asset.id] } });
 

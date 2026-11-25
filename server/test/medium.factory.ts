@@ -21,6 +21,7 @@ import {
   SyncEntityType,
   SyncRequestType,
 } from 'src/enum.js';
+import { AssetEditSaveRepository } from 'src/gallery/repositories/asset-edit-save.repository.js';
 import { GalleryMachineLearningRepository } from 'src/gallery/repositories/gallery-machine-learning.repository.js';
 import { GalleryPersonRepository } from 'src/gallery/repositories/gallery-person.repository.js';
 import { GallerySyncRepository } from 'src/gallery/repositories/gallery-sync.repository.js';
@@ -112,7 +113,7 @@ import {
 import { mockEnvData } from 'test/repositories/config.repository.mock.js';
 import { newTelemetryRepositoryMock } from 'test/repositories/telemetry.repository.mock.js';
 import { factory, newDate, newEmbedding, newUuid } from 'test/small.factory.js';
-import { automock, wait } from 'test/utils.js';
+import { automock, getKyselyDBConnection, wait } from 'test/utils.js';
 
 export const testAssetsDir = resolve(import.meta.dirname, '../../e2e/test-assets');
 
@@ -169,9 +170,13 @@ export class MediumTestContext<S extends ClassConstructor<typeof BaseService> = 
     // GalleryPersonRepository holds the fork methods moved out of PersonRepository, so it follows PersonRepository.
     const withGalleryPerson = (list: MediumTestOptions['real']) =>
       list.includes(PersonRepository) ? [...list, GalleryPersonRepository] : list;
+    // File writers need real save guards and locks; metadata also needs the configured geocoding provider.
+    const defaultReal = [DatabaseRepository, AssetEditSaveRepository, MapRepository].filter(
+      (dep) => !options.real.includes(dep) && !options.mock.includes(dep),
+    );
     this.options = options = {
       ...options,
-      real: withGalleryPerson(options.real),
+      real: withGalleryPerson([...options.real, ...defaultReal]),
       mock: withGalleryPerson(options.mock),
     };
 
@@ -735,7 +740,13 @@ const newRealRepository = <T extends Dep>(key: T, db: Kysely<DB>): InstanceType<
     }
 
     case DatabaseRepository: {
-      return new key(db, LoggingRepository.create(), new ConfigRepository()) as InstanceType<T>;
+      const configRepository = new ConfigRepository();
+      const getEnv = configRepository.getEnv.bind(configRepository);
+      configRepository.getEnv = () => {
+        const env = getEnv();
+        return { ...env, database: { ...env.database, config: getKyselyDBConnection(db) } };
+      };
+      return new key(db, LoggingRepository.create(), configRepository) as InstanceType<T>;
     }
 
     case EmailRepository: {
@@ -813,7 +824,10 @@ const newMockRepository = <T>(key: ClassConstructor<T>) => {
     }
 
     case MapRepository: {
-      return automock(MapRepository, { args: [undefined, undefined, { setContext: () => {} }] });
+      const mock = automock(MapRepository, { args: [undefined, undefined, { setContext: () => {} }] });
+      // AMAP is opt-in; unrelated metadata tests exercise the disabled-provider result.
+      mock.ensureDetailedAddress.mockResolvedValue(null);
+      return mock;
     }
 
     case TelemetryRepository: {
@@ -856,6 +870,7 @@ const newMockRepository = <T>(key: ClassConstructor<T>) => {
       // assert on. Vitest 4's stricter automocks throw when a mock is invoked without an implementation, so
       // give it a real default here in the shared harness instead of every spec having to stub it.
       jobRepository.empty.mockResolvedValue();
+      jobRepository.getJobCounts.mockResolvedValue({ active: 0, completed: 0, failed: 0, delayed: 0, waiting: 0 });
       return jobRepository;
     }
 

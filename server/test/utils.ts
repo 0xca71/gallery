@@ -512,6 +512,16 @@ const templateName = 'mich';
 
 const withDatabase = (url: string, name: string) => url.replace(`/${templateName}`, () => `/${name}`);
 
+const databaseConnections = new WeakMap<Kysely<DB>, DatabaseConnectionParams>();
+
+export const getKyselyDBConnection = (db: Kysely<DB>): DatabaseConnectionParams => {
+  const connection = databaseConnections.get(db);
+  if (!connection) {
+    throw new Error('Database was not created by getKyselyDB');
+  }
+  return connection;
+};
+
 export const getKyselyDB = async (suffix?: string): Promise<Kysely<DB>> => {
   const testUrl = process.env.IMMICH_TEST_POSTGRES_URL!;
   const connection = { connectionType: 'url', url: withDatabase(testUrl, 'postgres') } as DatabaseConnectionParams;
@@ -521,7 +531,10 @@ export const getKyselyDB = async (suffix?: string): Promise<Kysely<DB>> => {
   const dbName = `immich_${suffix ?? randomSuffix}`;
   await sql.unsafe(`CREATE DATABASE ${dbName} WITH TEMPLATE ${templateName} OWNER postgres;`);
 
-  return new Kysely<DB>(getKyselyConfig({ connectionType: 'url', url: withDatabase(testUrl, dbName) }));
+  const databaseConnection: DatabaseConnectionParams = { connectionType: 'url', url: withDatabase(testUrl, dbName) };
+  const db = new Kysely<DB>(getKyselyConfig(databaseConnection));
+  databaseConnections.set(db, databaseConnection);
+  return db;
 };
 
 export const newRandomImage = () => {

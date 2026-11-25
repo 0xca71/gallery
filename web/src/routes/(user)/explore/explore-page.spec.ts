@@ -53,11 +53,9 @@ describe('Explore page', () => {
       }),
     ]);
 
-    expect(page.getByRole('link', { name: 'Alice', exact: true }).element()).toHaveAttribute(
-      'href',
-      '/people/user-person-1?previousRoute=%2Fexplore',
-    );
-    expect(document.querySelector('img')).toHaveAttribute(
+    const personLink = page.getByRole('link', { name: 'Alice', exact: true }).element();
+    expect(personLink).toHaveAttribute('href', '/people/user-person-1?previousRoute=%2Fexplore');
+    expect(personLink.querySelector('img')).toHaveAttribute(
       'src',
       '/api/people/user-person-1/thumbnail?updatedAt=2026-01-02T00%3A00%3A00.000Z',
     );
@@ -72,11 +70,9 @@ describe('Explore page', () => {
       }),
     ]);
 
-    expect(page.getByRole('link', { name: 'Shared Alice', exact: true }).element()).toHaveAttribute(
-      'href',
-      '/people/space-person-1?previousRoute=%2Fexplore',
-    );
-    expect(document.querySelector('img')).toHaveAttribute(
+    const personLink = page.getByRole('link', { name: 'Shared Alice', exact: true }).element();
+    expect(personLink).toHaveAttribute('href', '/people/space-person-1?previousRoute=%2Fexplore');
+    expect(personLink.querySelector('img')).toHaveAttribute(
       'src',
       '/api/shared-spaces/space-1/people/space-person-1/thumbnail?updatedAt=2026-01-02T00%3A00%3A00.000Z',
     );

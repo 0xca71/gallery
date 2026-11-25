@@ -42115,9 +42115,10 @@
         "properties": {
           "angle": {
             "description": "Rotation angle in degrees",
+            "exclusiveMaximum": true,
             "format": "double",
             "maximum": 360,
-            "minimum": -360,
+            "minimum": 0,
             "type": "number"
           }
         },

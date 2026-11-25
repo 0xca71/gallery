@@ -1,0 +1,155 @@
+# Reviewed contract transition, active ONLY while the checked-out base is
+# 1c46717072304506da0efb36fe038fc173387845. Future PR bases use the strict gate.
+# Official full-tree integration baseline: 94f05b13f3cd3adcb0663c273c192fea898b79d8.
+# Exact operation/path/finding text, not a severity or endpoint-wide exclusion.
+# Incoming official changes are also checked against that pinned official spec
+# so a modified newly introduced schema cannot hide behind an old-base finding.
+# Fork corrections: image file saves never supported video trim at runtime;
+# fine rotation was already numeric in [0,360), despite the old integer schema;
+# AssetEditSave is the intentional dedicated administrative queue job.
+DELETE /people/{id} added required request body
+GET /admin/config added the new `jxl` enum value to the `image/fullsize/format` response property for the response status `200` (shared schema: `ImageFormat`, also at `image/preview/format`, `image/thumbnail/format`)
+GET /admin/config/defaults added the new `jxl` enum value to the `image/fullsize/format` response property for the response status `200` (shared schema: `ImageFormat`, also at `image/preview/format`, `image/thumbnail/format`)
+GET /admin/maintenance/status added the new `rollback` enum value to the `action` response property for the response status `200`
+GET /api-keys added the new `cleanup.read` enum value to the `items/permissions/items/` response property for the response status `200`
+GET /api-keys added the new `cleanup.update` enum value to the `items/permissions/items/` response property for the response status `200`
+GET /api-keys added the new `clusterGroup.admin` enum value to the `items/permissions/items/` response property for the response status `200`
+GET /api-keys added the new `passkey.delete` enum value to the `items/permissions/items/` response property for the response status `200`
+GET /api-keys added the new `passkey.read` enum value to the `items/permissions/items/` response property for the response status `200`
+GET /api-keys added the new `passkey.update` enum value to the `items/permissions/items/` response property for the response status `200`
+GET /api-keys/me added the new `cleanup.read` enum value to the `permissions/items/` response property for the response status `200`
+GET /api-keys/me added the new `cleanup.update` enum value to the `permissions/items/` response property for the response status `200`
+GET /api-keys/me added the new `clusterGroup.admin` enum value to the `permissions/items/` response property for the response status `200`
+GET /api-keys/me added the new `passkey.delete` enum value to the `permissions/items/` response property for the response status `200`
+GET /api-keys/me added the new `passkey.read` enum value to the `permissions/items/` response property for the response status `200`
+GET /api-keys/me added the new `passkey.update` enum value to the `permissions/items/` response property for the response status `200`
+GET /api-keys/{id} added the new `cleanup.read` enum value to the `permissions/items/` response property for the response status `200`
+GET /api-keys/{id} added the new `cleanup.update` enum value to the `permissions/items/` response property for the response status `200`
+GET /api-keys/{id} added the new `clusterGroup.admin` enum value to the `permissions/items/` response property for the response status `200`
+GET /api-keys/{id} added the new `passkey.delete` enum value to the `permissions/items/` response property for the response status `200`
+GET /api-keys/{id} added the new `passkey.read` enum value to the `permissions/items/` response property for the response status `200`
+GET /api-keys/{id} added the new `passkey.update` enum value to the `permissions/items/` response property for the response status `200`
+GET /assets/{id} added the pattern `^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$` to the `query` request parameter `spaceId`
+GET /assets/{id} for the `query` request parameter `spaceId`, the `format` was changed from `none` to `uuid`
+GET /assets/{id}/edits the `edits/items/parameters/anyOf[#/components/schemas/RotateParameters]/angle` response property's max was increased from `270.00` to `360.00` for the response status `200`
+GET /assets/{id}/edits the `edits/items/parameters/anyOf[#/components/schemas/RotateParameters]/angle` response's property `type/format` was widened from `integer` to `number/double` for status `200`
+GET /config removed the required property `theme` from the response with the `200` status
+GET /config/defaults removed the required property `theme` from the response with the `200` status
+GET /memories added the new `birthday` enum value to the `items/type` response property for the response status `200`
+GET /memories/{id} added the new `birthday` enum value to the `type` response property for the response status `200`
+GET /plugins/templates added the new `AssetOcrExtraction` enum value to the `items/trigger` response property for the response status `200`
+GET /public/config removed the required property `theme` from the response with the `200` status
+GET /public/config/defaults removed the required property `theme` from the response with the `200` status
+GET /queues added the new `AssetAnalyzeQualityQueueAll` enum value to the `items/jobTypes/items/name` response property for the response status `200`
+GET /queues added the new `AssetAnalyzeQuality` enum value to the `items/jobTypes/items/name` response property for the response status `200`
+GET /queues added the new `AssetEditSave` enum value to the `items/jobTypes/items/name` response property for the response status `200`
+GET /queues added the new `AssetEncodeDataSaverVideoQueueAll` enum value to the `items/jobTypes/items/name` response property for the response status `200`
+GET /queues added the new `AssetEncodeDataSaverVideo` enum value to the `items/jobTypes/items/name` response property for the response status `200`
+GET /queues added the new `AssetVideoTrimGenerate` enum value to the `items/jobTypes/items/name` response property for the response status `200`
+GET /queues added the new `AuthChallengeCleanup` enum value to the `items/jobTypes/items/name` response property for the response status `200`
+GET /queues added the new `MemoryRuleGenerate` enum value to the `items/jobTypes/items/name` response property for the response status `200`
+GET /queues added the new `SpatialSceneQueueAll` enum value to the `items/jobTypes/items/name` response property for the response status `200`
+GET /queues added the new `SpatialScene` enum value to the `items/jobTypes/items/name` response property for the response status `200`
+GET /queues added the new `qualityAnalysis` enum value to the `items/name` response property for the response status `200`
+GET /queues added the new `spatialScene` enum value to the `items/name` response property for the response status `200`
+GET /queues/{name} added the new `AssetAnalyzeQualityQueueAll` enum value to the `jobTypes/items/name` response property for the response status `200`
+GET /queues/{name} added the new `AssetAnalyzeQuality` enum value to the `jobTypes/items/name` response property for the response status `200`
+GET /queues/{name} added the new `AssetEditSave` enum value to the `jobTypes/items/name` response property for the response status `200`
+GET /queues/{name} added the new `AssetEncodeDataSaverVideoQueueAll` enum value to the `jobTypes/items/name` response property for the response status `200`
+GET /queues/{name} added the new `AssetEncodeDataSaverVideo` enum value to the `jobTypes/items/name` response property for the response status `200`
+GET /queues/{name} added the new `AssetVideoTrimGenerate` enum value to the `jobTypes/items/name` response property for the response status `200`
+GET /queues/{name} added the new `AuthChallengeCleanup` enum value to the `jobTypes/items/name` response property for the response status `200`
+GET /queues/{name} added the new `MemoryRuleGenerate` enum value to the `jobTypes/items/name` response property for the response status `200`
+GET /queues/{name} added the new `SpatialSceneQueueAll` enum value to the `jobTypes/items/name` response property for the response status `200`
+GET /queues/{name} added the new `SpatialScene` enum value to the `jobTypes/items/name` response property for the response status `200`
+GET /queues/{name} added the new `qualityAnalysis` enum value to the `name` response property for the response status `200`
+GET /queues/{name} added the new `spatialScene` enum value to the `name` response property for the response status `200`
+GET /queues/{name}/jobs added the new `AssetAnalyzeQualityQueueAll` enum value to the `items/name` response property for the response status `200`
+GET /queues/{name}/jobs added the new `AssetAnalyzeQuality` enum value to the `items/name` response property for the response status `200`
+GET /queues/{name}/jobs added the new `AssetEditSave` enum value to the `items/name` response property for the response status `200`
+GET /queues/{name}/jobs added the new `AssetEncodeDataSaverVideoQueueAll` enum value to the `items/name` response property for the response status `200`
+GET /queues/{name}/jobs added the new `AssetEncodeDataSaverVideo` enum value to the `items/name` response property for the response status `200`
+GET /queues/{name}/jobs added the new `AssetVideoTrimGenerate` enum value to the `items/name` response property for the response status `200`
+GET /queues/{name}/jobs added the new `AuthChallengeCleanup` enum value to the `items/name` response property for the response status `200`
+GET /queues/{name}/jobs added the new `MemoryRuleGenerate` enum value to the `items/name` response property for the response status `200`
+GET /queues/{name}/jobs added the new `SpatialSceneQueueAll` enum value to the `items/name` response property for the response status `200`
+GET /queues/{name}/jobs added the new `SpatialScene` enum value to the `items/name` response property for the response status `200`
+GET /sync/ack added the new `AssetFaceV3` enum value to the `items/type` response property for the response status `200`
+GET /sync/ack added the new `AssetFavoriteDeleteV1` enum value to the `items/type` response property for the response status `200`
+GET /sync/ack added the new `AssetFavoriteV1` enum value to the `items/type` response property for the response status `200`
+GET /sync/ack added the new `AuthUserV2` enum value to the `items/type` response property for the response status `200`
+GET /sync/ack added the new `MemoryToAssetV2` enum value to the `items/type` response property for the response status `200`
+GET /sync/ack added the new `MemoryV2` enum value to the `items/type` response property for the response status `200`
+GET /sync/ack added the new `SharedSpaceStackAlbumBackfillV1` enum value to the `items/type` response property for the response status `200`
+GET /sync/ack added the new `SharedSpaceStackBackfillV1` enum value to the `items/type` response property for the response status `200`
+GET /sync/ack added the new `SharedSpaceStackDeleteV1` enum value to the `items/type` response property for the response status `200`
+GET /sync/ack added the new `SharedSpaceStackLibraryBackfillV1` enum value to the `items/type` response property for the response status `200`
+GET /sync/ack added the new `SharedSpaceStackV1` enum value to the `items/type` response property for the response status `200`
+GET /system-config added the new `jxl` enum value to the `image/fullsize/format` response property for the response status `200` (shared schema: `ImageFormat`, also at `image/preview/format`, `image/thumbnail/format`)
+GET /system-config/defaults added the new `jxl` enum value to the `image/fullsize/format` response property for the response status `200` (shared schema: `ImageFormat`, also at `image/preview/format`, `image/thumbnail/format`)
+GET /workflows added the new `AssetOcrExtraction` enum value to the `items/trigger` response property for the response status `200`
+GET /workflows/triggers added the new `AssetOcrExtraction` enum value to the `items/trigger` response property for the response status `200`
+GET /workflows/{id} added the new `AssetOcrExtraction` enum value to the `trigger` response property for the response status `200`
+GET /workflows/{id}/share added the new `AssetOcrExtraction` enum value to the `trigger` response property for the response status `200`
+POST /api-keys added the new `cleanup.read` enum value to the `apiKey/permissions/items/` response property for the response status `201` (shared schema: `Permission`, also at `apiKey/permissions/items`, `permissions/items`)
+POST /api-keys added the new `cleanup.update` enum value to the `apiKey/permissions/items/` response property for the response status `201` (shared schema: `Permission`, also at `apiKey/permissions/items`, `permissions/items`)
+POST /api-keys added the new `clusterGroup.admin` enum value to the `apiKey/permissions/items/` response property for the response status `201` (shared schema: `Permission`, also at `apiKey/permissions/items`, `permissions/items`)
+POST /api-keys added the new `passkey.delete` enum value to the `apiKey/permissions/items/` response property for the response status `201` (shared schema: `Permission`, also at `apiKey/permissions/items`, `permissions/items`)
+POST /api-keys added the new `passkey.read` enum value to the `apiKey/permissions/items/` response property for the response status `201` (shared schema: `Permission`, also at `apiKey/permissions/items`, `permissions/items`)
+POST /api-keys added the new `passkey.update` enum value to the `apiKey/permissions/items/` response property for the response status `201` (shared schema: `Permission`, also at `apiKey/permissions/items`, `permissions/items`)
+POST /api-keys/{id}/rotate added the new `cleanup.read` enum value to the `apiKey/permissions/items/` response property for the response status `201` (shared schema: `Permission`, also at `apiKey/permissions/items`, `permissions/items`)
+POST /api-keys/{id}/rotate added the new `cleanup.update` enum value to the `apiKey/permissions/items/` response property for the response status `201` (shared schema: `Permission`, also at `apiKey/permissions/items`, `permissions/items`)
+POST /api-keys/{id}/rotate added the new `clusterGroup.admin` enum value to the `apiKey/permissions/items/` response property for the response status `201` (shared schema: `Permission`, also at `apiKey/permissions/items`, `permissions/items`)
+POST /api-keys/{id}/rotate added the new `passkey.delete` enum value to the `apiKey/permissions/items/` response property for the response status `201` (shared schema: `Permission`, also at `apiKey/permissions/items`, `permissions/items`)
+POST /api-keys/{id}/rotate added the new `passkey.read` enum value to the `apiKey/permissions/items/` response property for the response status `201` (shared schema: `Permission`, also at `apiKey/permissions/items`, `permissions/items`)
+POST /api-keys/{id}/rotate added the new `passkey.update` enum value to the `apiKey/permissions/items/` response property for the response status `201` (shared schema: `Permission`, also at `apiKey/permissions/items`, `permissions/items`)
+POST /assets/{id}/edit-save removed `#/components/schemas/TrimParameters` from the `edits/items/parameters` request property `anyOf` list
+POST /assets/{id}/edit-save removed the enum value `trim` of the request property `edits/items/action`
+POST /assets/{id}/edit-save the `edits/items/parameters/anyOf[#/components/schemas/RotateParameters]/angle` request property `type/format` changed from `integer` to `number/double`
+POST /assets/{id}/edit-save the `edits/items/parameters/anyOf[#/components/schemas/RotateParameters]/angle` request property's exclusiveMaximum was set to `true`
+POST /memories added the new `birthday` enum value to the `type` response property for the response status `201`
+POST /workflows added the new `AssetOcrExtraction` enum value to the `trigger` response property for the response status `201`
+PUT /admin/config added the new `jxl` enum value to the `image/fullsize/format` response property for the response status `200` (shared schema: `ImageFormat`, also at `image/preview/format`, `image/thumbnail/format`)
+PUT /admin/config added the new required request property `backup/database/s3`
+PUT /admin/config added the new required request property `ffmpeg/dataSaver`
+PUT /admin/config added the new required request property `job/qualityAnalysis`
+PUT /admin/config added the new required request property `job/spatialScene`
+PUT /admin/config added the new required request property `machineLearning/facialRecognition/video`
+PUT /admin/config added the new required request property `machineLearning/petDetection/video`
+PUT /admin/config added the new required request property `machineLearning/spatialScene`
+PUT /admin/config added the new required request property `passkey`
+PUT /api-keys/{id} added the new `cleanup.read` enum value to the `permissions/items/` response property for the response status `200`
+PUT /api-keys/{id} added the new `cleanup.update` enum value to the `permissions/items/` response property for the response status `200`
+PUT /api-keys/{id} added the new `clusterGroup.admin` enum value to the `permissions/items/` response property for the response status `200`
+PUT /api-keys/{id} added the new `passkey.delete` enum value to the `permissions/items/` response property for the response status `200`
+PUT /api-keys/{id} added the new `passkey.read` enum value to the `permissions/items/` response property for the response status `200`
+PUT /api-keys/{id} added the new `passkey.update` enum value to the `permissions/items/` response property for the response status `200`
+PUT /assets/{id}/edits removed `#/components/schemas/TrimParameters` from the `edits/items/parameters` request property `anyOf` list
+PUT /assets/{id}/edits removed the enum value `trim` of the request property `edits/items/action`
+PUT /assets/{id}/edits the `edits/items/parameters/anyOf[#/components/schemas/RotateParameters]/angle` request property `type/format` changed from `integer` to `number/double`
+PUT /assets/{id}/edits the `edits/items/parameters/anyOf[#/components/schemas/RotateParameters]/angle` request property's exclusiveMaximum was set to `true`
+PUT /assets/{id}/edits the `edits/items/parameters/anyOf[#/components/schemas/RotateParameters]/angle` response property's max was increased from `270.00` to `360.00` for the response status `200`
+PUT /assets/{id}/edits the `edits/items/parameters/anyOf[#/components/schemas/RotateParameters]/angle` response's property `type/format` was widened from `integer` to `number/double` for status `200`
+PUT /memories/{id} added the new `birthday` enum value to the `type` response property for the response status `200`
+PUT /queues/{name} added the new `AssetAnalyzeQualityQueueAll` enum value to the `jobTypes/items/name` response property for the response status `200`
+PUT /queues/{name} added the new `AssetAnalyzeQuality` enum value to the `jobTypes/items/name` response property for the response status `200`
+PUT /queues/{name} added the new `AssetEditSave` enum value to the `jobTypes/items/name` response property for the response status `200`
+PUT /queues/{name} added the new `AssetEncodeDataSaverVideoQueueAll` enum value to the `jobTypes/items/name` response property for the response status `200`
+PUT /queues/{name} added the new `AssetEncodeDataSaverVideo` enum value to the `jobTypes/items/name` response property for the response status `200`
+PUT /queues/{name} added the new `AssetVideoTrimGenerate` enum value to the `jobTypes/items/name` response property for the response status `200`
+PUT /queues/{name} added the new `AuthChallengeCleanup` enum value to the `jobTypes/items/name` response property for the response status `200`
+PUT /queues/{name} added the new `MemoryRuleGenerate` enum value to the `jobTypes/items/name` response property for the response status `200`
+PUT /queues/{name} added the new `SpatialSceneQueueAll` enum value to the `jobTypes/items/name` response property for the response status `200`
+PUT /queues/{name} added the new `SpatialScene` enum value to the `jobTypes/items/name` response property for the response status `200`
+PUT /queues/{name} added the new `qualityAnalysis` enum value to the `name` response property for the response status `200`
+PUT /queues/{name} added the new `spatialScene` enum value to the `name` response property for the response status `200`
+PUT /system-config added the new `jxl` enum value to the `image/fullsize/format` response property for the response status `200` (shared schema: `ImageFormat`, also at `image/preview/format`, `image/thumbnail/format`)
+PUT /system-config added the new required request property `backup/database/s3`
+PUT /system-config added the new required request property `ffmpeg/dataSaver`
+PUT /system-config added the new required request property `job/qualityAnalysis`
+PUT /system-config added the new required request property `job/spatialScene`
+PUT /system-config added the new required request property `machineLearning/facialRecognition/video`
+PUT /system-config added the new required request property `machineLearning/petDetection/video`
+PUT /system-config added the new required request property `machineLearning/spatialScene`
+PUT /system-config added the new required request property `passkey`
+PUT /workflows/{id} added the new `AssetOcrExtraction` enum value to the `trigger` response property for the response status `200`

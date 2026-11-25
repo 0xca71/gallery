@@ -1,4 +1,4 @@
-import { Kysely } from 'kysely';
+import { Kysely, sql } from 'kysely';
 import { createHash } from 'node:crypto';
 import {
   AssetEditAction,
@@ -10,14 +10,14 @@ import { AlbumUserRole, AssetFileType, ChecksumAlgorithm, SourceType } from 'src
 import { AssetEditSaveRepository, AssetEditSaveSource } from 'src/gallery/repositories/asset-edit-save.repository.js';
 import { ImageAdjustRepository } from 'src/gallery/repositories/image-adjust.repository.js';
 import { AssetEditRepository } from 'src/repositories/asset-edit.repository.js';
-import { ConfigRepository } from 'src/repositories/config.repository.js';
+import { AssetFavoriteRepository } from 'src/repositories/asset-favorite.repository.js';
 import { DatabaseRepository } from 'src/repositories/database.repository.js';
 import { LoggingRepository } from 'src/repositories/logging.repository.js';
 import { DB } from 'src/schema/index.js';
 import { BaseService } from 'src/services/base.service.js';
 import { newMediumService } from 'test/medium.factory.js';
 import { factory, newEmbedding } from 'test/small.factory.js';
-import { automock, getKyselyDB } from 'test/utils.js';
+import { getKyselyDB } from 'test/utils.js';
 
 let database: Kysely<DB>;
 beforeAll(async () => {
@@ -61,8 +61,9 @@ const operationFor = async (
   source: AssetEditSaveSource,
   mode: AssetEditSaveMode,
   adjust?: AssetEditSaveCreateDto['adjust'],
+  ownerId = source.asset.ownerId,
 ) => {
-  const operation = await sut.create(source.asset.ownerId, source.asset.id, {
+  const operation = await sut.create(ownerId, source.asset.id, {
     mode,
     expectedVersion: source.asset.updatedAt,
     idempotencyKey: factory.uuid(),
@@ -145,6 +146,46 @@ describe('persistent image saves', () => {
       1,
     );
   });
+
+  it.each([
+    { sameOwner: true, ownerFavorite: false, recipientFavorite: false, expected: false },
+    { sameOwner: true, ownerFavorite: true, recipientFavorite: false, expected: true },
+    { sameOwner: false, ownerFavorite: false, recipientFavorite: false, expected: false },
+    { sameOwner: false, ownerFavorite: true, recipientFavorite: false, expected: false },
+    { sameOwner: false, ownerFavorite: false, recipientFavorite: true, expected: true },
+    { sameOwner: false, ownerFavorite: true, recipientFavorite: true, expected: true },
+  ])(
+    'copies only the recipient favorite: same owner=$sameOwner, owner favorite=$ownerFavorite, recipient favorite=$recipientFavorite',
+    async ({ sameOwner, ownerFavorite, recipientFavorite, expected }) => {
+      const { ctx, sut, source, user } = await setup();
+      let recipient = user;
+      if (!sameOwner) {
+        const recipientContext = await ctx.newUser();
+        recipient = recipientContext.user;
+      }
+      const { user: other } = await ctx.newUser();
+      const favorites = ctx.get(AssetFavoriteRepository);
+      await favorites.addAll(other.id, [source.asset.id]);
+      if (ownerFavorite) {
+        await favorites.addAll(user.id, [source.asset.id]);
+      }
+      if (recipientFavorite) {
+        await favorites.addAll(recipient.id, [source.asset.id]);
+      }
+      const fresh = (await sut.getSource(source.asset.id))!;
+      expect(fresh.asset.isFavorite).toBe(ownerFavorite);
+      const operation = await operationFor(sut, fresh, AssetEditSaveMode.Copy, undefined, recipient.id);
+      const resultId = operation.journal!.resultAssetId;
+      await sut.commit(operation, fresh, { ...outputFor(fresh, resultId), path: `/test/${resultId}.jpg` });
+      const saved = (await sut.getSource(resultId))!;
+      expect(saved.asset.ownerId).toBe(recipient.id);
+      expect(saved.asset.isFavorite).toBe(expected);
+      expect(
+        await database.selectFrom('asset_favorite').select('userId').where('assetId', '=', resultId).execute(),
+      ).toEqual(expected ? [{ userId: recipient.id }] : []);
+      expect((await sut.getSource(source.asset.id))!.asset.isFavorite).toBe(ownerFavorite);
+    },
+  );
 
   it('keeps external identity and path checksum, clears baked edits, and maps confirmed faces', async () => {
     const { ctx, sut, source } = await setup(true);
@@ -341,43 +382,54 @@ describe('persistent image saves', () => {
     expect(await sut.isSaving(source.asset.id, false)).toBe(false);
   });
 
-  it('serializes workers without consuming an application connection while waiting', async () => {
-    const lock = new DatabaseRepository(
-      database,
-      automock(LoggingRepository, { strict: false }),
-      automock(ConfigRepository, { strict: false }),
-    );
+  it('serializes workers on the cloned database while callback transactions remain available', async () => {
+    const applicationDatabase = await getKyselyDB('image_save_locks_18');
+    const { ctx } = newMediumService(BaseService, {
+      database: applicationDatabase,
+      real: [],
+      mock: [LoggingRepository],
+    });
+    const { ctx: secondCtx } = newMediumService(BaseService, {
+      database: applicationDatabase,
+      real: [],
+      mock: [LoggingRepository],
+    });
+    const lock = ctx.get(DatabaseRepository);
+    const secondLock = secondCtx.get(DatabaseRepository);
     const id = factory.uuid();
     const entered = Promise.withResolvers<void>();
     const release = Promise.withResolvers<void>();
-    const first = lock.withAssetLock(
-      id,
-      async () => {
-        entered.resolve();
-        await release.promise;
-      },
-      database,
-    );
-    await entered.promise;
+    const first = lock.withAssetLock(id, async () => {
+      await applicationDatabase.transaction().execute(async (trx) => {
+        const { rows } = await sql<{ name: string }>`SELECT current_database() AS name`.execute(trx);
+        expect(rows[0].name).toBe('immich_image_save_locks_18');
+      });
+      entered.resolve();
+      await release.promise;
+    });
     let secondEntered = false;
-    const second = lock.withAssetLock(
-      id,
-      () => {
+    let second: Promise<void> | undefined;
+    try {
+      await Promise.race([entered.promise, first]);
+      second = secondLock.withAssetLock(id, () => {
         secondEntered = true;
         return Promise.resolve();
-      },
-      database,
-    );
-    try {
-      await expect(lock.withAssetLock(id, async () => {}, database, false)).rejects.toThrow('another worker');
+      });
+      await expect(secondLock.withAssetLock(id, async () => {}, undefined, false)).rejects.toThrow('another worker');
       expect(secondEntered).toBe(false);
-      // This SQL still runs while the file lock is held by a different connection.
-      expect(await database.selectFrom('user').select('id').limit(1).execute()).toHaveLength(1);
+      const { rows } = await sql<{ name: string }>`SELECT current_database() AS name`.execute(applicationDatabase);
+      expect(rows[0].name).toBe('immich_image_save_locks_18');
     } finally {
       release.resolve();
-      await Promise.all([first, second]);
+      try {
+        await Promise.all([first, second]);
+        expect(await secondLock.withAssetLock(id, () => Promise.resolve('released'), undefined, false)).toBe(
+          'released',
+        );
+      } finally {
+        await Promise.all([lock.shutdown(), secondLock.shutdown()]);
+      }
     }
     expect(secondEntered).toBe(true);
-    expect(await lock.withAssetLock(id, () => Promise.resolve('released'), database, false)).toBe('released');
   });
 });

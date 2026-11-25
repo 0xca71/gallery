@@ -264,9 +264,9 @@ function renderPage({
   );
 }
 
-// Slice 6: RemoveFromAlbum/Download/Delete/etc. now live as menu items inside the
-// <SelectionToolbar>'s "⋮" ButtonContextMenu instead of top-level in the control bar. Open it
-// before asserting on any menu item, mirroring the Slice 4/5 Playwright specs
+// Metadata edits, RemoveFromAlbum and Download live in the SelectionToolbar overflow menu;
+// Delete is a primary toolbar button. Open the menu before asserting on its items,
+// mirroring the Slice 4/5 Playwright specs
 // (spaces-selection-toolbar-timeline.e2e-spec.ts's `openOverflowMenu`).
 async function openOverflowMenu() {
   await userEvent.click(page.getByRole('button', { name: 'Menu' }));
@@ -1096,7 +1096,7 @@ describe('Space album detail page', () => {
       await expect.element(page.getByRole('menuitem', { name: 'Change date' })).toBeInTheDocument();
       await expect.element(page.getByRole('menuitem', { name: 'Change location' })).toBeInTheDocument();
       await expect.element(page.getByRole('menuitem', { name: 'Archive' })).toBeInTheDocument();
-      await expect.element(page.getByRole('menuitem', { name: 'Delete' })).toBeInTheDocument();
+      await expect.element(page.getByRole('button', { name: 'Delete', exact: true })).toBeInTheDocument();
       await expect.element(page.getByRole('menuitem', { name: 'Set as album cover' })).toBeInTheDocument();
     });
 
@@ -1125,7 +1125,7 @@ describe('Space album detail page', () => {
       // Ownership-gated actions are hidden regardless of manager status.
       await expect.element(page.getByRole('menuitem', { name: 'Change date' })).not.toBeInTheDocument();
       await expect.element(page.getByRole('menuitem', { name: 'Archive' })).not.toBeInTheDocument();
-      await expect.element(page.getByRole('menuitem', { name: 'Delete' })).not.toBeInTheDocument();
+      await expect.element(page.getByRole('button', { name: 'Delete', exact: true })).not.toBeInTheDocument();
     });
 
     it('non-manager (viewer) + all-owned selection: metadata-edit affordances present, RemoveFromAlbum + Set-cover absent', async () => {
@@ -1152,7 +1152,7 @@ describe('Space album detail page', () => {
       await expect.element(page.getByTestId('download-action')).toBeInTheDocument();
       await expect.element(page.getByRole('menuitem', { name: 'Change date' })).toBeInTheDocument();
       await expect.element(page.getByRole('menuitem', { name: 'Archive' })).toBeInTheDocument();
-      await expect.element(page.getByRole('menuitem', { name: 'Delete' })).toBeInTheDocument();
+      await expect.element(page.getByRole('button', { name: 'Delete', exact: true })).toBeInTheDocument();
 
       // canManage is false for a plain album/space Viewer — Remove and Set-cover stay hidden
       // even though the selection is entirely their own.
@@ -1186,7 +1186,7 @@ describe('Space album detail page', () => {
       await openOverflowMenu();
       await expect.element(page.getByTestId('download-action')).toBeInTheDocument();
       await expect.element(page.getByText('Remove from album')).not.toBeInTheDocument();
-      await expect.element(page.getByRole('menuitem', { name: 'Delete' })).not.toBeInTheDocument();
+      await expect.element(page.getByRole('button', { name: 'Delete', exact: true })).not.toBeInTheDocument();
       await expect.element(page.getByRole('menuitem', { name: 'Set as album cover' })).not.toBeInTheDocument();
     });
   });

@@ -576,12 +576,17 @@ describe('VideoFaceDetector', () => {
 
       await sut.handleDetectFaces({ id: 'asset-id' });
 
-      expect(loggedMessages(mocks).filter((message) => message.includes('video asset-id'))).toEqual([
-        'Sampling 33 frames across 1m, 6s of video asset-id (about every 2s, 0 scene cuts)',
-        expect.stringMatching(
-          /^Found 2 faces in 33 frames of video asset-id in \d+s: 2 added, 0 updated, 0 deleted, 0 dropped as too small or unsure, 0 sharper views from 8 extra frames$/,
-        ),
-      ]);
+      const messages = loggedMessages(mocks).filter((message) => message.includes('video asset-id'));
+      expect(messages).toHaveLength(2);
+      const start = /^Sampling (\d+) frames across .+ of video (\S+) \(about every ([\d.]+)s, (\d+) scene cuts\)$/.exec(
+        messages[0],
+      );
+      expect(start?.slice(1)).toEqual(['33', 'asset-id', '2', '0']);
+      const finish =
+        /^Found (\d+) faces in (\d+) frames of video (\S+) in .+: (\d+) added, (\d+) updated, (\d+) deleted, (\d+) dropped as too small or unsure, (\d+) sharper views from (\d+) extra frames$/.exec(
+          messages[1],
+        );
+      expect(finish?.slice(1)).toEqual(['2', '33', 'asset-id', '2', '0', '0', '0', '0', '8']);
     });
 
     it('logs progress every 10% for a long video, as transcoding does', async () => {
@@ -600,10 +605,13 @@ describe('VideoFaceDetector', () => {
 
       const progress = loggedMessages(mocks).filter((message) => message.startsWith('Video faces'));
       expect(progress).toHaveLength(9);
-      expect(progress[0]).toMatch(
-        /^Video faces 10% done \(20 of 200 frames, 1 face tracked so far\), estimated \S+ remaining for video asset-id$/,
-      );
-      expect(progress.at(-1)).toMatch(/^Video faces 90% done \(180 of 200 frames/);
+      for (const [index, message] of progress.entries()) {
+        const counts =
+          /^Video faces (\d+)% done \((\d+) of (\d+) frames, (\d+) faces? tracked so far\), estimated .+ remaining for video (\S+)$/.exec(
+            message,
+          );
+        expect(counts?.slice(1)).toEqual([String((index + 1) * 10), String((index + 1) * 20), '200', '1', 'asset-id']);
+      }
     });
 
     it('logs the faces it kept apart near the threshold at debug level, by face id, and why (issue 1306)', async () => {

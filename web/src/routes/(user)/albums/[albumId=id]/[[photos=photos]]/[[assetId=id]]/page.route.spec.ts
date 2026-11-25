@@ -84,6 +84,14 @@ function renderPage(album = factory.album({ assetCount: 2 })) {
   authManager.setUser(factory.user({ id: owner?.id ?? 'album-owner' }));
   authManager.setPreferences(factory.preferences());
 
+  // The temporal picker now reads its own month buckets instead of the timeline manager.
+  // Match the Timeline stub's two assets in April 2024, including its empty-album/tag cases.
+  sdkMock.getTimeBuckets.mockImplementation(({ albumId, tagIds }) => {
+    const matchesAlbum = albumId === undefined || albumId === album.id;
+    const hasAssets = album.assetCount !== 0 && !tagIds?.includes('tag-no-match');
+    return Promise.resolve(matchesAlbum && hasAssets ? [{ timeBucket: '2024-04-01', count: 2 }] : []);
+  });
+
   sdkMock.getFilterSuggestions.mockImplementation((request: { albumId?: string } = {}) => {
     if (request.albumId) {
       const personName =

@@ -241,7 +241,6 @@ export class AssetEditSaveRepository {
             fileCreatedAt: current.fileCreatedAt,
             localDateTime: current.localDateTime,
             fileModifiedAt: output.modifiedAt,
-            isFavorite: current.ownerId === resultOwnerId && current.isFavorite,
             visibility: current.visibility,
             width: output.width,
             height: output.height,
@@ -293,6 +292,7 @@ export class AssetEditSaveRepository {
           )
           .onConflict((oc) => oc.doNothing())
           .execute();
+        // Copy only the result owner's own favorite; the overlay trigger maintains the owner projection.
         await trx
           .insertInto('asset_favorite')
           .columns(['assetId', 'userId'])
@@ -417,15 +417,13 @@ export class AssetEditSaveRepository {
           videoPetsSampledAt: null,
         })
         .onConflict((oc) =>
-          oc
-            .column('assetId')
-            .doUpdateSet({
-              petsDetectedAt: null,
-              classifiedAt: null,
-              qualityAnalyzedAt: null,
-              videoFacesSampledAt: null,
-              videoPetsSampledAt: null,
-            }),
+          oc.column('assetId').doUpdateSet({
+            petsDetectedAt: null,
+            classifiedAt: null,
+            qualityAnalyzedAt: null,
+            videoFacesSampledAt: null,
+            videoPetsSampledAt: null,
+          }),
         )
         .execute();
       await trx

@@ -32,7 +32,7 @@ const CropParametersSchema = z
 
 const RotateParametersSchema = z
   .object({
-    angle: z.number().meta({ format: 'double' }).min(-360).max(360).describe('Rotation angle in degrees'),
+    angle: z.number().meta({ format: 'double' }).min(0).lt(360).describe('Rotation angle in degrees'),
   })
   .meta({ id: 'RotateParameters' });
 
