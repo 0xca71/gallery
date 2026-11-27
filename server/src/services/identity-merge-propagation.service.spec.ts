@@ -1,6 +1,6 @@
 import { ConflictException } from '@nestjs/common';
 import { JobName, SharedSpaceActivityType } from 'src/enum.js';
-import { PersonRepository } from 'src/repositories/person.repository.js';
+import { GalleryPersonRepository } from 'src/gallery/repositories/gallery-person.repository.js';
 import { SharedSpaceRepository } from 'src/repositories/shared-space.repository.js';
 import { IdentityMergePropagationService, MergeProfile } from 'src/services/identity-merge-propagation.service.js';
 
@@ -52,12 +52,20 @@ class PersonalMergeDb {
 }
 
 class PersonalMergeInsertBuilder {
+  private row: Record<string, unknown> | null = null;
+
   constructor(
     private db: PersonalMergeDb,
     private table: string,
   ) {}
 
   columns() {
+    return this;
+  }
+
+  // `setPersonIdentity` upserts the survivor's identity into the person_identity sidecar.
+  values(row: Record<string, unknown>) {
+    this.row = row;
     return this;
   }
 
@@ -70,6 +78,12 @@ class PersonalMergeInsertBuilder {
   }
 
   execute() {
+    if (this.table === 'person_identity' && this.row) {
+      const person = this.db.people.find((candidate) => candidate.personGroupId === this.row!.personGroupId);
+      if (person) {
+        person.identityId = this.row.identityId as string;
+      }
+    }
     return [];
   }
 }
@@ -92,6 +106,10 @@ class PersonalMergeSelectBuilder {
       this.idFilter = value;
     }
 
+    if (this.table === 'person' && column === 'personGroupId' && operator === '=') {
+      this.idFilter = [value as string];
+    }
+
     if (this.table === 'asset_face') {
       this.faceFilters.push({ column, operator, value });
     }
@@ -109,6 +127,10 @@ class PersonalMergeSelectBuilder {
   }
 
   executeTakeFirst() {
+    if (this.table === 'person') {
+      return this.db.people.find((person) => this.idFilter?.includes(person.personGroupId));
+    }
+
     if (this.table !== 'asset_face') {
       return null;
     }
@@ -164,7 +186,8 @@ class PersonalMergeUpdateBuilder {
   }
 
   execute() {
-    if (this.table === 'person' && this.whereColumn === 'personGroupId') {
+    // person_pet (species) is modelled as a field on the fake person row, like identityId.
+    if ((this.table === 'person' || this.table === 'person_pet') && this.whereColumn === 'personGroupId') {
       for (const person of this.db.people) {
         if (person.personGroupId === this.whereValue) {
           Object.assign(person, this.update);
@@ -591,6 +614,7 @@ const makeService = (profiles: MergeProfile[], options: { unrepairableSpaceIds?:
     jobRepository: jobRepository as never,
     logger: logger as never,
     personRepository: personRepository as never,
+    galleryPersonRepository: personRepository as never,
     sharedSpaceRepository: sharedSpaceRepository as never,
   });
 
@@ -633,7 +657,7 @@ const nonDestructivePlan = () => ({
   activityEvents: [],
 });
 
-describe(PersonRepository.name, () => {
+describe(GalleryPersonRepository.name, () => {
   describe('mergePersonProfile', () => {
     it('preserves target personal name, birth date, color, species, hidden, favorite, and feature face', async () => {
       const db = new PersonalMergeDb(
@@ -668,7 +692,7 @@ describe(PersonRepository.name, () => {
           { id: 'source-face', personGroupId: 'source-person', deletedAt: null, isVisible: true },
         ],
       );
-      const sut = new PersonRepository(db as never);
+      const sut = new GalleryPersonRepository(db as never);
 
       const result = await sut.mergePersonProfile(
         { sourcePersonId: 'source-person', targetPersonId: 'target-person', targetIdentityId: 'identity-target' },
@@ -729,7 +753,7 @@ describe(PersonRepository.name, () => {
         ],
         [],
       );
-      const sut = new PersonRepository(db as never);
+      const sut = new GalleryPersonRepository(db as never);
 
       await sut.mergePersonProfile(
         { sourcePersonId: 'source-person', targetPersonId: 'target-person', targetIdentityId: 'identity-target' },
@@ -781,7 +805,7 @@ describe(PersonRepository.name, () => {
         ],
         [{ id: 'source-face', personGroupId: 'source-person', deletedAt: null, isVisible: true }],
       );
-      const sut = new PersonRepository(db as never);
+      const sut = new GalleryPersonRepository(db as never);
 
       const result = await sut.mergePersonProfile(
         { sourcePersonId: 'source-person', targetPersonId: 'target-person', targetIdentityId: 'identity-target' },

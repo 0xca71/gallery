@@ -1,27 +1,27 @@
-import { AssetOrder, AssetOrderBy, type TimeBucketAssetResponseDto } from '@immich/sdk';
-import { t } from 'svelte-i18n';
-import { SvelteSet } from 'svelte/reactivity';
-import { get } from 'svelte/store';
 import {
   ViewportProximity,
   isInOrNearViewport as isInOrNearViewportUtil,
   isInViewport as isInViewportUtil,
-} from '$lib/managers/timeline-manager/internal/intersection-support.svelte';
-import { CancellableTask } from '$lib/utils/cancellable-task';
-import { handleError } from '$lib/utils/handle-error';
+} from '#lib/managers/timeline-manager/internal/intersection-support.svelte.ts';
+import { CancellableTask } from '#lib/utils/cancellable-task.ts';
+import { handleError } from '#lib/utils/handle-error.ts';
 import {
   formatGroupTitle,
   formatTimelineMonthTitle,
+  fromISODateTimeUTCToObject,
   fromTimelinePlainDate,
   fromTimelinePlainDateTime,
   fromTimelinePlainYearMonth,
+  getOrderingDate,
   getTimes,
   setDifference,
   type TimelineDateTime,
   type TimelineYearMonth,
-  getOrderingDate,
-  fromISODateTimeUTCToObject,
-} from '$lib/utils/timeline-util';
+} from '#lib/utils/timeline-util.ts';
+import { AssetOrder, AssetOrderBy, type TimeBucketAssetResponseDto } from '@immich/sdk';
+import { t } from 'svelte-i18n';
+import { SvelteSet } from 'svelte/reactivity';
+import { get } from 'svelte/store';
 import { GroupInsertionCache } from './group-insertion-cache.svelte';
 import { TimelineDay } from './timeline-day.svelte';
 import type { TimelineManager } from './timeline-manager.svelte';
@@ -159,10 +159,13 @@ export class TimelineMonth {
         idsProcessed.add(id);
       }
       combinedChangedGeometry ||= changedGeometry;
-      if (group.viewerAssets.length === 0) {
-        timelineDays.splice(index, 1);
-        combinedChangedGeometry = true;
+
+      if (group.viewerAssets.length > 0) {
+        continue;
       }
+
+      timelineDays.splice(index, 1);
+      combinedChangedGeometry = true;
     }
     return {
       moveAssets: combinedMoveAssets.flat(),
@@ -387,10 +390,13 @@ export class TimelineMonth {
     for (const current of this.assetsIterator()) {
       const currentAssetDate = fromTimelinePlainDateTime(getOrderingDate(current, this.#orderBy));
       const diff = Math.abs(targetDate.diff(currentAssetDate).as('milliseconds'));
-      if (diff < smallestDiff) {
-        smallestDiff = diff;
-        closest = current;
+
+      if (diff >= smallestDiff) {
+        continue;
       }
+
+      smallestDiff = diff;
+      closest = current;
     }
     return closest;
   }

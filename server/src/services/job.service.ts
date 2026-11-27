@@ -1,22 +1,13 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
-import type { JobItem } from 'src/types.js';
-import { OnEvent, OnJob } from 'src/decorators.js';
+import { OnEvent } from 'src/decorators.js';
 import { mapAsset } from 'src/dtos/asset-response.dto.js';
 import { JobCreateDto } from 'src/dtos/job.dto.js';
-import {
-  AssetType,
-  AssetVisibility,
-  IntegrityReport,
-  JobName,
-  JobStatus,
-  ManualJobName,
-  QueueName,
-  SystemMetadataKey,
-} from 'src/enum.js';
+import { AssetType, AssetVisibility, IntegrityReport, JobName, JobStatus, ManualJobName } from 'src/enum.js';
+import { isSkippedOnS3 } from 'src/gallery/utils/s3-job-skip.js';
 import { ArgsOf } from 'src/repositories/event.repository.js';
 import { BaseService } from 'src/services/base.service.js';
+import type { JobItem } from 'src/types.js';
 import { hexOrBufferToBase64 } from 'src/utils/bytes.js';
-import { isFaceSuggestionEnabled } from 'src/utils/misc.js';
 
 const asJobItem = (dto: JobCreateDto): JobItem => {
   switch (dto.name) {
@@ -104,35 +95,13 @@ export class JobService extends BaseService {
     await this.jobRepository.queue(asJobItem(dto));
   }
 
-  @OnJob({ name: JobName.FaceSuggestionMaintenance, queue: QueueName.PeopleBackfill })
-  async handleFaceSuggestionMaintenance(): Promise<JobStatus> {
-    const { machineLearning } = await this.getConfig({ withCache: false });
-    if (!isFaceSuggestionEnabled(machineLearning)) {
-      return JobStatus.Skipped;
-    }
-
-    await this.jobRepository.queueAll([
-      { name: JobName.PersonSuggestionScanQueueAll, data: {} },
-      { name: JobName.SpacePersonSuggestionScanQueueAll, data: {} },
-    ]);
-
-    // The one-shot boot sweep's marker (PersonService.queueInitialFaceSuggestionSweep) is written HERE, not
-    // where the job is queued, so it records "a sweep ran" rather than "a sweep was queued". This job is
-    // attempts:1 / removeOnFail:true, so a marker burnt at queue time would survive a run that failed and
-    // vanished. Only the success path may claim the slot — the `Skipped` return above deliberately does not,
-    // so an admin running this by hand while the feature is off doesn't consume the boot sweep. Setting it
-    // on a manual run once the feature IS on is correct and intentional: a full sweep genuinely happened.
-    await this.systemMetadataRepository.set(SystemMetadataKey.FaceSuggestionDefaultOnState, {
-      sweptAt: new Date().toISOString(),
-    });
-    return JobStatus.Success;
-  }
-
   @OnEvent({ name: 'JobRun' })
   async onJobRun(...[queueName, job]: ArgsOf<'JobRun'>) {
     try {
       await this.eventRepository.emit('JobStart', queueName, job);
-      const response = await this.jobRepository.run(job);
+      const response = isSkippedOnS3(queueName, job, this.logger)
+        ? JobStatus.Skipped
+        : await this.jobRepository.run(job);
       await this.eventRepository.emit('JobSuccess', { job, response });
       if (response && typeof response === 'string' && [JobStatus.Success, JobStatus.Skipped].includes(response)) {
         await this.onDone(job);
@@ -144,9 +113,7 @@ export class JobService extends BaseService {
     }
   }
 
-  /**
-   * Queue follow up jobs
-   */
+  /** Queue follow up jobs */
   private async onDone(item: JobItem) {
     switch (item.name) {
       case JobName.SidecarCheck: {
@@ -175,15 +142,13 @@ export class JobService extends BaseService {
         break;
       }
 
+      case JobName.AssetVideoTrimGenerate:
       case JobName.AssetEditThumbnailGeneration: {
-        if (item.data.editSaveOperationId) {
-          break;
-        }
         const asset = await this.assetRepository.getById(item.data.id);
         const edits = await this.assetEditRepository.getWithSyncInfo(item.data.id);
 
         if (asset) {
-          this.websocketRepository.clientSend('AssetEditReadyV2', asset.ownerId, {
+          await this.notifyAssetEditReady(item.data, {
             asset: {
               id: asset.id,
               ownerId: asset.ownerId,
@@ -228,7 +193,6 @@ export class JobService extends BaseService {
           { name: JobName.SmartSearch, data: item.data },
           { name: JobName.AssetDetectFaces, data: item.data },
           { name: JobName.Ocr, data: item.data },
-          { name: JobName.PetDetection, data: item.data },
         ];
 
         if (asset.type === AssetType.Video) {
@@ -246,7 +210,12 @@ export class JobService extends BaseService {
           !asset.isExternal &&
           (asset.visibility === AssetVisibility.Timeline || asset.visibility === AssetVisibility.Archive)
         ) {
-          this.websocketRepository.clientSend('on_upload_success', asset.ownerId, mapAsset(asset));
+          // Sent to the owner only, so the owner's projection is the recipient's favorite.
+          this.websocketRepository.clientSend(
+            'on_upload_success',
+            asset.ownerId,
+            mapAsset({ ...asset, isFavoriteForUser: asset.isFavorite }),
+          );
           if (asset.exifInfo) {
             const exif = asset.exifInfo;
             this.websocketRepository.clientSend('AssetUploadReadyV2', asset.ownerId, {
@@ -311,7 +280,6 @@ export class JobService extends BaseService {
         if (item.data.source === 'upload') {
           await this.jobRepository.queue({ name: JobName.AssetDetectDuplicates, data: item.data });
         }
-        await this.jobRepository.queue({ name: JobName.AssetClassify, data: { id: item.data.id } });
         break;
       }
 

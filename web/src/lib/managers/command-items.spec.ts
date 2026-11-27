@@ -1,22 +1,23 @@
+import en from '#i18n/en.json';
+import { ADMIN_VISIBLE_QUEUES, MAX_SPACE_ASSETS_PER_REQUEST } from '#lib/constants.ts';
+import { showAddSpaceMembersModal } from '#lib/gallery/spaces/add-space-members.ts';
+import { authManager } from '#lib/managers/auth-manager.svelte.ts';
+import * as selectionHandlers from '#lib/managers/selection-command-handlers.ts';
+import { Route } from '#lib/route.ts';
+import * as albumService from '#lib/services/album.service.ts';
+import * as albumUtils from '#lib/utils/album-utils.ts';
+import * as fileUploader from '#lib/utils/file-uploader.ts';
+import { handleError } from '#lib/utils/handle-error.ts';
 import type { AlbumResponseDto, SharedSpaceMemberResponseDto, SharedSpaceResponseDto } from '@immich/sdk';
 import * as sdk from '@immich/sdk';
 import { QueueCommand, QueueName, SharedSpaceRole } from '@immich/sdk';
 import { modalManager, toastManager } from '@immich/ui';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { commands } from 'vitest/browser';
 import { goto } from '$app/navigation';
-import en from '$i18n/en.json';
-import { ADMIN_VISIBLE_QUEUES, MAX_SPACE_ASSETS_PER_REQUEST } from '$lib/constants';
-import { authManager } from '$lib/managers/auth-manager.svelte';
-import * as selectionHandlers from '$lib/managers/selection-command-handlers';
-import { Route } from '$lib/route';
-import * as albumService from '$lib/services/album.service';
-import * as albumUtils from '$lib/utils/album-utils';
-import * as fileUploader from '$lib/utils/file-uploader';
-import * as handleErrorModule from '$lib/utils/handle-error';
 import AlbumEditModal from '../modals/AlbumEditModal.svelte';
 import AlbumOptionsModal from '../modals/AlbumOptionsModal.svelte';
 import ShortcutsModal from '../modals/ShortcutsModal.svelte';
-import SpaceAddMemberModal from '../modals/SpaceAddMemberModal.svelte';
 import SpaceCreateModal from '../modals/SpaceCreateModal.svelte';
 import SpaceMembersModal from '../modals/SpaceMembersModal.svelte';
 import type { CommandContext } from './command-context-manager.svelte';
@@ -41,32 +42,28 @@ vi.mock('@immich/sdk', async (orig) => ({
   removeSpace: vi.fn().mockResolvedValue(undefined),
 }));
 
-vi.mock('$app/navigation', () => ({ goto: vi.fn().mockResolvedValue(undefined) }));
-
-vi.mock('$lib/services/album.service', () => ({
-  handleDeleteAlbum: vi.fn().mockResolvedValue(true),
-  handleDownloadAlbum: vi.fn().mockResolvedValue(undefined),
+// Browser mode rejects an import of a name a mock does not export, so keep the global fake's other exports.
+vi.mock('$app/navigation', async () => ({
+  ...(await import('#test/unit/mocks/app-navigation.ts')),
+  goto: vi.fn().mockResolvedValue(undefined),
 }));
 
-vi.mock('$lib/managers/selection-command-handlers', async () => {
-  const actual = await vi.importActual<typeof import('$lib/managers/selection-command-handlers')>(
-    '$lib/managers/selection-command-handlers',
-  );
-  return {
-    ...actual,
-    handleAddSelectedToAlbum: vi.fn(),
-    handleAddSelectedToCurrentSpace: vi.fn(),
-    handleAddSelectedToSpace: vi.fn(),
-    handleFavoriteSelected: vi.fn(),
-    handleArchiveSelected: vi.fn(),
-    handleDeleteSelected: vi.fn(),
-  };
-});
+vi.mock('#lib/gallery/spaces/add-space-members.js', () => ({ showAddSpaceMembersModal: vi.fn() }));
+
+// ES module namespaces cannot be spied on in the browser; spy on these modules' exports instead.
+vi.mock(import('#lib/utils/file-uploader.ts'), { spy: true });
+vi.mock(import('#lib/utils/album-utils.ts'), { spy: true });
+vi.mock(import('#lib/utils/handle-error.ts'), { spy: true });
+
+// Spy on these modules' exports (the real module stays loaded, so every export exists); the tests stub the
+// handlers they call in their own beforeEach.
+vi.mock(import('#lib/services/album.service.ts'), { spy: true });
+vi.mock(import('#lib/managers/selection-command-handlers.ts'), { spy: true });
 
 const { mockUser } = vi.hoisted(() => ({
   mockUser: { current: { id: 'test-user' } as { id: string } | null },
 }));
-vi.mock('$lib/managers/auth-manager.svelte', () => ({
+vi.mock('#lib/managers/auth-manager.svelte.js', () => ({
   authManager: {
     logout: vi.fn().mockResolvedValue(undefined),
     get authenticated() {
@@ -169,6 +166,7 @@ describe('selection-context commands', () => {
     isAllFavorite: false,
     isAllArchived: false,
     isAllTrashed: false,
+    editableSelectedAssetIds: ['asset-1'],
     clearSelection: vi.fn(),
     onFavorite: vi.fn(),
     onArchive: vi.fn(),
@@ -209,12 +207,18 @@ describe('selection-context commands', () => {
   const cmd = (id: string) => COMMAND_ITEMS.find((item) => item.id === id)!;
 
   beforeEach(() => {
-    vi.mocked(selectionHandlers.handleAddSelectedToAlbum).mockClear();
-    vi.mocked(selectionHandlers.handleAddSelectedToCurrentSpace).mockClear();
-    vi.mocked(selectionHandlers.handleAddSelectedToSpace).mockClear();
-    vi.mocked(selectionHandlers.handleFavoriteSelected).mockClear();
-    vi.mocked(selectionHandlers.handleArchiveSelected).mockClear();
-    vi.mocked(selectionHandlers.handleDeleteSelected).mockClear();
+    for (const handler of [
+      selectionHandlers.handleAddSelectedToAlbum,
+      selectionHandlers.handleAddSelectedToCurrentSpace,
+      selectionHandlers.handleAddSelectedToSpace,
+      selectionHandlers.handleFavoriteSelected,
+      selectionHandlers.handleArchiveSelected,
+      selectionHandlers.handleDeleteSelected,
+    ]) {
+      vi.mocked(handler)
+        .mockReset()
+        .mockResolvedValue(undefined as never);
+    }
   });
 
   it('registers all selection command ids', () => {
@@ -301,10 +305,11 @@ describe('selection-context commands', () => {
     expect(item.isAvailable!(makeCtx(null))).toBe(false);
   });
 
-  it('favorite hides when ownership is mixed, missing onFavorite, or already all favorite', () => {
+  it('favorite is available regardless of ownership (per-user, #763); hides on missing onFavorite or already all favorite', () => {
     const item = cmd('cmd:selection_favorite');
     expect(item.isAvailable!(makeCtx(makeSelection()))).toBe(true);
-    expect(item.isAvailable!(makeCtx(makeSelection({ isAllUserOwned: false })))).toBe(false);
+    // #763: favorites are per-user, so a mixed-ownership selection no longer hides the command.
+    expect(item.isAvailable!(makeCtx(makeSelection({ isAllUserOwned: false })))).toBe(true);
     expect(item.isAvailable!(makeCtx(makeSelection({ onFavorite: undefined })))).toBe(false);
     expect(item.isAvailable!(makeCtx(makeSelection({ isAllFavorite: true })))).toBe(false);
   });
@@ -327,21 +332,21 @@ describe('selection-context commands', () => {
 
 describe('cmd:upload', () => {
   it('invokes openFileUploadDialog', async () => {
-    const spy = vi.spyOn(fileUploader, 'openFileUploadDialog').mockResolvedValue(undefined as never);
+    const spy = vi.mocked(fileUploader.openFileUploadDialog).mockResolvedValue(undefined as never);
     const cmd = COMMAND_ITEMS.find((c) => c.id === 'cmd:upload')!;
     await cmd.handler();
     expect(spy).toHaveBeenCalledOnce();
-    spy.mockRestore();
+    spy.mockReset();
   });
 });
 
 describe('cmd:new_album', () => {
   it('invokes createAlbumAndRedirect', async () => {
-    const spy = vi.spyOn(albumUtils, 'createAlbumAndRedirect').mockResolvedValue(undefined as never);
+    const spy = vi.mocked(albumUtils.createAlbumAndRedirect).mockResolvedValue(undefined as never);
     const cmd = COMMAND_ITEMS.find((c) => c.id === 'cmd:new_album')!;
     await cmd.handler();
     expect(spy).toHaveBeenCalledOnce();
-    spy.mockRestore();
+    spy.mockReset();
   });
 });
 
@@ -431,7 +436,7 @@ describe.each([
   ['cmd:run_face_recognition', QueueName.FacialRecognition],
 ])('%s', (id, expectedQueue) => {
   it('dispatches Start + force:false against the expected queue, shows success toast', async () => {
-    const spy = vi.spyOn(sdk, 'runQueueCommandLegacy').mockResolvedValue({} as never);
+    const spy = vi.mocked(sdk.runQueueCommandLegacy).mockResolvedValue({} as never);
     const cmd = COMMAND_ITEMS.find((c) => c.id === id)!;
     await cmd.handler();
     expect(spy).toHaveBeenCalledWith({
@@ -448,7 +453,7 @@ describe.each([
 // Shared helper — one rejection test covers the error branch for all 5 Run-X
 // commands since they dispatch through `runQueue`.
 it('cmd:run_thumbnail_gen: SDK rejection fires handleError (danger toast), no success toast', async () => {
-  vi.spyOn(sdk, 'runQueueCommandLegacy').mockRejectedValue(new Error('boom') as never);
+  vi.mocked(sdk.runQueueCommandLegacy).mockRejectedValue(new Error('boom') as never);
   const cmd = COMMAND_ITEMS.find((c) => c.id === 'cmd:run_thumbnail_gen')!;
   await cmd.handler();
   expect(toastManager.primary).not.toHaveBeenCalled();
@@ -461,7 +466,7 @@ describe.each([
   ['cmd:resume_all_queues', QueueCommand.Resume, 'cmdk_cmd_all_resumed'],
 ])('%s', (id, expectedCommand, successKey) => {
   it('dispatches to every admin-visible queue (not all QueueName values)', async () => {
-    const spy = vi.spyOn(sdk, 'runQueueCommandLegacy').mockResolvedValue({} as never);
+    const spy = vi.mocked(sdk.runQueueCommandLegacy).mockResolvedValue({} as never);
     const cmd = COMMAND_ITEMS.find((c) => c.id === id)!;
     await cmd.handler();
     expect(spy).toHaveBeenCalledTimes(ADMIN_VISIBLE_QUEUES.length);
@@ -475,7 +480,7 @@ describe.each([
 
   it('partial failure: some reject → warning toast fires, no success toast', async () => {
     const spy = vi
-      .spyOn(sdk, 'runQueueCommandLegacy')
+      .mocked(sdk.runQueueCommandLegacy)
       .mockImplementation(({ name }) =>
         name === QueueName.ThumbnailGeneration
           ? (Promise.reject(new Error('boom')) as never)
@@ -492,7 +497,7 @@ describe.each([
   });
 
   it('total failure: all reject → warning toast fires, no success toast', async () => {
-    const spy = vi.spyOn(sdk, 'runQueueCommandLegacy').mockRejectedValue(new Error('boom') as never);
+    const spy = vi.mocked(sdk.runQueueCommandLegacy).mockRejectedValue(new Error('boom') as never);
     const cmd = COMMAND_ITEMS.find((c) => c.id === id)!;
     await cmd.handler();
     expect(spy).toHaveBeenCalledTimes(ADMIN_VISIBLE_QUEUES.length);
@@ -503,7 +508,7 @@ describe.each([
 
 describe('cmd:clear_failed_jobs', () => {
   it('calls emptyQueue with failed:true for every admin-visible queue', async () => {
-    const spy = vi.spyOn(sdk, 'emptyQueue').mockResolvedValue({} as never);
+    const spy = vi.mocked(sdk.emptyQueue).mockResolvedValue({} as never);
     const cmd = COMMAND_ITEMS.find((c) => c.id === 'cmd:clear_failed_jobs')!;
     await cmd.handler();
     expect(spy).toHaveBeenCalledTimes(ADMIN_VISIBLE_QUEUES.length);
@@ -515,7 +520,7 @@ describe('cmd:clear_failed_jobs', () => {
 
   it('partial failure: warning toast fires, no success toast', async () => {
     const spy = vi
-      .spyOn(sdk, 'emptyQueue')
+      .mocked(sdk.emptyQueue)
       .mockImplementation(({ name }) =>
         name === QueueName.FaceDetection
           ? (Promise.reject(new Error('boom')) as never)
@@ -529,7 +534,7 @@ describe('cmd:clear_failed_jobs', () => {
   });
 
   it('total failure: warning toast fires', async () => {
-    const spy = vi.spyOn(sdk, 'emptyQueue').mockRejectedValue(new Error('boom') as never);
+    const spy = vi.mocked(sdk.emptyQueue).mockRejectedValue(new Error('boom') as never);
     const cmd = COMMAND_ITEMS.find((c) => c.id === 'cmd:clear_failed_jobs')!;
     await cmd.handler();
     expect(spy).toHaveBeenCalledTimes(ADMIN_VISIBLE_QUEUES.length);
@@ -544,6 +549,7 @@ describe('album-context commands', () => {
     ownerId: 'u-owner',
   } as unknown as AlbumResponseDto;
 
+  // eslint-disable-next-line unicorn/no-unnecessary-parameters
   const makeCtx = (overrides?: Partial<CommandContext>): CommandContext => ({
     routeId: '/(user)/albums/[albumId=id]',
     params: { albumId: 'a1' },
@@ -580,19 +586,19 @@ describe('album-context commands', () => {
     userId: 'u-editor',
   });
 
-  let handleErrorSpy: ReturnType<typeof vi.spyOn>;
+  const handleErrorSpy = vi.mocked(handleError);
   beforeEach(() => {
     vi.mocked(modalManager.show).mockClear();
-    vi.mocked(albumService.handleDeleteAlbum).mockReset().mockResolvedValue(true);
+    vi.mocked(albumService.handleDeleteAlbum).mockReset().mockResolvedValue(undefined);
     vi.mocked(albumService.handleDownloadAlbum).mockReset().mockResolvedValue(undefined);
     vi.mocked(sdk.removeUserFromAlbum)
       .mockReset()
       .mockResolvedValue(undefined as never);
     vi.mocked(goto).mockReset().mockResolvedValue(undefined);
-    handleErrorSpy = vi.spyOn(handleErrorModule, 'handleError').mockImplementation(() => {});
+    handleErrorSpy.mockImplementation(() => {});
   });
   afterEach(() => {
-    handleErrorSpy.mockRestore();
+    handleErrorSpy.mockReset();
   });
 
   describe('cmd:album_rename', () => {
@@ -691,14 +697,9 @@ describe('album-context commands', () => {
     it('has destructive:true', () => {
       expect(cmd().destructive).toBe(true);
     });
-    it('handler calls handleDeleteAlbum({prompt:false}) + goto on success', async () => {
+    it('handler calls handleDeleteAlbum({prompt:false}), which leaves the album page on success', async () => {
       await cmd().handler(makeCtx());
       expect(albumService.handleDeleteAlbum).toHaveBeenCalledWith(baseAlbum, { prompt: false });
-      expect(goto).toHaveBeenCalledWith(Route.albums());
-    });
-    it('handler does NOT goto when handleDeleteAlbum returns falsy', async () => {
-      vi.mocked(albumService.handleDeleteAlbum).mockResolvedValueOnce(false);
-      await cmd().handler(makeCtx());
       expect(goto).not.toHaveBeenCalled();
     });
   });
@@ -779,7 +780,7 @@ describe('space-context commands', () => {
     userId: 'u-stranger',
   });
 
-  let handleErrorSpy: ReturnType<typeof vi.spyOn>;
+  const handleErrorSpy = vi.mocked(handleError);
   beforeEach(() => {
     vi.mocked(modalManager.show).mockClear();
     vi.mocked(sdk.bulkAddAssets)
@@ -793,10 +794,10 @@ describe('space-context commands', () => {
       .mockResolvedValue(undefined as never);
     vi.mocked(goto).mockReset().mockResolvedValue(undefined);
     vi.mocked(toastManager.primary).mockClear();
-    handleErrorSpy = vi.spyOn(handleErrorModule, 'handleError').mockImplementation(() => {});
+    handleErrorSpy.mockImplementation(() => {});
   });
   afterEach(() => {
-    handleErrorSpy.mockRestore();
+    handleErrorSpy.mockReset();
   });
 
   describe('cmd:space_add_photos', () => {
@@ -863,14 +864,11 @@ describe('space-context commands', () => {
     it('shows for owner', () => {
       expect(cmd().isAvailable!(makeCtx())).toBe(true);
     });
-    it('handler opens SpaceAddMemberModal with existingMemberIds from ctx.space.members', async () => {
+    it('handler opens the add-member modal with existingMemberIds from ctx.space.members', async () => {
       const members = [makeMember({ userId: 'u-a' }), makeMember({ userId: 'u-b' })];
       const ctx = makeCtx({ space: { ...makeCtx().space!, members } });
       await cmd().handler(ctx);
-      expect(modalManager.show).toHaveBeenCalledWith(SpaceAddMemberModal, {
-        spaceId: 's1',
-        existingMemberIds: ['u-a', 'u-b'],
-      });
+      expect(showAddSpaceMembersModal).toHaveBeenCalledWith('s1', ['u-a', 'u-b']);
     });
   });
 
@@ -984,8 +982,7 @@ describe('space-context commands', () => {
 
   describe('route-helper drift guard', () => {
     it('command-items.ts uses Route.albums() + Route.spaces() helpers (no raw literals)', async () => {
-      const { readFile } = await import('node:fs/promises');
-      const src = await readFile('src/lib/managers/command-items.ts', 'utf8');
+      const src = await commands.readFile('src/lib/managers/command-items.ts');
       expect(src).not.toMatch(/goto\(['"]\/(albums|spaces)['"]\)/);
       expect(src).toMatch(/Route\.albums\(\)/);
       expect(src).toMatch(/Route\.spaces\(\)/);

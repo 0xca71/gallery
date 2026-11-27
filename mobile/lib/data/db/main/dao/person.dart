@@ -11,14 +11,15 @@ class PeopleDatabaseRepository extends DatabaseAccessor<Drift> with $PeopleDatab
 
   Drift get _db => attachedDatabase;
 
-  Future<Person?> get(String personId) async {
+  /// The person for the given [personId], if any
+  Stream<Person?> watchPerson(String personId) {
     final query = _db.select(_db.personEntity)..where((row) => row.id.equals(personId));
 
-    final result = await query.getSingleOrNull();
-    return result?.toDto();
+    return query.map((row) => row.toDto()).watchSingleOrNull();
   }
 
-  Future<List<Person>> getAssetPeople(String assetId) async {
+  /// The people associated with a given [assetId]
+  Stream<List<Person>> watchPeopleForAsset(String assetId) {
     // An asset can have multiple face records for the same person (e.g., metadata
     // imports alongside ML detections). Use a subquery instead of a join so each
     // person is returned once, regardless of how many of their faces are on the asset
@@ -33,7 +34,7 @@ class PeopleDatabaseRepository extends DatabaseAccessor<Drift> with $PeopleDatab
     final query = _db.select(_db.personEntity)
       ..where((row) => row.id.isInQuery(faceQuery) & row.isHidden.equals(false));
 
-    return query.map((row) => row.toDto()).get();
+    return query.map((row) => row.toDto()).watch();
   }
 
   JoinedSelectStatement _allPeopleQuery({required int minFaces, required PeopleSortBy sortBy}) {
@@ -66,7 +67,7 @@ class PeopleDatabaseRepository extends DatabaseAccessor<Drift> with $PeopleDatab
       });
   }
 
-  Stream<List<Person>> watch({int minFaces = 3, PeopleSortBy sortBy = PeopleSortBy.photoCount}) {
+  Stream<List<Person>> watchAll({int minFaces = 3, PeopleSortBy sortBy = PeopleSortBy.photoCount}) {
     final people = _db.personEntity;
     return _allPeopleQuery(minFaces: minFaces, sortBy: sortBy).map((row) => row.readTable(people).toDto()).watch();
   }

@@ -1,18 +1,18 @@
 <script lang="ts">
-  import UserAvatar from '$lib/components/shared-components/UserAvatar.svelte';
-  import UserGroupModal from '$lib/modals/UserGroupModal.svelte';
-  import { handleError } from '$lib/utils/handle-error';
+  import UserAvatar from '#lib/components/shared-components/UserAvatar.svelte';
+  import UserGroupModal from '#lib/modals/UserGroupModal.svelte';
+  import { handleError } from '#lib/utils/handle-error.ts';
   import {
+    UserAvatarColor,
     createGroup,
     getAllGroups,
     removeGroup,
     setMembers,
     updateGroup,
-    UserAvatarColor,
     type UserGroupResponseDto,
     type UserResponseDto,
   } from '@immich/sdk';
-  import { Button, IconButton, modalManager, Text } from '@immich/ui';
+  import { Button, IconButton, Text, modalManager } from '@immich/ui';
   import { mdiDelete, mdiPencil } from '@mdi/js';
   import { onMount } from 'svelte';
   import { t } from 'svelte-i18n';

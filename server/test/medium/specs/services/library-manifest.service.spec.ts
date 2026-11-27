@@ -1,6 +1,8 @@
 import { NotFoundException } from '@nestjs/common';
 import { Kysely } from 'kysely';
 import { AssetStatus, AssetType, AssetVisibility, ChecksumAlgorithm } from 'src/enum.js';
+import { GalleryAssetRepository } from 'src/gallery/repositories/gallery-asset.repository.js';
+import { SpaceAlbumRepository } from 'src/gallery/repositories/space-album.repository.js';
 import { AlbumRepository } from 'src/repositories/album.repository.js';
 import { AssetRepository } from 'src/repositories/asset.repository.js';
 import { LoggingRepository } from 'src/repositories/logging.repository.js';
@@ -13,10 +15,11 @@ import { getKyselyDB } from 'test/utils.js';
 
 let defaultDatabase: Kysely<DB>;
 
+// eslint-disable-next-line unicorn/no-unnecessary-parameters
 const setup = (db?: Kysely<DB>) => {
   return newMediumService(LibraryManifestService, {
     database: db || defaultDatabase,
-    real: [AssetRepository, UserRepository, AlbumRepository],
+    real: [SpaceAlbumRepository, AssetRepository, GalleryAssetRepository, UserRepository, AlbumRepository],
     mock: [LoggingRepository],
   });
 };

@@ -19,7 +19,6 @@ class PartnerDetailPage extends StatelessWidget {
 
   const PartnerDetailPage({super.key, required this.partner});
 
-  static const timelineOverviewControlsEnabled = true;
   static const partnerInfoBoxTopSliverHeight = 110.0;
 
   @override
@@ -29,7 +28,7 @@ class PartnerDetailPage extends StatelessWidget {
           ref.watch(timelineFactoryProvider).remoteAssets(partner.id, groupBy: groupBy, temporalScope: scope),
       child: Timeline(
         withGroupingPill: true,
-        appBar: MesmerizingSliverAppBar(title: partner.name, icon: Icons.person_outline),
+        appBar: MesmerizingSliverAppBar(title: partner.name),
         topSliverWidget: _InfoBox(partner: partner),
         topSliverWidgetHeight: PartnerDetailPage.partnerInfoBoxTopSliverHeight,
         bottomSheet: const PartnerDetailBottomSheet(),

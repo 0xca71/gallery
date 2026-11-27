@@ -20,7 +20,9 @@
 
   let {
     timeBuckets,
+    // eslint-disable-next-line unicorn/prefer-default-parameters
     dateAfter,
+    // eslint-disable-next-line unicorn/prefer-default-parameters
     dateBefore,
     selectedYear,
     selectedMonth,
@@ -193,10 +195,9 @@
     <!-- Month grid: 4-column CSS grid -->
     <div class="grid grid-cols-4 gap-1.5" data-testid="month-grid">
       {#each months as m (m.month)}
-        {@const maxMonthCount = Math.max(...months.map((mo) => mo.count), 1)}
-        {@const isSelected = selectedMonth === m.month}
-        {@const monthVolume =
-          selectedMonth === undefined ? Math.round((m.count / maxMonthCount) * 100) : isSelected ? 100 : 0}
+        {const maxMonthCount = $derived(Math.max(...months.map((mo) => mo.count), 1))}
+        {const monthVolume = $derived(Math.round((m.count / maxMonthCount) * 100))}
+        {const isSelected = $derived(selectedMonth === m.month)}
         <button
           type="button"
           class="flex flex-col items-center rounded-xl border p-2 transition-all duration-150 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none
@@ -207,6 +208,7 @@
               : 'cursor-pointer border-gray-200 hover:border-immich-primary hover:bg-immich-primary/5 dark:border-gray-700 dark:hover:border-immich-dark-primary dark:hover:bg-immich-dark-primary/5'}"
           onclick={() => handleMonthClick(selectedYear!, m.month, m.count)}
           data-testid="month-btn-{m.month}"
+          data-no-hover-grow
         >
           <span class="text-xs font-semibold">{m.label}</span>
           <span class="text-xs {isSelected ? 'text-white/80' : 'text-gray-400 dark:text-gray-500'}">{m.count}</span>
@@ -234,9 +236,10 @@
           class="year-chip flex flex-col items-center rounded-xl border px-2 py-1.5 transition-all duration-150 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none
             {y.count === 0
             ? 'cursor-default border-gray-200 opacity-30 dark:border-gray-700'
-            : 'cursor-pointer border-gray-200 hover:-translate-y-0.5 hover:border-immich-primary hover:bg-immich-primary/5 motion-reduce:hover:translate-y-0 dark:border-gray-700 dark:hover:border-immich-dark-primary dark:hover:bg-immich-dark-primary/5'}"
+            : 'cursor-pointer border-gray-200 hover:border-immich-primary hover:bg-immich-primary/5 dark:border-gray-700 dark:hover:border-immich-dark-primary dark:hover:bg-immich-dark-primary/5'}"
           onclick={() => handleYearClick(y.year, y.count)}
           data-testid="year-btn-{y.year}"
+          data-no-hover-grow
         >
           <span class="text-xs/tight font-semibold tabular-nums">{y.year}</span>
           <span class="text-xs/tight text-gray-400 tabular-nums opacity-60 dark:text-gray-500">{y.count}</span>

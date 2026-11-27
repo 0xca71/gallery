@@ -5,6 +5,8 @@ import 'package:immich_mobile/domain/models/asset/base_asset.model.dart';
 import 'package:immich_mobile/extensions/build_context_extensions.dart';
 import 'package:immich_mobile/extensions/duration_extensions.dart';
 import 'package:immich_mobile/extensions/theme_extensions.dart';
+import 'package:immich_mobile/gallery/motion/gallery_tile.dart';
+import 'package:immich_mobile/gallery/space_badge.widget.dart';
 import 'package:immich_mobile/presentation/widgets/images/thumbnail.widget.dart';
 import 'package:immich_mobile/presentation/widgets/timeline/constants.dart';
 import 'package:immich_mobile/providers/asset_viewer/asset_viewer.provider.dart';
@@ -17,7 +19,6 @@ class ThumbnailTile extends ConsumerStatefulWidget {
     this.asset, {
     this.size = kThumbnailResolution,
     this.remoteSize,
-    this.fit = BoxFit.cover,
     this.showStorageIndicator = false,
     this.lockSelection = false,
     this.heroOffset,
@@ -30,7 +31,6 @@ class ThumbnailTile extends ConsumerStatefulWidget {
 
   /// Physical size to decode for remote thumbnails.
   final Size? remoteSize;
-  final BoxFit fit;
   final bool showStorageIndicator;
   final bool lockSelection;
   final int? heroOffset;
@@ -112,7 +112,10 @@ class _ThumbnailTileState extends ConsumerState<ThumbnailTile> {
                     // but other solutions have failed thus far.
                     key: ValueKey(isCurrentAsset),
                     tag: '${asset?.heroTag}_$heroIndex',
-                    child: Thumbnail.fromAsset(asset: asset, size: widget.size, remoteSize: widget.remoteSize),
+                    child: GalleryTile(
+                      asset: asset,
+                      child: Thumbnail.fromAsset(asset: asset, size: widget.size, remoteSize: widget.remoteSize),
+                    ),
                     // Placeholderbuilder used to hide indicators on first hero animation, since flightShuttleBuilder isn't called until both source and destination hero exist in widget tree.
                     placeholderBuilder: (context, heroSize, child) {
                       if (!_hideIndicators) {
@@ -198,6 +201,7 @@ class _ThumbnailTileState extends ConsumerState<ThumbnailTile> {
                       ),
                     ),
                   ),
+                if (asset != null) SpaceBadge(asset, hidden: _hideIndicators || isSelected || widget.lockSelection),
                 if (uploadProgress != null) _UploadProgressOverlay(progress: uploadProgress),
               ],
             ),

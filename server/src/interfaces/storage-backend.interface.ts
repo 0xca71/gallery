@@ -1,12 +1,12 @@
 import { Readable } from 'node:stream';
-import type { ContentDisposition } from 'src/utils/file.js';
 import { CacheControl } from 'src/enum.js';
+import type { ContentDisposition } from 'src/utils/file.js';
 
 /**
- * Thrown by a backend when the client's `Range` header cannot be satisfied, so
- * the HTTP layer can answer 416 instead of masking it as a 404. Kept here (and
- * not as a Nest `HttpException`) so backends stay free of HTTP framework types.
- */
+Thrown by a backend when the client's `Range` header cannot be satisfied, so
+the HTTP layer can answer 416 instead of masking it as a 404. Kept here (and
+not as a Nest `HttpException`) so backends stay free of HTTP framework types.
+*/
 export class RangeNotSatisfiableError extends Error {
   constructor(key: string) {
     super(`Requested range is not satisfiable for ${key}`);
@@ -20,13 +20,21 @@ export type ServeOptions = {
   fileName?: string;
   disposition?: ContentDisposition;
   /**
-   * The client's raw `Range` header, forwarded verbatim: S3 resolves `bytes=a-b`,
-   * `bytes=a-` and `bytes=-n` for us, so nothing here parses it. Only the S3 proxy
-   * strategy reads this — the disk backend ignores it because express' `sendFile`
-   * already honors the request's own `Range`, and the S3 redirect strategy ignores
-   * it because the client replays the header to S3 on the presigned URL.
-   */
+  The client's raw `Range` header, forwarded verbatim: S3 resolves `bytes=a-b`,
+  `bytes=a-` and `bytes=-n` for us, so nothing here parses it. Only the S3 proxy
+  strategy reads this — the disk backend ignores it because express' `sendFile`
+  already honors the request's own `Range`, and the S3 redirect strategy ignores
+  it because the client replays the header to S3 on the presigned URL.
+  */
   range?: string;
+  /** Stream through the API even when the backend would redirect: set for clients a redirect would leak a credential from. */
+  proxy?: boolean;
+  /**
+  Aborted when the response this read is for closes. A backend that holds resources for the
+  read (the S3 proxy's read slot and socket) ties them to it, so a client that leaves at any
+  point frees them without the HTTP layer having to know they exist.
+  */
+  signal?: AbortSignal;
 };
 
 export type ServeStrategy =
@@ -42,14 +50,39 @@ export interface StorageBackend {
   /** Get a readable stream for the given key */
   get(key: string): Promise<{ stream: Readable; contentType?: string; length?: number }>;
 
-  /** Check if a key exists */
-  exists(key: string): Promise<boolean>;
+  /** Read the whole object into memory */
+  readAll(key: string): Promise<Buffer>;
+
+  /**
+  Check if a key exists. With `readable`, a disk file must also be readable (upstream's sidecar
+  check); an S3 HeadObject only succeeds when the object can be read, so S3 ignores it.
+  */
+  exists(key: string, options?: { readable?: boolean }): Promise<boolean>;
+
+  /**
+  Copy the content at `fromKey` to `toKey` in this backend, overwriting `toKey`. S3 copies server-side (a
+  multipart copy above the 5 GiB CopyObject limit), so no bytes pass through the server; S3 has no rename, so a
+  move is this copy followed by `delete`.
+  */
+  copy(fromKey: string, toKey: string): Promise<void>;
+
+  /** The size in bytes of the content at `key`. Rejects when nothing is stored there. */
+  stat(key: string): Promise<{ size: number }>;
 
   /** Delete the content at the given key */
   delete(key: string): Promise<void>;
 
   /** Delete all objects/files under the given key prefix. Idempotent. No-op if nothing matches. */
   deletePrefix(prefix: string): Promise<void>;
+
+  /**
+  List the objects/files directly under the given key prefix, newest-agnostic and unsorted.
+  Each `key` is returned in the form this same backend accepts for `get`/`delete`, so a listing
+  round-trips without the caller rebuilding paths. Not recursive: the disk backend returns only
+  the files directly inside the folder, which is all the flat key spaces that use this need.
+  Returns an empty array when the prefix holds nothing (a missing disk folder included).
+  */
+  list(prefix: string): Promise<Array<{ key: string; size: number }>>;
 
   /** Return the total size in bytes for all objects/files under the given key prefix. */
   getPrefixUsage(prefix: string, shouldCount?: (filename: string) => boolean): Promise<number>;
@@ -58,17 +91,17 @@ export interface StorageBackend {
   getServeStrategy(key: string, options: ServeOptions): Promise<ServeStrategy>;
 
   /**
-   * A path or URL that external tools (ffmpeg/ffprobe) can read directly,
-   * without downloading the object first. Disk returns a filesystem path;
-   * S3 returns a presigned URL.
-   */
+  A path or URL that external tools (ffmpeg/ffprobe) can read directly,
+  without downloading the object first. Disk returns a filesystem path;
+  S3 returns a presigned URL.
+  */
   getReadableUrl(key: string): Promise<string>;
 
   /**
-   * Download content to a local temp file for processing by tools
-   * that require filesystem paths (ffmpeg, sharp, exiftool).
-   * Returns the temp path and a cleanup function.
-   * For disk backend, returns the real path with a no-op cleanup.
-   */
+  Download content to a local temp file for processing by tools
+  that require filesystem paths (ffmpeg, sharp, exiftool).
+  Returns the temp path and a cleanup function.
+  For disk backend, returns the real path with a no-op cleanup.
+  */
   downloadToTemp(key: string): Promise<{ tempPath: string; cleanup: () => Promise<void> }>;
 }

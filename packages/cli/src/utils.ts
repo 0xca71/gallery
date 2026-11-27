@@ -14,6 +14,7 @@ import { readFile, stat, writeFile } from 'node:fs/promises';
 import { platform } from 'node:os';
 import { join, resolve } from 'node:path';
 import yaml from 'yaml';
+import { version } from '../package.json';
 
 export interface BaseOptions {
   configDirectory: string;
@@ -63,14 +64,16 @@ export const requirePermissions = async (permissions: Permission[]) => {
     }
   }
 
-  if (missing.length > 0) {
-    const combined = missing.map((permission) => `"${permission}"`).join(', ');
-    console.log(
-      `Missing required permission${s(missing.length)}: ${combined}.
-Please make sure your API key has the correct permissions.`,
-    );
-    process.exit(1);
+  if (missing.length === 0) {
+    return;
   }
+
+  const combined = missing.map((permission) => `"${permission}"`).join(', ');
+  console.log(
+    `Missing required permission${s(missing.length)}: ${combined}.
+Please make sure your API key has the correct permissions.`,
+  );
+  process.exit(1);
 };
 
 export const connect = async (url: string, key: string) => {
@@ -87,7 +90,8 @@ export const connect = async (url: string, key: string) => {
     // noop
   }
 
-  init({ baseUrl: url, apiKey: key });
+  // marks a Gallery client, so the server reports the Gallery version rather than its upstream base
+  init({ baseUrl: url, apiKey: key, headers: { 'x-gallery-app': version } });
 
   const [error] = await withError(getMyUser());
   if (error) {
@@ -120,10 +124,7 @@ export const readAuthFile = async (dir: string) => {
     // TODO add class-transform/validation
     const auth = yaml.parse(data.toString()) as AuthDto | OldAuthDto;
     const { instanceUrl, apiKey } = auth as OldAuthDto;
-    if (instanceUrl && apiKey) {
-      return { url: instanceUrl, key: apiKey };
-    }
-    return auth as AuthDto;
+    return instanceUrl && apiKey ? { url: instanceUrl, key: apiKey } : (auth as AuthDto);
   } catch (error: Error | any) {
     if (error.code === 'ENOENT' || error.code === 'ENOTDIR') {
       console.log('No auth file exists. Please login first.');
@@ -219,9 +220,9 @@ export const sha1 = (filepath: string) => {
 };
 
 /**
- * Batches items and calls onBatch to process them
- * when the batch size is reached or the debounce time has passed.
- */
+Batches items and calls onBatch to process them
+when the batch size is reached or the debounce time has passed.
+*/
 export class Batcher<T = unknown> {
   private items: T[] = [];
   private readonly batchSize: number;

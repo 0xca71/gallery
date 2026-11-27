@@ -1,47 +1,44 @@
 <script lang="ts">
-  import { lazyComponent } from '$lib/utils/lazy-component.svelte';
-  import { goto } from '$app/navigation';
-  import { shortcuts, type ShortcutOptions } from '$lib/actions/shortcut';
-  import type { Action } from '$lib/components/asset-viewer/actions/action';
-  import type {
-    AssetCursor,
-    SlideshowRandomAssetResolver,
-    SlideshowStepAssetResolver,
-  } from '$lib/components/asset-viewer/AssetViewer.svelte';
-  import Thumbnail from '$lib/components/assets/thumbnail/Thumbnail.svelte';
-  import TimelineBucketCard from '$lib/components/timeline/TimelineBucketCard.svelte';
-  import TimelineRouteGroupingBar from '$lib/components/timeline/TimelineRouteGroupingBar.svelte';
-  import { AssetAction } from '$lib/constants';
-  import Portal from '$lib/elements/Portal.svelte';
-  import type { AssetMultiSelectManager } from '$lib/managers/asset-multi-select-manager.svelte';
-  import { assetViewerManager } from '$lib/managers/asset-viewer-manager.svelte';
-  import { featureFlagsManager } from '$lib/managers/feature-flags-manager.svelte';
+  import { shortcuts, type ShortcutOptions } from '#lib/actions/shortcut.ts';
+  import type { AssetCursor } from '#lib/components/asset-viewer/AssetViewer.svelte';
+  import type { Action } from '#lib/components/asset-viewer/actions/action.ts';
+  import Thumbnail from '#lib/components/assets/thumbnail/Thumbnail.svelte';
+  import TimelineBucketCard from '#lib/components/timeline/TimelineBucketCard.svelte';
+  import TimelineRouteGroupingBar from '#lib/components/timeline/TimelineRouteGroupingBar.svelte';
+  import { AssetAction } from '#lib/constants.ts';
+  import Portal from '#lib/elements/Portal.svelte';
+  import { retryOnAnimationFrames } from '#lib/gallery/timeline/timeline-anchor.ts';
+  import type { AssetMultiSelectManager } from '#lib/managers/asset-multi-select-manager.svelte.ts';
+  import { assetViewerManager } from '#lib/managers/asset-viewer-manager.svelte.ts';
+  import { featureFlagsManager } from '#lib/managers/feature-flags-manager.svelte.ts';
   import type {
     TimelineAsset,
     TimelineGrouping,
     TimelineTemporalAnchor,
     Viewport,
-  } from '$lib/managers/timeline-manager/types';
-  import AssetDeleteConfirmModal from '$lib/modals/AssetDeleteConfirmModal.svelte';
-  import ShortcutsModal from '$lib/modals/ShortcutsModal.svelte';
-  import { Route } from '$lib/route';
-  import { keyboardManager } from '$lib/stores/keyboard-manager.svelte';
-  import { showDeleteModal } from '$lib/stores/preferences.store';
-  import { handlePromiseError } from '$lib/utils';
-  import { deleteAssets } from '$lib/utils/actions';
-  import { archiveAssets, getNextAsset, getPreviousAsset, navigateToAsset } from '$lib/utils/asset-utils';
-  import { moveFocus } from '$lib/utils/focus-util';
-  import { buildGalleryViewerBuckets, getGalleryViewerAssetDate } from '$lib/utils/gallery-viewer-grouping';
-  import { handleError } from '$lib/utils/handle-error';
-  import { getJustifiedLayoutFromAssets } from '$lib/utils/layout-utils';
-  import { navigate } from '$lib/utils/navigation';
-  import { getTimelineBucketZoomTarget, type ActivatableTimelineBucket } from '$lib/utils/timeline-zoom-navigation';
-  import { isTimelineAsset, toTimelineAsset } from '$lib/utils/timeline-util';
-  import { TUNABLES } from '$lib/utils/tunables';
-  import { AssetVisibility, type AssetResponseDto } from '@immich/sdk';
+  } from '#lib/managers/timeline-manager/types.ts';
+  import AssetDeleteConfirmModal from '#lib/modals/AssetDeleteConfirmModal.svelte';
+  import ShortcutsModal from '#lib/modals/ShortcutsModal.svelte';
+  import { Route } from '#lib/route.ts';
+  import { keyboardManager } from '#lib/stores/keyboard-manager.svelte.ts';
+  import { showDeleteModal } from '#lib/stores/preferences.store.ts';
+  import { handlePromiseError } from '#lib/utils.ts';
+  import { deleteAssets } from '#lib/utils/actions.ts';
+  import { getNextAsset, getPreviousAsset, navigateToAsset } from '#lib/utils/asset-utils.ts';
+  import { moveFocus } from '#lib/utils/focus-util.ts';
+  import { buildGalleryViewerBuckets, getGalleryViewerAssetDate } from '#lib/utils/gallery-viewer-grouping.ts';
+  import { handleError } from '#lib/utils/handle-error.ts';
+  import { getJustifiedLayoutFromAssets } from '#lib/utils/layout-utils.ts';
+  import { lazyComponent } from '#lib/utils/lazy-component.svelte.ts';
+  import { navigate } from '#lib/utils/navigation.ts';
+  import { isTimelineAsset, toTimelineAsset } from '#lib/utils/timeline-util.ts';
+  import { getTimelineBucketZoomTarget, type ActivatableTimelineBucket } from '#lib/utils/timeline-zoom-navigation.ts';
+  import { TUNABLES } from '#lib/utils/tunables.ts';
+  import { type AssetResponseDto } from '@immich/sdk';
   import { modalManager } from '@immich/ui';
   import { debounce } from 'lodash-es';
   import { t } from 'svelte-i18n';
+  import { goto } from '$app/navigation';
 
   const {
     TIMELINE: { INTERSECTION_EXPAND_TOP, INTERSECTION_EXPAND_BOTTOM },
@@ -51,7 +48,6 @@
     assets: AssetResponseDto[];
     viewerAssets?: AssetResponseDto[];
     assetInteraction: AssetMultiSelectManager;
-    disableAssetSelect?: boolean;
     showArchiveIcon?: boolean;
     viewport: Viewport;
     onEndReached?: (() => void) | undefined;
@@ -63,18 +59,18 @@
     allowDeletion?: boolean;
     enableGrouping?: boolean;
     /**
-     * Element this gallery scrolls inside. Defaults to the document, which is what the
-     * full-page callers (search, folders, memory, shared link) use. Surfaces embedded in
-     * an inner `overflow-y-auto` pane — e.g. the smart search results inside
-     * `UserPageLayout` — must pass their scroll container, otherwise `document`'s
-     * scrollTop never moves and virtualization freezes on the first viewport.
-     */
+    Element this gallery scrolls inside. Defaults to the document, which is what the
+    full-page callers (search, folders, memory, shared link) use. Surfaces embedded in
+    an inner `overflow-y-auto` pane — e.g. the smart search results inside
+    `UserPageLayout` — must pass their scroll container, otherwise `document`'s
+    scrollTop never moves and virtualization freezes on the first viewport.
+    */
     scrollElement?: HTMLElement;
     /**
-     * Overrides click-to-open. Defaults to route navigation (`navigateToAsset`). Callers
-     * that own their own asset viewer (and so need extra context such as `spaceId`) pass
-     * their own opener together with `withAssetViewer={false}`.
-     */
+    Overrides click-to-open. Defaults to route navigation (`navigateToAsset`). Callers
+    that own their own asset viewer (and so need extra context such as `spaceId`) pass
+    their own opener together with `withAssetViewer={false}`.
+    */
     onAssetOpen?: (asset: AssetResponseDto) => void;
     /** Set to `false` when the caller mounts its own `AssetViewer`. */
     withAssetViewer?: boolean;
@@ -84,7 +80,6 @@
     assets = $bindable(),
     viewerAssets,
     assetInteraction,
-    disableAssetSelect = false,
     showArchiveIcon = false,
     viewport,
     onEndReached = undefined,
@@ -279,17 +274,6 @@
     assetInteraction.clear();
   };
 
-  const toggleArchive = async () => {
-    const ids = await archiveAssets(
-      assetInteraction.assets,
-      assetInteraction.isAllArchived ? AssetVisibility.Timeline : AssetVisibility.Archive,
-    );
-    if (ids) {
-      assets = assets.filter((asset) => !ids.includes(asset.id));
-      assetInteraction.clear();
-    }
-  };
-
   const focusNextAsset = () => moveFocus((element) => element.dataset.thumbnailFocusContainer !== undefined, 'next');
   const focusPreviousAsset = () =>
     moveFocus((element) => element.dataset.thumbnailFocusContainer !== undefined, 'previous');
@@ -332,7 +316,6 @@
           shortcuts.push(
             { shortcut: { key: 'Delete' }, onShortcut: onDelete },
             { shortcut: { key: 'Delete', shift: true }, onShortcut: () => trashOrDelete(true) },
-            { shortcut: { key: 'a', shift: true }, onShortcut: toggleArchive },
           );
         }
       }
@@ -445,36 +428,24 @@
       return;
     }
 
-    requestAnimationFrame(() => {
+    // A day anchor whose card is not rendered yet scrolls the virtual list to its first asset,
+    // then scrolls the card into view one frame later.
+    return retryOnAnimationFrames((frame) => {
       if (!isCurrentGalleryAnchor(anchor, grouping)) {
-        return;
+        return true;
       }
 
       const target = container.querySelector<HTMLElement>(selector);
-      if (target) {
-        target.scrollIntoView({ block: 'start', inline: 'nearest' });
-        galleryTemporalAnchor = undefined;
-        return;
+      const index = !target && frame === 0 && grouping === 'day' ? getFirstGalleryAssetIndexForAnchor(anchor) : -1;
+      if (index !== -1) {
+        scrollToGalleryAssetIndex(index);
+        return false;
       }
 
-      if (grouping === 'day' && anchor.month !== undefined) {
-        const targetIndex = getFirstGalleryAssetIndexForAnchor(anchor);
-        if (targetIndex !== -1) {
-          scrollToGalleryAssetIndex(targetIndex);
-          requestAnimationFrame(() => {
-            if (!isCurrentGalleryAnchor(anchor, grouping)) {
-              return;
-            }
-
-            container.querySelector<HTMLElement>(selector)?.scrollIntoView({ block: 'start', inline: 'nearest' });
-            galleryTemporalAnchor = undefined;
-          });
-          return;
-        }
-      }
-
+      target?.scrollIntoView({ block: 'start', inline: 'nearest' });
       galleryTemporalAnchor = undefined;
-    });
+      return true;
+    }, 1);
   });
 
   $effect(() => {
@@ -495,20 +466,6 @@
     }
   });
 
-  const resolveSlideshowStepAsset: SlideshowStepAssetResolver = (asset, order) => {
-    return order === 'previous' ? getPreviousAsset(navigationAssets, asset) : getNextAsset(navigationAssets, asset);
-  };
-
-  const resolveSlideshowRandomAsset: SlideshowRandomAssetResolver = (isPlayable) => {
-    const playableAssets = navigationAssets.filter((asset) => isPlayable(asset));
-    if (playableAssets.length === 0) {
-      return;
-    }
-
-    const randomIndex = Math.floor(Math.random() * playableAssets.length);
-    return playableAssets[randomIndex];
-  };
-
   const assetCursor = $derived<AssetCursor>({
     current: assetViewerManager.asset!,
     nextAsset: getNextAsset(navigationAssets, assetViewerManager.asset),
@@ -517,7 +474,7 @@
 
   // Mounting the viewer through `{#await}` leaves it permanently unreactive on reopen.
   // See lazyComponent().
-  const LazyAssetViewer = lazyComponent(() => import('$lib/components/asset-viewer/AssetViewer.svelte'));
+  const LazyAssetViewer = lazyComponent(() => import('#lib/components/asset-viewer/AssetViewer.svelte'));
 </script>
 
 <svelte:document onselectstart={onSelectStart} use:shortcuts={shortcutList} onscroll={() => updateSlidingWindow()} />
@@ -559,8 +516,8 @@
     >
       {#each assets as asset, index (asset.id + '-' + index)}
         {#if isInOrNearViewport(index)}
-          {@const currentAsset = toTimelineAsset(asset)}
-          {@const assetDate = getGalleryViewerAssetDate(asset)}
+          {const currentAsset = $derived(toTimelineAsset(asset))}
+          {const assetDate = $derived(getGalleryViewerAssetDate(asset))}
           <div
             class="absolute"
             style:overflow="clip"
@@ -570,7 +527,6 @@
             data-gallery-asset-month={assetDate?.month ?? null}
           >
             <Thumbnail
-              readonly={disableAssetSelect}
               onClick={() => {
                 if (assetInteraction.selectionActive) {
                   handleSelectAssets(currentAsset);
@@ -606,13 +562,11 @@
 {#if withAssetViewer && assetViewerManager.isViewing}
   <Portal target="body">
     {#if LazyAssetViewer.current}
-      {@const AssetViewer = LazyAssetViewer.current}
+      {const AssetViewer = $derived(LazyAssetViewer.current)}
       <AssetViewer
         cursor={assetCursor}
         onAction={handleAction}
         onRandom={handleRandom}
-        {resolveSlideshowStepAsset}
-        {resolveSlideshowRandomAsset}
         onAssetChange={updateCurrentAsset}
         onClose={() => {
           assetViewerManager.showAssetViewer(false);

@@ -1,26 +1,23 @@
 <script lang="ts">
-  import type { SharedSpaceAlbumFolderDto, SharedSpaceLinkedAlbumDto, SharedSpaceMemberResponseDto } from '@immich/sdk';
-  import { authManager } from '$lib/managers/auth-manager.svelte';
-  import { AlbumViewMode, SortOrder } from '$lib/stores/preferences.store';
-  import { SpaceAlbumGroupBy, spaceAlbumViewSettings } from '$lib/stores/space-album-view-settings.store';
+  import LoadingSpinner from '#lib/components/shared-components/LoadingSpinner.svelte';
+  import SpaceAlbumCard from '#lib/components/spaces/space-album-card.svelte';
+  import SpaceAlbumFolderCard from '#lib/components/spaces/space-album-folder-card.svelte';
+  import SpaceAlbumsTable from '#lib/components/spaces/space-albums-table.svelte';
+  import LazyAlbumGrid from '#lib/gallery/components/lazy-album-grid.svelte';
+  import { authManager } from '#lib/managers/auth-manager.svelte.ts';
+  import { AlbumViewMode, SortOrder } from '#lib/stores/preferences.store.ts';
+  import { SpaceAlbumGroupBy, spaceAlbumViewSettings } from '#lib/stores/space-album-view-settings.store.ts';
+  import { isAlbumGroupCollapsed, toggleAlbumGroupCollapsing } from '#lib/utils/album-utils.ts';
+  import type { DragPayload } from '#lib/utils/space-album-folder-dnd.ts';
   import {
-    buildSpaceAlbumGroups,
-    getSelectedSpaceAlbumGroupOption,
-    isSpaceAlbumGroupCollapsed,
-    toggleSpaceAlbumGroupCollapsing,
-  } from '$lib/utils/space-album-grouping';
-  import { sortSpaceAlbums } from '$lib/utils/space-album-sort';
-  import {
-    buildFolderSummaries,
     EMPTY_FOLDER_SUMMARY,
+    buildFolderSummaries,
     flattenForSearch,
     getFolderContents,
-  } from '$lib/utils/space-album-folders';
-  import type { DragPayload } from '$lib/utils/space-album-folder-dnd';
-  import LoadingSpinner from '$lib/components/shared-components/LoadingSpinner.svelte';
-  import SpaceAlbumCard from '$lib/components/spaces/space-album-card.svelte';
-  import SpaceAlbumFolderCard from '$lib/components/spaces/space-album-folder-card.svelte';
-  import SpaceAlbumsTable from '$lib/components/spaces/space-albums-table.svelte';
+  } from '#lib/utils/space-album-folders.ts';
+  import { buildSpaceAlbumGroups, getSelectedSpaceAlbumGroupOption } from '#lib/utils/space-album-grouping.ts';
+  import { sortSpaceAlbums } from '#lib/utils/space-album-sort.ts';
+  import type { SharedSpaceAlbumFolderDto, SharedSpaceLinkedAlbumDto, SharedSpaceMemberResponseDto } from '@immich/sdk';
   import { Icon } from '@immich/ui';
   import { mdiChevronRight } from '@mdi/js';
   import { t } from 'svelte-i18n';
@@ -31,7 +28,7 @@
     albums: SharedSpaceLinkedAlbumDto[];
     folders?: SharedSpaceAlbumFolderDto[];
     /** The most recent folders fetch failed — fall back to a flat, unscoped album list rather
-     * than hiding every album that lives in a folder we have no metadata for. */
+    than hiding every album that lives in a folder we have no metadata for. */
     foldersUnavailable?: boolean;
     currentFolderId?: string | null;
     canManage: boolean;
@@ -57,7 +54,7 @@
     currentFolderId = null,
     canManage,
     members = [],
-    // eslint-disable-next-line no-useless-assignment
+    // eslint-disable-next-line no-useless-assignment -- a $bindable output, written for the parent
     groupIds = $bindable([]),
     searchQuery = '',
     onUnlink,
@@ -151,40 +148,58 @@
   });
 </script>
 
+{#snippet albumCard(album: SharedSpaceLinkedAlbumDto)}
+  <SpaceAlbumCard
+    {spaceId}
+    {album}
+    {canManage}
+    {onUnlink}
+    {onToggleTimeline}
+    {onToggleMyTimeline}
+    onMove={onMoveAlbum}
+  />
+{/snippet}
+
+{#snippet albumGrid(gridAlbums: SharedSpaceLinkedAlbumDto[])}
+  <LazyAlbumGrid items={gridAlbums}>
+    {#snippet chunk(chunkAlbums)}
+      {#each chunkAlbums as album (album.id)}
+        {@render albumCard(album)}
+      {/each}
+    {/snippet}
+  </LazyAlbumGrid>
+{/snippet}
+
 {#if isSearching}
   {#if searchHits.length === 0}
-    <p data-testid="space-albums-no-results" class="p-4 text-center text-gray-500">{$t('space_albums_no_matching')}</p>
+    <p data-testid="space-albums-no-results" class="p-4 text-center text-gray-500">
+      {$t('space_albums_no_matching')}
+    </p>
   {:else if $spaceAlbumViewSettings.view === AlbumViewMode.List}
     <!-- Respect the user's List/Cover preference during a search too — it must not be silently
-         discarded for the duration of the query. Deliberately UNGROUPED and with no folder rows
-         (search escapes the folder tree entirely). -->
+       discarded for the duration of the query. Deliberately UNGROUPED and with no folder rows
+       (search escapes the folder tree entirely). -->
     <SpaceAlbumsTable {spaceId} albums={searchHitAlbums} {canManage} {onUnlink} {onToggleTimeline} />
   {:else}
     <!-- Flattened, deliberately UNGROUPED: the path subtitle is the organising signal. -->
-    <div class="grid grid-auto-fill-56 gap-y-4">
-      {#each searchHits as hit (hit.album.id)}
-        <div>
-          <SpaceAlbumCard
-            {spaceId}
-            album={hit.album}
-            {canManage}
-            {onUnlink}
-            {onToggleTimeline}
-            {onToggleMyTimeline}
-            onMove={onMoveAlbum}
-          />
-          {#if hit.path.length > 0}
-            <p class="px-5 text-xs opacity-70" data-testid="space-album-search-path-{hit.album.id}">
-              {hit.path.join(' › ')}
-            </p>
-          {/if}
-        </div>
-      {/each}
-    </div>
+    <LazyAlbumGrid items={searchHits}>
+      {#snippet chunk(chunkHits)}
+        {#each chunkHits as hit (hit.album.id)}
+          <div>
+            {@render albumCard(hit.album)}
+            {#if hit.path.length > 0}
+              <p class="px-5 text-xs opacity-70" data-testid="space-album-search-path-{hit.album.id}">
+                {hit.path.join(' › ')}
+              </p>
+            {/if}
+          </div>
+        {/each}
+      {/snippet}
+    </LazyAlbumGrid>
   {/if}
 {:else if currentFolderId && levelAlbums.length === 0 && sortedFolders.length === 0}
   <!-- Reusing the space-level empty state here would wrongly claim the space has no albums at
-       all, when it only means THIS folder is empty. -->
+     all, when it only means THIS folder is empty. -->
   <p class="p-8 text-center text-gray-500" data-testid="space-album-folder-empty">
     {$t('space_album_folder_empty')}
   </p>
@@ -223,7 +238,7 @@
     {#if sortedFolders.length > 0}
       <div class="grid grid-auto-fill-56 gap-y-4" data-testid="space-album-folders-grid">
         {#each sortedFolders as folder (folder.id)}
-          {@const summary = folderSummaries.get(folder.id) ?? EMPTY_FOLDER_SUMMARY}
+          {const summary = $derived(folderSummaries.get(folder.id) ?? EMPTY_FOLDER_SUMMARY)}
           <SpaceAlbumFolderCard
             {folder}
             albumCount={summary.albumCount}
@@ -243,12 +258,12 @@
     {#if levelAlbums.length > 0}
       {#if isGrouped}
         {#each groups as group (group.id)}
-          {@const collapsed = isSpaceAlbumGroupCollapsed($spaceAlbumViewSettings, group.id)}
-          {@const iconRotation = collapsed ? 'rotate-0' : 'rotate-90'}
+          {const collapsed = $derived(isAlbumGroupCollapsed($spaceAlbumViewSettings, group.id))}
+          {const iconRotation = $derived(collapsed ? 'rotate-0' : 'rotate-90')}
           <div class="grid">
             <button
               type="button"
-              onclick={() => toggleSpaceAlbumGroupCollapsing(group.id)}
+              onclick={() => toggleAlbumGroupCollapsing(group.id, spaceAlbumViewSettings)}
               class="mt-2 w-full cursor-pointer rounded-md py-2 pe-2 text-start transition-colors hover:bg-subtle hover:text-primary dark:text-immich-dark-fg dark:hover:bg-immich-dark-gray"
               aria-expanded={!collapsed}
               data-testid="space-album-group-{group.id}"
@@ -264,43 +279,21 @@
             <hr class="dark:border-immich-dark-gray" />
           </div>
           {#if !collapsed}
-            <div class="mt-4 grid grid-auto-fill-56 gap-y-4" transition:slide={{ duration: 300 }}>
-              {#each group.albums as album (album.id)}
-                <SpaceAlbumCard
-                  {spaceId}
-                  {album}
-                  {canManage}
-                  {onUnlink}
-                  {onToggleTimeline}
-                  {onToggleMyTimeline}
-                  onMove={onMoveAlbum}
-                />
-              {/each}
+            <div class="mt-4" transition:slide={{ duration: 300 }}>
+              {@render albumGrid(group.albums)}
             </div>
           {/if}
         {/each}
       {:else}
-        <div class="grid grid-auto-fill-56 gap-y-4">
-          {#each sorted as album (album.id)}
-            <SpaceAlbumCard
-              {spaceId}
-              {album}
-              {canManage}
-              {onUnlink}
-              {onToggleTimeline}
-              {onToggleMyTimeline}
-              onMove={onMoveAlbum}
-            />
-          {/each}
-        </div>
+        {@render albumGrid(sorted)}
       {/if}
     {/if}
   {/if}
 {:else}
   <!-- Reachable on first paint (folders starts empty and is only filled by the caller's
-       on-mount reload, so a space whose albums all live in folders is briefly like this) and,
-       without foldersUnavailable being set, on a load failure — never leave the pane silently
-       blank while that resolves. -->
+     on-mount reload, so a space whose albums all live in folders is briefly like this) and,
+     without foldersUnavailable being set, on a load failure — never leave the pane silently
+     blank while that resolves. -->
   <div class="flex justify-center p-8" data-testid="space-albums-loading">
     <LoadingSpinner />
   </div>

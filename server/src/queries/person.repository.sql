@@ -85,68 +85,51 @@ where
   and "asset_face"."deletedAt" is null
   and "asset_face"."isVisible" is true
 
--- PersonRepository.getBirthdaysForDay
+-- PersonRepository.forBirthdayMemories
 select
-  "personGroupId",
-  "name",
-  "birthDate"
+  "person"."personGroupId",
+  "person"."name",
+  date_part('year', person."birthDate")::int as "birthYear",
+  date_part('month', person."birthDate")::int as "birthMonth",
+  date_part('day', person."birthDate")::int as "birthDay"
 from
   "person"
-where
-  "ownerId" = $1
-  and "isHidden" = $2
-  and "type" = $3
-  and "name" != $4
-  and "birthDate" is not null
-  and extract(
-    month
-    from
-      "birthDate"
-  ) = $5
-  and extract(
-    day
-    from
-      "birthDate"
-  ) = $6
-
--- PersonRepository.getDormantPeople
-select
-  "person"."personGroupId" as "id",
-  "person"."name"
-from
-  "person"
-  inner join "asset_face" on "asset_face"."personGroupId" = "person"."personGroupId"
-  inner join "asset" on "asset"."id" = "asset_face"."assetId"
 where
   "person"."ownerId" = $1
-  and "person"."type" = $2
+  and "person"."isHidden" = $2
   and "person"."name" != $3
-  and "person"."isHidden" = $4
-  and "asset_face"."deletedAt" is null
-  and "asset_face"."isVisible" = $5
-  and "asset"."ownerId" = $6
-  and "asset"."visibility" = $7
-  and "asset"."deletedAt" is null
-  and exists (
-    select
-      "asset_file"."assetId"
-    from
-      "asset_file"
-    where
-      "asset_file"."assetId" = "asset"."id"
-      and "asset_file"."type" = $8
+  and "person"."birthDate" is not null
+  and (
+    date_part('month', person."birthDate")::int = $4
+    and date_part('day', person."birthDate")::int = $5
   )
-group by
+  and date_part('year', person."birthDate")::int < $6
+
+-- PersonRepository.forBirthdayMemories (leap day fallback)
+select
   "person"."personGroupId",
-  "person"."name"
-having
-  max("asset"."localDateTime") < $9
-  and count(distinct ("asset"."id")) >= $10
-order by
-  count(distinct ("asset"."id")) desc,
-  "person"."personGroupId" asc
-limit
-  $11
+  "person"."name",
+  date_part('year', person."birthDate")::int as "birthYear",
+  date_part('month', person."birthDate")::int as "birthMonth",
+  date_part('day', person."birthDate")::int as "birthDay"
+from
+  "person"
+where
+  "person"."ownerId" = $1
+  and "person"."isHidden" = $2
+  and "person"."name" != $3
+  and "person"."birthDate" is not null
+  and (
+    (
+      date_part('month', person."birthDate")::int = $4
+      and date_part('day', person."birthDate")::int = $5
+    )
+    or (
+      date_part('month', person."birthDate")::int = $6
+      and date_part('day', person."birthDate")::int = $7
+    )
+  )
+  and date_part('year', person."birthDate")::int < $8
 
 -- PersonRepository.getFileSamples
 select
@@ -162,7 +145,35 @@ limit
 
 -- PersonRepository.getAllForUser
 select
-  "person".*
+  "person".*,
+  (
+    SELECT
+      "person_identity"."identityId"
+    FROM
+      "person_identity"
+    WHERE
+      "person_identity"."personGroupId" = "person"."personGroupId"
+  ) as "identityId",
+  (
+    CASE
+      WHEN EXISTS (
+        SELECT
+        FROM
+          "person_pet"
+        WHERE
+          "person_pet"."personGroupId" = "person"."personGroupId"
+      ) THEN 'pet'
+      ELSE 'person'
+    END
+  ) as "type",
+  (
+    SELECT
+      "person_pet"."species"
+    FROM
+      "person_pet"
+    WHERE
+      "person_pet"."personGroupId" = "person"."personGroupId"
+  ) as "species"
 from
   "person"
   inner join "asset_face" on "asset_face"."personGroupId" = "person"."personGroupId"
@@ -175,6 +186,38 @@ where
   and "asset_face"."deletedAt" is null
   and "asset_face"."isVisible" is true
   and "person"."isHidden" = $2
+  and (
+    NOT EXISTS (
+      SELECT
+      FROM
+        "person_pet"
+      WHERE
+        "person_pet"."personGroupId" = "person"."personGroupId"
+    )
+    OR EXISTS (
+      SELECT
+      FROM
+        "asset_face" "pet_face"
+      WHERE
+        "pet_face"."personGroupId" = "person"."personGroupId"
+        AND (
+          EXISTS (
+            SELECT
+            FROM
+              "pet_search"
+            WHERE
+              "pet_search"."faceId" = "pet_face"."id"
+          )
+          OR EXISTS (
+            SELECT
+            FROM
+              "face_search"
+            WHERE
+              "face_search"."faceId" = "pet_face"."id"
+          )
+        )
+    )
+  )
 group by
   "person"."ownerId",
   "person"."personGroupId"
@@ -210,7 +253,35 @@ offset
 
 -- PersonRepository.getAllWithoutFaces
 select
-  "person".*
+  "person".*,
+  (
+    SELECT
+      "person_identity"."identityId"
+    FROM
+      "person_identity"
+    WHERE
+      "person_identity"."personGroupId" = "person"."personGroupId"
+  ) as "identityId",
+  (
+    CASE
+      WHEN EXISTS (
+        SELECT
+        FROM
+          "person_pet"
+        WHERE
+          "person_pet"."personGroupId" = "person"."personGroupId"
+      ) THEN 'pet'
+      ELSE 'person'
+    END
+  ) as "type",
+  (
+    SELECT
+      "person_pet"."species"
+    FROM
+      "person_pet"
+    WHERE
+      "person_pet"."personGroupId" = "person"."personGroupId"
+  ) as "species"
 from
   "person"
   left join "asset_face" on "asset_face"."personGroupId" = "person"."personGroupId"
@@ -234,7 +305,35 @@ select
     from
       (
         select
-          "person".*
+          "person".*,
+          (
+            SELECT
+              "person_identity"."identityId"
+            FROM
+              "person_identity"
+            WHERE
+              "person_identity"."personGroupId" = "person"."personGroupId"
+          ) as "identityId",
+          (
+            CASE
+              WHEN EXISTS (
+                SELECT
+                FROM
+                  "person_pet"
+                WHERE
+                  "person_pet"."personGroupId" = "person"."personGroupId"
+              ) THEN 'pet'
+              ELSE 'person'
+            END
+          ) as "type",
+          (
+            SELECT
+              "person_pet"."species"
+            FROM
+              "person_pet"
+            WHERE
+              "person_pet"."personGroupId" = "person"."personGroupId"
+          ) as "species"
         from
           "person"
         where
@@ -266,7 +365,35 @@ select
     from
       (
         select
-          "person".*
+          "person".*,
+          (
+            SELECT
+              "person_identity"."identityId"
+            FROM
+              "person_identity"
+            WHERE
+              "person_identity"."personGroupId" = "person"."personGroupId"
+          ) as "identityId",
+          (
+            CASE
+              WHEN EXISTS (
+                SELECT
+                FROM
+                  "person_pet"
+                WHERE
+                  "person_pet"."personGroupId" = "person"."personGroupId"
+              ) THEN 'pet'
+              ELSE 'person'
+            END
+          ) as "type",
+          (
+            SELECT
+              "person_pet"."species"
+            FROM
+              "person_pet"
+            WHERE
+              "person_pet"."personGroupId" = "person"."personGroupId"
+          ) as "species"
         from
           "person"
         where
@@ -285,132 +412,6 @@ from
 where
   "asset_face"."id" = $3
   and "asset_face"."deletedAt" is null
-
--- PersonRepository.getFaceByIdIncludingTombstoned
-select
-  "asset_face".*,
-  (
-    select
-      to_json(obj)
-    from
-      (
-        select
-          "person".*
-        from
-          "person"
-        where
-          "person"."personGroupId" = "asset_face"."personGroupId"
-      ) as obj
-  ) as "person"
-from
-  "asset_face"
-  inner join "asset" on "asset"."id" = "asset_face"."assetId"
-where
-  "asset_face"."id" = $1
-  and "asset"."visibility" in ($2, $3)
-
--- PersonRepository.getFaceByIdOnLiveAsset
-select
-  "asset_face".*,
-  (
-    select
-      to_json(obj)
-    from
-      (
-        select
-          "person".*
-        from
-          "person"
-        where
-          "person"."personGroupId" = "asset_face"."personGroupId"
-      ) as obj
-  ) as "person"
-from
-  "asset_face"
-  inner join "asset" on "asset"."id" = "asset_face"."assetId"
-where
-  "asset_face"."id" = $1
-  and "asset"."deletedAt" is null
-  and "asset"."visibility" in ($2, $3)
-
--- PersonRepository.getRepresentativeFaces
-select
-  "asset_face".*,
-  "asset"."fileCreatedAt",
-  "person"."faceAssetId" as "representativeFaceId"
-from
-  "person"
-  inner join "asset_face" on (
-    "asset_face"."personGroupId" = "person"."personGroupId"
-    or exists (
-      select
-        "face_identity_face"."assetFaceId"
-      from
-        "face_identity_face"
-      where
-        "face_identity_face"."assetFaceId" = "asset_face"."id"
-        and "face_identity_face"."identityId" = "person"."identityId"
-    )
-  )
-  inner join "asset" on "asset"."id" = "asset_face"."assetId"
-where
-  "person"."personGroupId" = $1
-  and "asset_face"."deletedAt" is null
-  and "asset_face"."isVisible" = $2
-  and "asset"."deletedAt" is null
-  and "asset"."isOffline" = $3
-  and not exists (
-    select
-      "face_identity_face"."assetFaceId"
-    from
-      "face_identity_face"
-    where
-      "face_identity_face"."assetFaceId" = "asset_face"."id"
-      and face_identity_face."identityId" IS DISTINCT FROM person."identityId"
-  )
-  and "asset"."visibility" != $4
-order by
-  "asset"."fileCreatedAt" desc,
-  "asset_face"."id"
-limit
-  $5
-offset
-  $6
-
--- PersonRepository.getRepresentativeFaceForUpdate
-select
-  "asset_face".*
-from
-  "person"
-  inner join "asset_face" on (
-    "asset_face"."personGroupId" = "person"."personGroupId"
-    or exists (
-      select
-        "face_identity_face"."assetFaceId"
-      from
-        "face_identity_face"
-      where
-        "face_identity_face"."assetFaceId" = "asset_face"."id"
-        and "face_identity_face"."identityId" = "person"."identityId"
-    )
-  )
-  inner join "asset" on "asset"."id" = "asset_face"."assetId"
-where
-  "person"."personGroupId" = $1
-  and "asset_face"."id" = $2
-  and "asset_face"."deletedAt" is null
-  and "asset_face"."isVisible" = $3
-  and "asset"."deletedAt" is null
-  and "asset"."isOffline" = $4
-  and not exists (
-    select
-      "face_identity_face"."assetFaceId"
-    from
-      "face_identity_face"
-    where
-      "face_identity_face"."assetFaceId" = "asset_face"."id"
-      and face_identity_face."identityId" IS DISTINCT FROM person."identityId"
-  )
 
 -- PersonRepository.getFaceForFacialRecognitionJob
 select
@@ -448,43 +449,6 @@ select
           "face_search"."faceId" = "asset_face"."id"
       ) as obj
   ) as "faceSearch"
-from
-  "asset_face"
-where
-  "asset_face"."id" = $1
-  and "asset_face"."deletedAt" is null
-
--- PersonRepository.getPetFaceForRecognition
-select
-  "asset_face"."id",
-  "asset_face"."assetId",
-  "asset_face"."personGroupId",
-  (
-    select
-      to_json(obj)
-    from
-      (
-        select
-          "asset"."ownerId"
-        from
-          "asset"
-        where
-          "asset"."id" = "asset_face"."assetId"
-      ) as obj
-  ) as "asset",
-  (
-    select
-      to_json(obj)
-    from
-      (
-        select
-          "pet_search".*
-        from
-          "pet_search"
-        where
-          "pet_search"."faceId" = "asset_face"."id"
-      ) as obj
-  ) as "petSearch"
 from
   "asset_face"
 where
@@ -532,7 +496,35 @@ where
 
 -- PersonRepository.getByGroupId
 select
-  "person".*
+  "person".*,
+  (
+    SELECT
+      "person_identity"."identityId"
+    FROM
+      "person_identity"
+    WHERE
+      "person_identity"."personGroupId" = "person"."personGroupId"
+  ) as "identityId",
+  (
+    CASE
+      WHEN EXISTS (
+        SELECT
+        FROM
+          "person_pet"
+        WHERE
+          "person_pet"."personGroupId" = "person"."personGroupId"
+      ) THEN 'pet'
+      ELSE 'person'
+    END
+  ) as "type",
+  (
+    SELECT
+      "person_pet"."species"
+    FROM
+      "person_pet"
+    WHERE
+      "person_pet"."personGroupId" = "person"."personGroupId"
+  ) as "species"
 from
   "person"
 where
@@ -541,7 +533,35 @@ where
 
 -- PersonRepository.getByGroupIdOnly
 select
-  "person".*
+  "person".*,
+  (
+    SELECT
+      "person_identity"."identityId"
+    FROM
+      "person_identity"
+    WHERE
+      "person_identity"."personGroupId" = "person"."personGroupId"
+  ) as "identityId",
+  (
+    CASE
+      WHEN EXISTS (
+        SELECT
+        FROM
+          "person_pet"
+        WHERE
+          "person_pet"."personGroupId" = "person"."personGroupId"
+      ) THEN 'pet'
+      ELSE 'person'
+    END
+  ) as "type",
+  (
+    SELECT
+      "person_pet"."species"
+    FROM
+      "person_pet"
+    WHERE
+      "person_pet"."personGroupId" = "person"."personGroupId"
+  ) as "species"
 from
   "person"
 where
@@ -554,7 +574,35 @@ with
       set_config('pg_trgm.word_similarity_threshold', '0.5', true) as "thresh"
   )
 select
-  "person".*
+  "person".*,
+  (
+    SELECT
+      "person_identity"."identityId"
+    FROM
+      "person_identity"
+    WHERE
+      "person_identity"."personGroupId" = "person"."personGroupId"
+  ) as "identityId",
+  (
+    CASE
+      WHEN EXISTS (
+        SELECT
+        FROM
+          "person_pet"
+        WHERE
+          "person_pet"."personGroupId" = "person"."personGroupId"
+      ) THEN 'pet'
+      ELSE 'person'
+    END
+  ) as "type",
+  (
+    SELECT
+      "person_pet"."species"
+    FROM
+      "person_pet"
+    WHERE
+      "person_pet"."personGroupId" = "person"."personGroupId"
+  ) as "species"
 from
   "similarity_threshold",
   "person"
@@ -628,7 +676,7 @@ where
         inner join "album" on "album"."id" = "album_asset"."albumId"
         and "album"."deletedAt" is null
         inner join "album_user" on "album_user"."albumId" = "album"."id"
-        and "album_user"."userId" = $3::uuid
+        and "album_user"."userId" = $3
       where
         "album_asset"."assetId" = "asset"."id"
     )
@@ -658,7 +706,7 @@ where
         inner join "album" on "album"."id" = "album_asset"."albumId"
         and "album"."deletedAt" is null
         inner join "album_user" on "album_user"."albumId" = "album"."id"
-        and "album_user"."userId" = $3::uuid
+        and "album_user"."userId" = $3
       where
         "album_asset"."assetId" = "asset"."id"
     )
@@ -689,8 +737,8 @@ where
         from
           "shared_space_album"
           inner join "album_asset" on "album_asset"."albumId" = "shared_space_album"."albumId"
-          inner join "album" on "album"."id" = "shared_space_album"."albumId"
-          and "album"."deletedAt" is null
+          inner join "album" as "linked_album" on "linked_album"."id" = "shared_space_album"."albumId"
+          and "linked_album"."deletedAt" is null
           inner join "shared_space_member" on "shared_space_member"."spaceId" = "shared_space_album"."spaceId"
         where
           "shared_space_member"."userId" = $6::uuid
@@ -703,8 +751,8 @@ where
           "shared_space_album"
           inner join "album_space_asset" on "album_space_asset"."albumId" = "shared_space_album"."albumId"
           and "album_space_asset"."spaceId" = "shared_space_album"."spaceId"
-          inner join "album" on "album"."id" = "shared_space_album"."albumId"
-          and "album"."deletedAt" is null
+          inner join "album" as "linked_album" on "linked_album"."id" = "shared_space_album"."albumId"
+          and "linked_album"."deletedAt" is null
           inner join "shared_space_member" on "shared_space_member"."spaceId" = "shared_space_album"."spaceId"
         where
           "shared_space_member"."userId" = $7::uuid
@@ -734,32 +782,68 @@ WITH
       AND "asset_face"."isVisible" = true
       AND (
         $3 = ''
-        OR "person"."type" = $4
+        OR (
+          CASE
+            WHEN EXISTS (
+              SELECT
+              FROM
+                "person_pet"
+              WHERE
+                "person_pet"."personGroupId" = "person"."personGroupId"
+            ) THEN 'pet'
+            ELSE 'person'
+          END
+        ) = $4
       )
       AND (
-        $5 <> 'pet'
+        NOT EXISTS (
+          SELECT
+          FROM
+            "person_pet"
+          WHERE
+            "person_pet"."personGroupId" = "person"."personGroupId"
+        )
         OR EXISTS (
           SELECT
-            1
           FROM
             "asset_face" "pet_face"
-            INNER JOIN "pet_search" ON "pet_search"."faceId" = "pet_face"."id"
           WHERE
             "pet_face"."personGroupId" = "person"."personGroupId"
+            AND (
+              EXISTS (
+                SELECT
+                FROM
+                  "pet_search"
+                WHERE
+                  "pet_search"."faceId" = "pet_face"."id"
+              )
+              OR EXISTS (
+                SELECT
+                FROM
+                  "face_search"
+                WHERE
+                  "face_search"."faceId" = "pet_face"."id"
+              )
+            )
         )
       )
       -- see getPeopleOverviewStatistics: group by the composite PRIMARY KEY, not the unique index
     GROUP BY
       "person"."ownerId",
-      "person"."personGroupId",
-      "person"."type"
+      "person"."personGroupId"
     HAVING
       NULLIF(BTRIM("person"."name"), '') IS NOT NULL
       OR (
-        $6 = 'pet'
-        AND "person"."type" = 'pet'
+        $5 = 'pet'
+        AND EXISTS (
+          SELECT
+          FROM
+            "person_pet"
+          WHERE
+            "person_pet"."personGroupId" = "person"."personGroupId"
+        )
       )
-      OR COUNT("asset_face"."assetId") >= $7
+      OR COUNT("asset_face"."assetId") >= $6
   )
 SELECT
   COUNT(*)::int AS "total",
@@ -769,122 +853,6 @@ SELECT
   )::int AS "hidden"
 FROM
   "eligible_people"
-
--- PersonRepository.getPeopleOverviewStatistics
-WITH
-  "eligible_faces" AS (
-    SELECT
-      "asset_face"."id" AS "assetFaceId",
-      "asset_face"."personGroupId"
-    FROM
-      "asset_face"
-      INNER JOIN "asset" ON "asset"."id" = "asset_face"."assetId"
-    WHERE
-      "asset"."ownerId" = $1
-      AND "asset"."deletedAt" IS NULL
-      AND "asset"."isOffline" = false
-      AND "asset"."visibility" IN ($2, $3)
-      AND "asset_face"."deletedAt" IS NULL
-      AND "asset_face"."isVisible" = true
-  ),
-  "eligible_people" AS (
-    SELECT
-      "person"."personGroupId",
-      "person"."isHidden"
-    FROM
-      "person"
-      INNER JOIN "eligible_faces" ON "eligible_faces"."personGroupId" = "person"."personGroupId"
-    WHERE
-      "person"."ownerId" = $4
-      -- group by the table's PRIMARY KEY, which #30739 made composite. Postgres only infers
-      -- functional dependency from a primary key, never from a unique index, so grouping by
-      -- "personGroupId" alone leaves "isHidden" and "name" ungrouped and the query fails to plan.
-    GROUP BY
-      "person"."ownerId",
-      "person"."personGroupId"
-    HAVING
-      NULLIF(BTRIM("person"."name"), '') IS NOT NULL
-      OR COUNT(DISTINCT "eligible_faces"."assetFaceId") >= $5
-  )
-SELECT
-  COUNT(DISTINCT "eligible_people"."personGroupId")::int AS "total",
-  COUNT(DISTINCT "eligible_people"."personGroupId") FILTER (
-    WHERE
-      "eligible_people"."isHidden" = true
-  )::int AS "hidden",
-  COUNT(DISTINCT "eligible_faces"."assetFaceId")::int AS "detectedFaceCount"
-FROM
-  "eligible_faces"
-  LEFT JOIN "eligible_people" ON "eligible_people"."personGroupId" = "eligible_faces"."personGroupId"
-
--- PersonRepository.getPeopleFaceStatistics
-WITH
-  "eligible_faces" AS (
-    SELECT
-      "asset_face"."id" AS "assetFaceId",
-      "asset_face"."personGroupId"
-    FROM
-      "asset_face"
-      INNER JOIN "asset" ON "asset"."id" = "asset_face"."assetId"
-    WHERE
-      "asset"."ownerId" = $1
-      AND "asset"."deletedAt" IS NULL
-      AND "asset"."isOffline" = false
-      AND "asset"."visibility" IN ($2, $3)
-      AND "asset_face"."deletedAt" IS NULL
-      AND "asset_face"."isVisible" = true
-  ),
-  "person_face_counts" AS (
-    SELECT
-      "personGroupId" AS "personId",
-      COUNT(DISTINCT "assetFaceId")::int AS "assetCount"
-    FROM
-      "eligible_faces"
-    WHERE
-      "personGroupId" IS NOT NULL
-    GROUP BY
-      "personGroupId"
-  ),
-  "detected_faces" AS (
-    SELECT
-      "eligible_faces"."assetFaceId",
-      "person"."personGroupId" AS "personId",
-      NULLIF(BTRIM("person"."name"), '') IS NOT NULL AS "isNamed",
-      CASE
-        WHEN "person"."personGroupId" IS NOT NULL
-        AND (
-          NULLIF(BTRIM("person"."name"), '') IS NOT NULL
-          OR "person_face_counts"."assetCount" >= $4
-        ) THEN "person"."isHidden"
-        ELSE NULL
-      END AS "isHidden"
-    FROM
-      "eligible_faces"
-      LEFT JOIN "person" ON "person"."personGroupId" = "eligible_faces"."personGroupId"
-      AND "person"."ownerId" = $5
-      LEFT JOIN "person_face_counts" ON "person_face_counts"."personId" = "person"."personGroupId"
-  )
-SELECT
-  COUNT(DISTINCT "assetFaceId")::int AS "detectedFaceCount",
-  COUNT(DISTINCT "assetFaceId") FILTER (
-    WHERE
-      "isHidden" = false
-  )::int AS "assignedVisibleFaceCount",
-  COUNT(DISTINCT "personId") FILTER (
-    WHERE
-      "isHidden" = false
-      AND "isNamed" = true
-  )::int AS "namedVisiblePersonCount",
-  COUNT(DISTINCT "assetFaceId") FILTER (
-    WHERE
-      "isHidden" = true
-  )::int AS "assignedHiddenFaceCount",
-  COUNT(DISTINCT "assetFaceId") FILTER (
-    WHERE
-      "isHidden" IS NULL
-  )::int AS "unassignedFaceCount"
-FROM
-  "detected_faces"
 
 -- PersonRepository.createGroup
 insert into
@@ -1059,13 +1027,22 @@ from
       1
   ) as "dummy"
 
--- PersonRepository.refreshPetFaces
-begin
-insert into
-  "asset_face" ("id", "assetId")
-values
-  ($1, $2)
-rollback
+-- PersonRepository.updateForWritableOwners
+update "person"
+set
+  "name" = $1
+where
+  "person"."personGroupId" = $2
+  and "person"."ownerId" in (
+    select
+      "person_user"."sharedById"
+    from
+      "person_user"
+    where
+      "person_user"."personGroupId" = $3
+      and "person_user"."sharedWithId" = $4
+      and "person_user"."role" in ($5, $6)
+  )
 
 -- PersonRepository.getFacesByIds
 select
@@ -1076,7 +1053,35 @@ select
     from
       (
         select
-          "person".*
+          "person".*,
+          (
+            SELECT
+              "person_identity"."identityId"
+            FROM
+              "person_identity"
+            WHERE
+              "person_identity"."personGroupId" = "person"."personGroupId"
+          ) as "identityId",
+          (
+            CASE
+              WHEN EXISTS (
+                SELECT
+                FROM
+                  "person_pet"
+                WHERE
+                  "person_pet"."personGroupId" = "person"."personGroupId"
+              ) THEN 'pet'
+              ELSE 'person'
+            END
+          ) as "type",
+          (
+            SELECT
+              "person_pet"."species"
+            FROM
+              "person_pet"
+            WHERE
+              "person_pet"."personGroupId" = "person"."personGroupId"
+          ) as "species"
         from
           "person"
         where
@@ -1096,21 +1101,6 @@ where
   "asset_face"."assetId" in ($3)
   and "asset_face"."personGroupId" in ($4)
   and "asset_face"."deletedAt" is null
-
--- PersonRepository.getAssignedFaceEmbeddings
-select
-  "face_search"."embedding"
-from
-  "asset_face"
-  inner join "face_search" on "face_search"."faceId" = "asset_face"."id"
-where
-  "asset_face"."personGroupId" = $1
-  and "asset_face"."deletedAt" is null
-  and "asset_face"."isVisible" is true
-order by
-  "asset_face"."id" asc
-limit
-  $2
 
 -- PersonRepository.getRandomFace
 select
@@ -1154,7 +1144,35 @@ where
 
 -- PersonRepository.getForMergePerson
 select
-  "person".*
+  "person".*,
+  (
+    SELECT
+      "person_identity"."identityId"
+    FROM
+      "person_identity"
+    WHERE
+      "person_identity"."personGroupId" = "person"."personGroupId"
+  ) as "identityId",
+  (
+    CASE
+      WHEN EXISTS (
+        SELECT
+        FROM
+          "person_pet"
+        WHERE
+          "person_pet"."personGroupId" = "person"."personGroupId"
+      ) THEN 'pet'
+      ELSE 'person'
+    END
+  ) as "type",
+  (
+    SELECT
+      "person_pet"."species"
+    FROM
+      "person_pet"
+    WHERE
+      "person_pet"."personGroupId" = "person"."personGroupId"
+  ) as "species"
 from
   "person"
 where

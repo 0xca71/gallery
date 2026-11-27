@@ -1,3 +1,9 @@
+import TestWrapper from '#lib/components/TestWrapper.svelte';
+import { clearPeopleFaceStatisticsInfoCache } from '#lib/components/people/people-face-statistics-info-cache.ts';
+import { sdkMock } from '#lib/gallery/__mocks__/sdk.mock.ts';
+import { PeopleSortBy, peopleViewSettings } from '#lib/gallery/stores/preferences.store.ts';
+import { authManager } from '#lib/managers/auth-manager.svelte.ts';
+import { factory } from '#test/unit/factories.ts';
 import {
   RepresentativeFaceSource,
   SharedSpaceRole,
@@ -6,19 +12,11 @@ import {
   type SharedSpacePersonResponseDto,
   type SharedSpaceResponseDto,
 } from '@immich/sdk';
-import '@testing-library/jest-dom';
-import { fireEvent, render, screen, waitFor } from '@testing-library/svelte';
-import userEvent from '@testing-library/user-event';
+import { modalManager, toastManager } from '@immich/ui';
 import type { Component } from 'svelte';
-import { getAnimateMock } from '$lib/__mocks__/animate.mock';
-import { getIntersectionObserverMock } from '$lib/__mocks__/intersection-observer.mock';
-import { sdkMock } from '$lib/__mocks__/sdk.mock';
-import TestWrapper from '$lib/components/TestWrapper.svelte';
-import { clearPeopleFaceStatisticsInfoCache } from '$lib/components/people/people-face-statistics-info-cache';
-import { authManager } from '$lib/managers/auth-manager.svelte';
-import { PeopleSortBy, peopleViewSettings } from '$lib/stores/preferences.store';
-import { preferencesFactory } from '@test-data/factories/preferences-factory';
-import { userAdminFactory } from '@test-data/factories/user-factory';
+import { expect } from 'vitest';
+import { render } from 'vitest-browser-svelte';
+import { page, userEvent } from 'vitest/browser';
 import SpacePeoplePage from './+page.svelte';
 
 const { gotoMock, pageStore, featureFlagsMock } = vi.hoisted(() => {
@@ -42,9 +40,12 @@ const { gotoMock, pageStore, featureFlagsMock } = vi.hoisted(() => {
   };
 });
 
-vi.mock('$app/navigation', () => ({ goto: gotoMock }));
+vi.mock('$app/navigation', async () => ({
+  ...(await import('#test/unit/mocks/app-navigation.ts')),
+  goto: gotoMock,
+}));
 vi.mock('$app/stores', () => ({ page: pageStore }));
-vi.mock('$lib/managers/feature-flags-manager.svelte', () => ({
+vi.mock('#lib/managers/feature-flags-manager.svelte.js', () => ({
   featureFlagsManager: featureFlagsMock,
 }));
 
@@ -53,7 +54,7 @@ vi.mock('@immich/ui', async (importOriginal) => {
   return {
     ...original,
     modalManager: { show: vi.fn(), showDialog: vi.fn() },
-    toastManager: { primary: vi.fn(), success: vi.fn(), warning: vi.fn() },
+    toastManager: { primary: vi.fn(), success: vi.fn(), warning: vi.fn(), danger: vi.fn() },
   };
 });
 
@@ -77,6 +78,7 @@ function makeSpacePerson(overrides: Partial<SharedSpacePersonResponseDto> = {}):
   };
 }
 
+// eslint-disable-next-line unicorn/no-unnecessary-parameters
 function renderPage(people: SharedSpacePersonResponseDto[], peopleStatistics?: SharedSpacePeopleStatisticsResponseDto) {
   peopleStatistics ??= {
     total: people.length,
@@ -124,6 +126,10 @@ function renderPage(people: SharedSpacePersonResponseDto[], peopleStatistics?: S
       members,
       people,
       peopleStatistics,
+      // v3.2.0 added this to the loader's payload, and `canManageVisibility` gates the
+      // show-and-hide affordance on it. Computed the way `+page.ts` computes it, so a fixture with
+      // people keeps offering the visibility manager these tests drive.
+      hasSpacePeople: people.length > 0 || (peopleStatistics?.total ?? 0) > 0,
       meta: { title: 'Test Space - People' },
     },
   };
@@ -136,34 +142,69 @@ function renderPage(people: SharedSpacePersonResponseDto[], peopleStatistics?: S
   });
 }
 
+/** Mirrors the page's own PAGE_SIZE — a short first page never offers a second one. */
+const PAGE_SIZE = 100;
+
+/**
+Renders the page with a full first page loaded (so the grid offers a next page) and hands back a
+trigger that reports the infinite-scroll sentinel as intersecting, so pagination can be driven
+deterministically. Mirrors the global people page's helper of the same name.
+*/
+async function renderPaginatedPage(people: SharedSpacePersonResponseDto[]) {
+  let intersectionCallback: IntersectionObserverCallback | undefined;
+  let observedSentinel: Element | undefined;
+  vi.stubGlobal(
+    'IntersectionObserver',
+    vi.fn(function (callback: IntersectionObserverCallback) {
+      intersectionCallback = callback;
+      return {
+        observe: (element: Element) => (observedSentinel = element),
+        disconnect: vi.fn(),
+        unobserve: vi.fn(),
+        takeRecords: vi.fn(),
+      };
+    }),
+  );
+
+  const rendered = await renderPage(people);
+
+  const intersect = async () => {
+    await vi.waitFor(() => expect(observedSentinel).toBeDefined());
+    intersectionCallback?.(
+      [{ target: observedSentinel, isIntersecting: true } as IntersectionObserverEntry],
+      {} as IntersectionObserver,
+    );
+  };
+
+  return { ...rendered, intersect };
+}
+
 describe('Space people page', () => {
   beforeEach(() => {
     vi.resetAllMocks();
     peopleViewSettings.set({ sortBy: PeopleSortBy.PhotoCount });
     clearPeopleFaceStatisticsInfoCache();
-    authManager.setUser(userAdminFactory.build({ id: 'current-user-id' }));
-    authManager.setPreferences(preferencesFactory.build());
-    Element.prototype.animate = getAnimateMock();
-    vi.stubGlobal('IntersectionObserver', getIntersectionObserverMock());
+    authManager.setUser(factory.user({ id: 'current-user-id' }));
+    authManager.setPreferences(factory.preferences());
     pageStore.setUrl('http://localhost/spaces/space-1/people');
     gotoMock.mockResolvedValue(undefined);
     featureFlagsMock.value.peopleStatistics = true;
   });
 
-  it('renders people by photo count by default, named before unnamed', () => {
-    renderPage([
+  it('renders people by photo count by default, named before unnamed', async () => {
+    await renderPage([
       makeSpacePerson({ id: 'space-person-unnamed-low', name: '', assetCount: 1 }),
       makeSpacePerson({ id: 'space-person-zoe', name: 'Zoe', assetCount: 99 }),
       makeSpacePerson({ id: 'space-person-unnamed-high', name: '', assetCount: 20 }),
       makeSpacePerson({ id: 'space-person-alice', name: 'Alice', assetCount: 1 }),
     ]);
 
-    expect(screen.getAllByPlaceholderText('add_a_name').map((input) => (input as HTMLInputElement).value)).toEqual([
-      'Zoe',
-      'Alice',
-      '',
-      '',
-    ]);
+    expect(
+      page
+        .getByPlaceholder('add_a_name')
+        .elements()
+        .map((input) => (input as HTMLInputElement).value),
+    ).toEqual(['Zoe', 'Alice', '', '']);
     expect(
       [...document.querySelectorAll<HTMLAnchorElement>('a[href^="/spaces/space-1/people/"]')].map((link) => {
         const url = new URL(link.href);
@@ -177,20 +218,22 @@ describe('Space people page', () => {
     ]);
   });
 
-  it('orders people alphabetically when the people sort preference is Name', () => {
+  it('orders people alphabetically when the people sort preference is Name', async () => {
     peopleViewSettings.set({ sortBy: PeopleSortBy.Name });
-    renderPage([
+    await renderPage([
       makeSpacePerson({ id: 'space-person-zoe', name: 'Zoe', assetCount: 99 }),
       makeSpacePerson({ id: 'space-person-alice', name: 'Alice', assetCount: 1 }),
     ]);
 
-    expect(screen.getAllByPlaceholderText('add_a_name').map((input) => (input as HTMLInputElement).value)).toEqual([
-      'Alice',
-      'Zoe',
-    ]);
+    expect(
+      page
+        .getByPlaceholder('add_a_name')
+        .elements()
+        .map((input) => (input as HTMLInputElement).value),
+    ).toEqual(['Alice', 'Zoe']);
   });
 
-  it('loads person thumbnails without the deferred queue used by visibility management', () => {
+  it('loads person thumbnails without the deferred queue used by visibility management', async () => {
     class NeverIntersectingObserver {
       observe = vi.fn();
       disconnect = vi.fn();
@@ -198,9 +241,9 @@ describe('Space people page', () => {
     }
     vi.stubGlobal('IntersectionObserver', NeverIntersectingObserver);
 
-    renderPage([makeSpacePerson({ id: 'space-person-alice', name: 'Alice' })]);
+    await renderPage([makeSpacePerson({ id: 'space-person-alice', name: 'Alice' })]);
 
-    expect(screen.getByTitle('Alice').getAttribute('src')).toContain(
+    expect(page.getByTitle('Alice').element().getAttribute('src')).toContain(
       '/shared-spaces/space-1/people/space-person-alice/thumbnail?updatedAt=2026-01-02T00%3A00%3A00.000Z',
     );
   });
@@ -212,29 +255,248 @@ describe('Space people page', () => {
     sdkMock.updateSpacePerson.mockResolvedValue(renamed);
     sdkMock.getSpacePeople.mockResolvedValue([renamed, bob]);
 
-    renderPage([bob, unnamed]);
-
-    const user = userEvent.setup();
-    const inputs = screen.getAllByPlaceholderText('add_a_name');
+    await renderPage([bob, unnamed]);
+    const inputs = page.getByPlaceholder('add_a_name').elements();
     expect(inputs).toHaveLength(2);
     expect(inputs[0]).toHaveValue('Bob');
     expect(inputs[1]).toHaveValue('');
 
-    await user.click(inputs[1]);
-    await user.type(inputs[1], 'Aaron');
-    await fireEvent.focusOut(inputs[1]);
+    await userEvent.click(inputs[1]);
+    await userEvent.type(inputs[1], 'Aaron');
+    inputs[1].dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
 
-    await waitFor(() => {
+    await vi.waitFor(() => {
       expect(sdkMock.updateSpacePerson).toHaveBeenCalledWith({
         id: 'space-1',
         personId: 'space-person-unnamed',
         sharedSpacePersonUpdateDto: { name: 'Aaron' },
       });
     });
-    expect(sdkMock.getSpacePeople).not.toHaveBeenCalled();
+    // Name lookups (suggestions, the same-name check) are expected; a full-list refresh is not.
+    for (const [query] of sdkMock.getSpacePeople.mock.calls) {
+      expect(query).toHaveProperty('name');
+    }
 
-    const updatedInputs = screen.getAllByPlaceholderText('add_a_name');
+    const updatedInputs = page.getByPlaceholder('add_a_name').elements();
     expect(updatedInputs[0]).toHaveValue('Aaron');
     expect(updatedInputs[1]).toHaveValue('Bob');
+  });
+
+  // The space twin of the global people page's "server repeats a row across the page boundary"
+  // case. OFFSET pagination is not a snapshot: `getSpacePeople` orders by hidden state, name and
+  // asset count, and `recountPersons` runs on every face attach/detach — so an editor naming a
+  // face in this very space between the two requests shifts the window and re-emits a row page 1
+  // already returned. A repeated key throws `each_key_duplicate`, and the grid then stops
+  // rendering for the rest of the session while scrolling keeps firing requests.
+  it('renders each person once when the space read repeats a row across the page boundary', async () => {
+    const firstPage = Array.from({ length: PAGE_SIZE }, (_, index) =>
+      makeSpacePerson({
+        id: `space-person-${index}`,
+        name: `Person ${String(index).padStart(3, '0')}`,
+        assetCount: PAGE_SIZE - index,
+      }),
+    );
+    sdkMock.getSpacePeople.mockResolvedValue([
+      firstPage.at(-1)!,
+      makeSpacePerson({ id: 'space-person-new', name: 'Newcomer', assetCount: 1 }),
+    ]);
+
+    const { intersect } = await renderPaginatedPage(firstPage);
+    await intersect();
+
+    await expect
+      .poll(() =>
+        page
+          .getByPlaceholder('add_a_name')
+          .elements()
+          .map((input) => (input as HTMLInputElement).value),
+      )
+      .toContain('Newcomer');
+    expect(page.getByPlaceholder('add_a_name').elements()).toHaveLength(PAGE_SIZE + 1);
+  });
+
+  // Merging by id and paging by `people.length` cannot both be right: the merge drops the rows the
+  // server repeated, so the kept-row count falls behind the number of rows the server actually
+  // served, while OFFSET counts what it served. Paging on the kept count re-requests every dropped
+  // row on the following page -- and a page that is entirely duplicates does not advance the count
+  // at all, so `hasMore` stays true and the sentinel re-fires the identical request forever.
+  it('advances the page offset by the rows the server returned, not by the rows it kept', async () => {
+    const firstPage = Array.from({ length: PAGE_SIZE }, (_, index) =>
+      makeSpacePerson({ id: `space-person-${index}`, name: `Person ${String(index).padStart(3, '0')}` }),
+    );
+    const secondPage = [
+      firstPage.at(-1)!,
+      ...Array.from({ length: PAGE_SIZE - 1 }, (_, index) =>
+        makeSpacePerson({ id: `space-person-second-${index}`, name: `Second ${String(index).padStart(3, '0')}` }),
+      ),
+    ];
+    sdkMock.getSpacePeople.mockResolvedValueOnce(secondPage).mockResolvedValue([]);
+
+    const { intersect } = await renderPaginatedPage(firstPage);
+    await intersect();
+
+    await vi.waitFor(() =>
+      expect(sdkMock.getSpacePeople).toHaveBeenCalledWith(expect.objectContaining({ offset: PAGE_SIZE })),
+    );
+
+    await intersect();
+
+    await vi.waitFor(() => expect(sdkMock.getSpacePeople).toHaveBeenCalledTimes(2));
+    expect(sdkMock.getSpacePeople).toHaveBeenLastCalledWith(expect.objectContaining({ offset: 2 * PAGE_SIZE }));
+  });
+
+  // The visibility manager pages the same read into a second keyed grid of its own, so it carries
+  // the same exposure as the page behind it — and it is the more likely of the two to be open while
+  // someone else edits, since hiding people is what a space editor does after a naming session.
+  it('renders each person once in the visibility manager when the read repeats a row', async () => {
+    const firstPage = Array.from({ length: PAGE_SIZE }, (_, index) =>
+      makeSpacePerson({
+        id: `space-person-${index}`,
+        name: `Person ${String(index).padStart(3, '0')}`,
+        assetCount: PAGE_SIZE - index,
+      }),
+    );
+    // Keyed off the request rather than call order: the page's own grid pages independently, so
+    // which of the two lists asks first is not something this test should depend on.
+    sdkMock.getSpacePeople.mockImplementation(({ withHidden, offset }) => {
+      if (!withHidden) {
+        return Promise.resolve([]);
+      }
+      return Promise.resolve(
+        offset ? [firstPage.at(-1)!, makeSpacePerson({ id: 'space-person-new', name: 'Newcomer' })] : firstPage,
+      );
+    });
+
+    const { intersect } = await renderPaginatedPage(firstPage);
+    await userEvent.click(page.getByText('show_and_hide_people'));
+    await expect.element(page.getByTestId('visibility-person-space-person-0')).toBeInTheDocument();
+
+    await intersect();
+
+    await expect.element(page.getByTestId('visibility-person-space-person-new')).toBeInTheDocument();
+    expect(page.getByTestId(/^visibility-person-/).elements()).toHaveLength(PAGE_SIZE + 1);
+  });
+
+  // #1099: the tile's "Add a name" field had no suggestions, so an existing identity was only
+  // reachable by typing its exact name.
+  it('suggests existing space people while typing a name and merges into the one picked', async () => {
+    const norgy = makeSpacePerson({ id: 'space-person-norgy', name: 'Norgy' });
+    const unnamed = makeSpacePerson({ id: 'space-person-unnamed', name: '' });
+    sdkMock.getSpacePeople.mockResolvedValue([norgy]);
+    sdkMock.mergeSpacePeople.mockResolvedValue(undefined as never);
+    vi.mocked(modalManager.showDialog as (...args: unknown[]) => Promise<boolean>).mockResolvedValue(true);
+    await renderPage([norgy, unnamed]);
+    const input = page.getByPlaceholder('add_a_name').elements()[1];
+    await userEvent.click(input);
+    await userEvent.type(input, 'Norg');
+
+    await expect.element(page.getByRole('option', { name: 'Norgy' })).toBeInTheDocument();
+    const option = page.getByRole('option', { name: 'Norgy' }).element();
+    expect(option.querySelector('img')).toHaveAttribute(
+      'src',
+      expect.stringContaining('/shared-spaces/space-1/people/space-person-norgy/thumbnail'),
+    );
+    expect(sdkMock.getSpacePeople).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'space-1', name: 'Norg', named: true }),
+    );
+
+    await userEvent.click(option);
+
+    await vi.waitFor(() =>
+      expect(sdkMock.mergeSpacePeople).toHaveBeenCalledWith({
+        id: 'space-1',
+        personId: 'space-person-norgy',
+        sharedSpacePersonMergeDto: { ids: ['space-person-unnamed'] },
+      }),
+    );
+    expect(sdkMock.updateSpacePerson).not.toHaveBeenCalled();
+  });
+
+  it('picks a suggestion with the keyboard', async () => {
+    const norgy = makeSpacePerson({ id: 'space-person-norgy', name: 'Norgy' });
+    const unnamed = makeSpacePerson({ id: 'space-person-unnamed', name: '' });
+    sdkMock.getSpacePeople.mockResolvedValue([norgy]);
+    sdkMock.mergeSpacePeople.mockResolvedValue(undefined as never);
+    vi.mocked(modalManager.showDialog as (...args: unknown[]) => Promise<boolean>).mockResolvedValue(true);
+    await renderPage([norgy, unnamed]);
+    const input = page.getByPlaceholder('add_a_name').elements()[1];
+    await userEvent.click(input);
+    await userEvent.type(input, 'Norg');
+    await expect.element(page.getByRole('option', { name: 'Norgy' })).toBeInTheDocument();
+    await userEvent.keyboard('{ArrowDown}{Enter}');
+
+    await vi.waitFor(() =>
+      expect(sdkMock.mergeSpacePeople).toHaveBeenCalledWith(
+        expect.objectContaining({ personId: 'space-person-norgy' }),
+      ),
+    );
+    expect(sdkMock.updateSpacePerson).not.toHaveBeenCalled();
+  });
+
+  it('leaves the name unchanged when the merge for a picked suggestion is declined', async () => {
+    const norgy = makeSpacePerson({ id: 'space-person-norgy', name: 'Norgy' });
+    const unnamed = makeSpacePerson({ id: 'space-person-unnamed', name: '' });
+    sdkMock.getSpacePeople.mockResolvedValue([norgy]);
+    vi.mocked(modalManager.showDialog as (...args: unknown[]) => Promise<boolean>).mockResolvedValue(false);
+    await renderPage([norgy, unnamed]);
+    const input = page.getByPlaceholder('add_a_name').elements()[1];
+    await userEvent.click(input);
+    await userEvent.type(input, 'Norg');
+    await userEvent.click(page.getByRole('option', { name: 'Norgy' }));
+
+    await vi.waitFor(() => expect(modalManager.showDialog).toHaveBeenCalled());
+    expect(sdkMock.mergeSpacePeople).not.toHaveBeenCalled();
+    expect(sdkMock.updateSpacePerson).not.toHaveBeenCalled();
+    expect(page.getByPlaceholder('add_a_name').elements()[1]).toHaveValue('');
+  });
+
+  // #1100: typing an existing name exactly, without picking it, renamed straight through.
+  it('offers to merge when the typed name already belongs to another space person', async () => {
+    const norgy = makeSpacePerson({ id: 'space-person-norgy', name: 'Norgy' });
+    const unnamed = makeSpacePerson({ id: 'space-person-unnamed', name: '' });
+    sdkMock.getSpacePeople.mockResolvedValue([norgy]);
+    sdkMock.mergeSpacePeople.mockResolvedValue(undefined as never);
+    vi.mocked(modalManager.showDialog as (...args: unknown[]) => Promise<boolean>).mockResolvedValue(true);
+    await renderPage([norgy, unnamed]);
+    const input = page.getByPlaceholder('add_a_name').elements()[1];
+    await userEvent.click(input);
+    await userEvent.type(input, 'NORGY');
+    input.dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+
+    await vi.waitFor(() =>
+      expect(sdkMock.mergeSpacePeople).toHaveBeenCalledWith({
+        id: 'space-1',
+        personId: 'space-person-norgy',
+        sharedSpacePersonMergeDto: { ids: ['space-person-unnamed'] },
+      }),
+    );
+    expect(sdkMock.updateSpacePerson).not.toHaveBeenCalled();
+  });
+
+  // With cross-owner merges off (the default), an editor's merge of the admin's people is refused.
+  // The user asked for a merge, so falling back to the rename would create the duplicate anyway.
+  it('does not rename when the merge for a typed existing name is blocked', async () => {
+    vi.mocked(sdkMock.isHttpError).mockImplementation((error) => !!(error as { __http?: boolean })?.__http);
+    const norgy = makeSpacePerson({ id: 'space-person-norgy', name: 'Norgy' });
+    const unnamed = makeSpacePerson({ id: 'space-person-unnamed', name: '' });
+    sdkMock.getSpacePeople.mockResolvedValue([norgy]);
+    sdkMock.mergeSpacePeople.mockRejectedValueOnce({
+      __http: true,
+      status: 403,
+      data: { code: 'cross_owner_merge_blocked', message: 'An administrator can enable it.' },
+      message: 'raw',
+    });
+    vi.mocked(modalManager.showDialog as (...args: unknown[]) => Promise<boolean>).mockResolvedValue(true);
+    await renderPage([norgy, unnamed]);
+    const input = page.getByPlaceholder('add_a_name').elements()[1];
+    await userEvent.click(input);
+    await userEvent.type(input, 'norgy');
+    input.dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+
+    await vi.waitFor(() => expect(toastManager.danger).toHaveBeenCalled());
+    // The fallback rename, if any, runs after the toast; let it land before asserting it did not.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(sdkMock.mergeSpacePeople).toHaveBeenCalledTimes(1);
+    expect(sdkMock.updateSpacePerson).not.toHaveBeenCalled();
   });
 });

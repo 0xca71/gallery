@@ -1,55 +1,60 @@
 <script lang="ts">
-  import { afterNavigate, goto } from '$app/navigation';
-  import { page } from '$app/state';
-  import ActionMenuItem from '$lib/components/ActionMenuItem.svelte';
-  import OnEvents from '$lib/components/OnEvents.svelte';
-  import ButtonContextMenu from '$lib/components/shared-components/context-menu/ButtonContextMenu.svelte';
-  import ControlAppBar from '$lib/components/shared-components/ControlAppBar.svelte';
-  import GalleryViewer from '$lib/components/shared-components/gallery-viewer/GalleryViewer.svelte';
-  import ArchiveAction from '$lib/components/timeline/actions/ArchiveAction.svelte';
-  import ChangeDate from '$lib/components/timeline/actions/ChangeDateAction.svelte';
-  import ChangeDescription from '$lib/components/timeline/actions/ChangeDescriptionAction.svelte';
-  import ChangeLocation from '$lib/components/timeline/actions/ChangeLocationAction.svelte';
-  import CreateSharedLink from '$lib/components/timeline/actions/CreateSharedLinkAction.svelte';
-  import DeleteAssets from '$lib/components/timeline/actions/DeleteAssetsAction.svelte';
-  import DownloadAction from '$lib/components/timeline/actions/DownloadAction.svelte';
-  import FavoriteAction from '$lib/components/timeline/actions/FavoriteAction.svelte';
-  import RotateAction from '$lib/components/timeline/actions/RotateAction.svelte';
-  import SetVisibilityAction from '$lib/components/timeline/actions/SetVisibilityAction.svelte';
-  import TagAction from '$lib/components/timeline/actions/TagAction.svelte';
-  import AssetSelectControlBar from '$lib/components/timeline/AssetSelectControlBar.svelte';
-  import { QueryParameter } from '$lib/constants';
-  import { assetMultiSelectManager } from '$lib/managers/asset-multi-select-manager.svelte';
-  import { authManager } from '$lib/managers/auth-manager.svelte';
-  import { registerSelectionContext } from '$lib/managers/command-context-manager.svelte';
-  import { featureFlagsManager } from '$lib/managers/feature-flags-manager.svelte';
-  import { globalSearchManager } from '$lib/managers/global-search-manager.svelte';
-  import type { Viewport } from '$lib/managers/timeline-manager/types';
-  import { Route } from '$lib/route';
-  import { getAssetBulkActions } from '$lib/services/asset.service';
-  import { lang, locale } from '$lib/stores/preferences.store';
-  import { handlePromiseError } from '$lib/utils';
-  import { parseUtcDate } from '$lib/utils/date-time';
-  import { handleError } from '$lib/utils/handle-error';
-  import { isAlbumsRoute, isPeopleRoute } from '$lib/utils/navigation';
-  import { toTimelineAsset } from '$lib/utils/timeline-util';
+  import ActionMenuItem from '#lib/components/ActionMenuItem.svelte';
+  import OnEvents from '#lib/components/OnEvents.svelte';
+  import ControlAppBar from '#lib/components/shared-components/ControlAppBar.svelte';
+  import ButtonContextMenu from '#lib/components/shared-components/context-menu/ButtonContextMenu.svelte';
+  import GalleryViewer from '#lib/components/shared-components/gallery-viewer/GalleryViewer.svelte';
+  import AssetSelectControlBar from '#lib/components/timeline/AssetSelectControlBar.svelte';
+  import ChangeDate from '#lib/components/timeline/actions/ChangeDateAction.svelte';
+  import ChangeDescription from '#lib/components/timeline/actions/ChangeDescriptionAction.svelte';
+  import ChangeLocation from '#lib/components/timeline/actions/ChangeLocationAction.svelte';
+  import DeleteAssets from '#lib/components/timeline/actions/DeleteAssetsAction.svelte';
+  import DownloadAction from '#lib/components/timeline/actions/DownloadAction.svelte';
+  import FavoriteAction from '#lib/components/timeline/actions/FavoriteAction.svelte';
+  import RotateAction from '#lib/components/timeline/actions/RotateAction.svelte';
+  import SetVisibilityAction from '#lib/components/timeline/actions/SetVisibilityAction.svelte';
+  import { QueryParameter } from '#lib/constants.ts';
+  import ArchiveAction from '#lib/gallery/actions/ArchiveAction.svelte';
+  import SearchLegacyNotice from '#lib/gallery/search/SearchLegacyNotice.svelte';
+  import { parseSearchTerms } from '#lib/gallery/search/parse-search-terms.ts';
   import {
-    type AlbumResponseDto,
-    type AssetResponseDto,
+    getScopedPersonNames,
+    isVisibleSearchKey,
+    registerSearchSelection,
+    sharedSpacesDefault,
+  } from '#lib/gallery/search/search-page.ts';
+  import { assetMultiSelectManager } from '#lib/managers/asset-multi-select-manager.svelte.ts';
+  import type { TimelineAsset, Viewport } from '#lib/managers/timeline-manager/types.ts';
+  import { createPreloadedQuery } from '#lib/queries/client.ts';
+  import { getUserConfigQuery } from '#lib/queries/config-user.query.ts';
+  import { Route } from '#lib/route.ts';
+  import { getAssetBulkActions } from '#lib/services/asset.service.ts';
+  import { lang, locale } from '#lib/stores/preferences.store.ts';
+  import { handlePromiseError } from '#lib/utils.ts';
+  import { parseUtcDate } from '#lib/utils/date-time.ts';
+  import { handleError } from '#lib/utils/handle-error.ts';
+  import { isAlbumsRoute, isPeopleRoute } from '#lib/utils/navigation.ts';
+  import { toTimelineAsset } from '#lib/utils/timeline-util.ts';
+  import {
     AssetVisibility,
     getPerson,
     getTagById,
-    type MetadataSearchDto,
     searchAssets,
-    searchPerson,
     searchSmart,
+    type AlbumResponseDto,
+    type AssetResponseDto,
+    type MetadataSearchDto,
     type SmartSearchDto,
   } from '@immich/sdk';
-  import { ActionButton, CommandPaletteDefaultProvider, Icon, IconButton } from '@immich/ui';
+  import { ActionButton, CommandPaletteDefaultProvider, Icon, IconButton, LoadingSpinner } from '@immich/ui';
   import { mdiArrowLeft, mdiClose, mdiDotsVertical, mdiImageOffOutline, mdiSelectAll } from '@mdi/js';
   import { tick, untrack } from 'svelte';
   import { t } from 'svelte-i18n';
-  import LoadingSpinner from '$lib/components/shared-components/LoadingSpinner.svelte';
+  import { afterNavigate, goto } from '$app/navigation';
+  import { page } from '$app/state';
+
+  const query = createPreloadedQuery(getUserConfigQuery);
+  const config = $derived(query.data);
 
   const viewport: Viewport = $state({ width: 0, height: 0 });
   let searchResultsElement: HTMLElement | undefined = $state();
@@ -68,9 +73,10 @@
 
   type SearchTerms = MetadataSearchDto & Pick<SmartSearchDto, 'query' | 'queryAssetId'>;
   let searchQuery = $derived(page.url.searchParams.get(QueryParameter.QUERY));
-  let smartSearchEnabled = $derived(featureFlagsManager.value.smartSearch);
-  let terms = $derived<SearchTerms>(searchQuery ? JSON.parse(searchQuery) : {});
-  let searchTermKeys = $derived(getVisibleSearchKeys(terms));
+  let terms = $derived<SearchTerms>(searchQuery ? parseSearchTerms<SearchTerms>(searchQuery) : {});
+  let searchTermKeys = $derived(
+    getObjectKeys(terms).filter((key) => isVisibleSearchKey(key) && !(key === 'type' && terms.isMotion === true)),
+  );
 
   $effect(() => {
     // we want this to *only* be reactive on `terms`
@@ -85,7 +91,9 @@
     }
   });
 
-  afterNavigate(({ from }) => {
+  afterNavigate(({ from, shallow, type }) => {
+    if (shallow && type === 'goto') return;
+
     // Prevent setting previousRoute to the current page.
     if (from?.url && from.route.id !== page.route.id) {
       previousRoute = from.url.href;
@@ -119,41 +127,12 @@
     onAssetDelete(assetIds);
   };
 
-  const onFavorite = (ids: string[], isFavorite: boolean) => {
-    for (const id of ids) {
-      const asset = searchResultAssets.find((asset) => asset.id === id);
-      if (asset) {
-        asset.isFavorite = isFavorite;
-      }
-    }
-  };
-
-  const onArchive = (ids: string[], visibility: AssetVisibility) => {
-    const idSet = new Set(ids);
-    if (terms.visibility && terms.visibility !== visibility) {
-      searchResultAssets = searchResultAssets.filter((asset) => !idSet.has(asset.id));
-      return;
-    }
-    for (const id of ids) {
-      const asset = searchResultAssets.find((asset) => asset.id === id);
-      if (asset) {
-        asset.visibility = visibility;
-      }
-    }
-  };
-
-  const onUndoDelete = () => {
-    void onSearchQueryUpdate();
-  };
-
-  registerSelectionContext({
-    getAssets: () => assetMultiSelectManager.assets,
-    clearSelection: () => assetMultiSelectManager.clear(),
-    canAddToAlbum: () => true,
-    getOnFavorite: () => onFavorite,
-    getOnArchive: () => onArchive,
-    getOnDelete: () => onAssetDelete,
-    getOnUndoDelete: () => onUndoDelete,
+  const { onFavorite, onArchive } = registerSearchSelection({
+    getAssets: () => searchResultAssets,
+    setAssets: (assets) => (searchResultAssets = assets),
+    getVisibility: () => terms.visibility,
+    onDelete: onAssetDelete,
+    reload: onSearchQueryUpdate,
   });
 
   const handleSelectAll = () => {
@@ -177,20 +156,13 @@
     const searchDto: SearchTerms = {
       page: nextPage,
       withExif: true,
-      // #830: this page is Gallery's global search surface, but a URL-driven search only ever
-      // covered the caller's own (and partner) assets. A Space member who opened "Show similar
-      // photos" on a photo shared with them — or pasted the same `queryAssetId` URL — got zero
-      // results while the space owner got a long list. Opt into shared spaces the way the command
-      // palette already does (#894); the server scopes them to spaces the member has kept in their
-      // timeline. Spread before `terms` so an explicit value in the URL still wins, and skip it
-      // entirely for a space-scoped URL — the server rejects `spaceId` + `withSharedSpaces`.
-      ...(!terms.spaceId && { withSharedSpaces: true }),
+      ...sharedSpacesDefault(terms),
       ...terms,
     };
 
     try {
       const { albums, assets } =
-        ('query' in searchDto || 'queryAssetId' in searchDto) && smartSearchEnabled
+        ('query' in searchDto || 'queryAssetId' in searchDto) && config.machineLearning.clip.enabled
           ? await searchSmart({
               smartSearchDto: { visibility: AssetVisibility.Timeline, ...searchDto, language: $lang },
             })
@@ -247,23 +219,12 @@
     return keyMap[key] || key;
   }
 
-  const isScopedPersonToken = (personId: string) =>
-    personId.startsWith('person:') || personId.startsWith('space-person:');
-
   async function getPersonName(personIds: string[]) {
-    const scopedPersonIds = personIds.filter((personId) => isScopedPersonToken(personId));
-    const scopedPeople =
-      scopedPersonIds.length > 0 ? await searchPerson({ name: '', withHidden: true, withSharedSpaces: true }) : [];
-    const scopedPeopleByFilterId = new Map(
-      scopedPeople.map((person) => [person.filterId ?? `person:${person.id}`, person]),
-    );
-
+    const scopedPersonNames = await getScopedPersonNames(personIds);
     const personNames = await Promise.all(
       personIds.map(async (personId) => {
-        if (isScopedPersonToken(personId)) {
-          const person = scopedPeopleByFilterId.get(personId);
-
-          return person?.name || $t('no_name');
+        if (scopedPersonNames.has(personId)) {
+          return scopedPersonNames.get(personId) || $t('no_name');
         }
 
         const person = await getPerson({ id: personId });
@@ -303,14 +264,23 @@
     }
   };
 
+  const onAssetsArchive = (assetIds: string[]) => {
+    if (!terms.visibility || terms.visibility === AssetVisibility.Timeline) {
+      const assetIdSet = new Set(assetIds);
+      searchResultAssets = searchResultAssets.filter((asset) => !assetIdSet.has(asset.id));
+    }
+  };
+
+  // TODO: add back in opposite case
+  const onAssetsUnarchive = (assets: TimelineAsset[]) => {
+    if (terms.visibility === AssetVisibility.Archive) {
+      const assetIdSet = new Set(assets.map((asset) => asset.id));
+      searchResultAssets = searchResultAssets.filter((asset) => !assetIdSet.has(asset.id));
+    }
+  };
+
   function getObjectKeys<T extends object>(obj: T): (keyof T)[] {
     return Object.keys(obj) as (keyof T)[];
-  }
-
-  function getVisibleSearchKeys(terms: SearchTerms) {
-    return getObjectKeys(terms).filter(
-      (key) => key !== 'withSharedSpaces' && !(key === 'type' && terms.isMotion === true),
-    );
   }
 
   function removeFilter(key: keyof SearchTerms) {
@@ -321,14 +291,13 @@
 </script>
 
 <svelte:window bind:scrollY />
-
-<OnEvents {onAlbumAddAssets} />
+<OnEvents {onAlbumAddAssets} {onAssetsArchive} {onAssetsUnarchive} />
 
 {#if searchTermKeys.length > 0}
   <section id="search-chips" class="mx-auto mt-24 w-full max-w-7xl px-4 sm:px-8 lg:px-12">
     <div class="flex w-full flex-wrap place-content-center place-items-center gap-2.5 sm:gap-3">
       {#each searchTermKeys as searchKey (searchKey)}
-        {@const value = terms[searchKey]}
+        {const value = $derived(terms[searchKey])}
         <div
           class="inline-flex max-w-full items-center rounded-full bg-primary/10 py-1 ps-1 pe-1 text-xs text-primary ring-1 ring-primary/15 transition-shadow hover:ring-primary/25 dark:bg-immich-dark-primary/15 dark:text-immich-dark-primary dark:ring-immich-dark-primary/20 dark:hover:ring-immich-dark-primary/30"
         >
@@ -339,9 +308,9 @@
           </span>
 
           {#if searchKey === 'isMotion' && value === true}
-            <span class="max-w-[min(36rem,55vw)] min-w-0 truncate px-3 py-1.5 text-immich-fg dark:text-immich-dark-fg">
-              {$t('live_photo')}
-            </span>
+            <span class="max-w-[min(36rem,55vw)] min-w-0 truncate px-3 py-1.5 text-immich-fg dark:text-immich-dark-fg"
+              >{$t('live_photo')}</span
+            >
           {:else if value !== true}
             <span class="max-w-[min(36rem,55vw)] min-w-0 truncate px-3 py-1.5 text-immich-fg dark:text-immich-dark-fg">
               {#if (searchKey === 'takenAfter' || searchKey === 'takenBefore') && typeof value === 'string'}
@@ -418,10 +387,10 @@
     {#if assetMultiSelectManager.selectionActive}
       <div class="fixed inset-s-0 top-0 z-2 w-full">
         <AssetSelectControlBar>
-          {@const Actions = getAssetBulkActions($t)}
+          {const Actions = $derived(getAssetBulkActions($t))}
           <CommandPaletteDefaultProvider name={$t('assets')} actions={Object.values(Actions)} />
 
-          <CreateSharedLink />
+          <ActionButton action={Actions.CreateSharedLink} />
           <IconButton
             shape="round"
             color="secondary"
@@ -431,9 +400,9 @@
             onclick={handleSelectAll}
           />
           <ActionButton action={Actions.AddToAlbum} />
-          {#if assetMultiSelectManager.isAllUserOwned}
-            <FavoriteAction removeFavorite={assetMultiSelectManager.isAllFavorite} {onFavorite} />
+          <FavoriteAction removeFavorite={assetMultiSelectManager.isAllFavorite} {onFavorite} />
 
+          {#if assetMultiSelectManager.isAllUserOwned}
             <ButtonContextMenu icon={mdiDotsVertical} title={$t('menu')}>
               <ActionMenuItem action={Actions.AddToAlbum} />
               <DownloadAction menuItem />
@@ -443,10 +412,10 @@
               <ChangeLocation menuItem />
               <ArchiveAction menuItem unarchive={assetMultiSelectManager.isAllArchived} {onArchive} />
               <SetVisibilityAction menuItem onVisibilitySet={handleSetVisibility} />
-              {#if authManager.preferences.tags.enabled}
-                <TagAction menuItem />
-              {/if}
+              <ActionMenuItem action={Actions.Tag} />
+
               <DeleteAssets menuItem {onAssetDelete} onUndoDelete={onSearchQueryUpdate} />
+
               <hr />
               <ActionMenuItem action={Actions.RegenerateThumbnailJob} />
               <ActionMenuItem action={Actions.RefreshMetadataJob} />
@@ -461,18 +430,7 @@
       <div class="fixed inset-s-0 top-0 z-2 w-full">
         <ControlAppBar onClose={() => goto(previousRoute)} backIcon={mdiArrowLeft}>
           <div class="mx-auto w-full max-w-2xl pe-2">
-            <div
-              class="flex flex-wrap items-center gap-2 rounded-xl border border-gray-200/80 bg-white/90 px-4 py-2 text-sm text-gray-700 shadow-sm dark:border-gray-700 dark:bg-immich-dark-gray/90 dark:text-gray-200"
-            >
-              <span>{$t('search_legacy_notice')}</span>
-              <button
-                type="button"
-                class="font-medium text-primary hover:text-primary/80 focus-visible:outline-2 focus-visible:outline-primary"
-                onclick={() => globalSearchManager.open()}
-              >
-                {$t('search_open_palette')}
-              </button>
-            </div>
+            <SearchLegacyNotice originalPath={terms.originalPath} />
           </div>
         </ControlAppBar>
       </div>

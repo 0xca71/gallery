@@ -2,13 +2,13 @@ import type {
   FilterPanelConfig,
   FilterState,
   FilterSuggestionsResponse,
-} from '$lib/components/filter-panel/filter-panel';
+} from '#lib/components/filter-panel/filter-panel.ts';
 
 /**
- * Wraps a FilterPanelConfig so its suggestionsProvider, besides returning suggestions, records each
- * person/tag id->name into the supplied maps (so ActiveFiltersBar can label chips). Returns the
- * config unchanged when it has no suggestionsProvider. Pure: it does not mutate the input config.
- */
+Wraps a FilterPanelConfig so its suggestionsProvider, besides returning suggestions, records each
+person/tag id->name into the supplied maps (so ActiveFiltersBar can label chips). Returns the
+config unchanged when it has no suggestionsProvider. Pure: it does not mutate the input config.
+*/
 export function withNameCapture(
   config: FilterPanelConfig,
   personNames: Map<string, string>,

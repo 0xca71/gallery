@@ -8,8 +8,6 @@ import {
 } from '@immich/plugin-sdk';
 import { HttpException, UnauthorizedException } from '@nestjs/common';
 import { join } from 'node:path';
-import type { ArgOf } from 'src/repositories/event.repository.js';
-import type { JobOf } from 'src/types.js';
 import { DummyValue, OnEvent, OnJob } from 'src/decorators.js';
 import { AlbumsAddAssetsDto, CreateAlbumDto, GetAlbumsDto } from 'src/dtos/album.dto.js';
 import { BulkIdsDto } from 'src/dtos/asset-ids.response.dto.js';
@@ -27,11 +25,14 @@ import {
   WorkflowResult,
   WorkflowType,
 } from 'src/enum.js';
+import type { ArgOf } from 'src/repositories/event.repository.js';
 import { AlbumService } from 'src/services/album.service.js';
 import { AssetService } from 'src/services/asset.service.js';
 import { BaseService } from 'src/services/base.service.js';
 import { GalleryWorkflowHostService } from 'src/services/gallery-workflow-host.service.js';
 import { TagService } from 'src/services/tag.service.js';
+import type { JobOf } from 'src/types.js';
+import { isAllowedHost } from 'src/utils/workflow.js';
 
 const dummy = () => {
   throw new Error(
@@ -75,7 +76,6 @@ export class WorkflowExecutionService extends BaseService {
 
     const albumService = BaseService.create(AlbumService, this);
     const tagService = BaseService.create(TagService, this);
-    const galleryHost = BaseService.create(GalleryWorkflowHostService, this);
 
     const searchAlbums = this.wrap<[dto: GetAlbumsDto]>((authDto, ctx, args) => albumService.getAll(authDto, ...args));
     const createAlbum = this.wrap<[dto: CreateAlbumDto]>((authDto, ctx, args) => albumService.create(authDto, ...args));
@@ -96,30 +96,20 @@ export class WorkflowExecutionService extends BaseService {
       ]
     >(async (authDto, context, args) => {
       const hostname = new URL(args[0]).hostname;
-
-      for (const pattern of context.allowedHosts) {
-        const regex = new RegExp(pattern.replaceAll('.', String.raw`\.`).replaceAll('*', '.*'));
-        if (regex.test(hostname)) {
-          // eslint-disable-next-line unicorn/no-invalid-argument-count
-          const res = await fetch(...args);
-
-          return {
-            ok: res.ok,
-            status: res.status,
-            body: await res.text(),
-          };
-        }
+      if (!isAllowedHost(hostname, context.allowedHosts)) {
+        throw new Error('Hostname did not match any listed in methods[].allowedHosts in the plugin manifest');
       }
 
-      throw new Error('Hostname did not match any listed in methods[].allowedHosts in the plugin manifest');
+      const res = await fetch(...args);
+
+      return {
+        ok: res.ok,
+        status: res.status,
+        body: await res.text(),
+      };
     });
     const bulkTagAssets = this.wrap<[dto: TagBulkAssetsDto]>((authDto, ctx, args) =>
       tagService.bulkTagAssets(authDto, ...args),
-    );
-
-    // Gallery fork: one generic dispatcher, so fork actions and filters never add lines here again.
-    const gallery = this.wrap<[method: string, args: unknown]>((authDto, ctx, args) =>
-      galleryHost.dispatch(authDto, ...args),
     );
 
     const functions = {
@@ -129,7 +119,6 @@ export class WorkflowExecutionService extends BaseService {
       addAssetsToAlbums,
       httpRequest,
       bulkTagAssets,
-      gallery,
     };
 
     const stubs: typeof functions = {
@@ -139,7 +128,6 @@ export class WorkflowExecutionService extends BaseService {
       addAssetsToAlbums: dummy,
       httpRequest: dummy,
       bulkTagAssets: dummy,
-      gallery: dummy,
     };
 
     const plugins = await this.pluginRepository.getForLoad();
@@ -157,15 +145,17 @@ export class WorkflowExecutionService extends BaseService {
       }
 
       const isMethodWithFunction = methods.some(({ hostFunctions }) => hostFunctions);
-      if (isMethodWithFunction) {
-        const label = `${name}@${version}/worker`;
-        const key = this.getPluginKey({ id, hostFunctions: true });
-        try {
-          await this.pluginRepository.load({ key, label, wasmBytes }, { runInWorker: true, functions });
-          this.logger.log(`Loaded plugin with host functions: ${label}`);
-        } catch (error) {
-          this.logger.error(`Unable to load plugin with host functions ${label} (${id})`, error);
-        }
+      if (!isMethodWithFunction) {
+        continue;
+      }
+
+      const label = `${name}@${version}/worker`;
+      const key = this.getPluginKey({ id, hostFunctions: true });
+      try {
+        await this.pluginRepository.load({ key, label, wasmBytes }, { runInWorker: true, functions });
+        this.logger.log(`Loaded plugin with host functions: ${label}`);
+      } catch (error) {
+        this.logger.error(`Unable to load plugin with host functions ${label} (${id})`, error);
       }
     }
   }
@@ -328,6 +318,11 @@ export class WorkflowExecutionService extends BaseService {
     return this.onAssetTrigger({ userId, assetId, trigger: WorkflowTrigger.AssetMetadataExtraction });
   }
 
+  @OnEvent({ name: 'AssetOcrExtracted' })
+  onAssetOcrExtracted({ userId, assetId }: ArgOf<'AssetOcrExtracted'>) {
+    return this.onAssetTrigger({ userId, assetId, trigger: WorkflowTrigger.AssetOcrExtraction });
+  }
+
   @OnEvent({ name: 'AssetTag' })
   onAssetTagged({ assetId, userId }: ArgOf<'AssetTag'>) {
     return this.onAssetTrigger({ userId, assetId, trigger: WorkflowTrigger.AssetTagged });
@@ -344,7 +339,7 @@ export class WorkflowExecutionService extends BaseService {
   }
 
   @OnJob({ name: JobName.WorkflowAssetTrigger, queue: QueueName.Workflow })
-  handleAssetTrigger({ workflowId, assetId }: JobOf<JobName.WorkflowAssetTrigger>) {
+  handleAssetTrigger({ workflowId, assetId, trigger }: JobOf<JobName.WorkflowAssetTrigger>) {
     return this.execute(workflowId, (type) => {
       const assetService = BaseService.create(AssetService, this);
 
@@ -352,7 +347,7 @@ export class WorkflowExecutionService extends BaseService {
         case WorkflowType.AssetV1: {
           return {
             read: async () => {
-              const asset = await this.workflowRepository.getForAssetV1(assetId);
+              const asset = await this.workflowRepository.getForAssetV1(assetId, trigger);
               return {
                 data: { asset } as any,
                 authUserId: asset.ownerId,
@@ -426,8 +421,15 @@ export class WorkflowExecutionService extends BaseService {
 
     const { read, write } = handler;
     const readResult = await read(type);
+    // Gallery fork: the run acts as the asset's owner, and a space Editor's tag (#992) queues the Editor's workflows
+    // on a member's asset. Only the workflow's own owner may be the identity it runs as.
+    if (readResult.authUserId !== workflow.ownerId) {
+      this.logger.debug(`Workflow ${workflowId} skipped: entity ${readResult.entityId} belongs to another user`);
+      return;
+    }
     let data = readResult.data;
     const runId = crypto.randomUUID();
+    const galleryHost = BaseService.create(GalleryWorkflowHostService, this);
 
     for (const step of workflow.steps) {
       try {
@@ -448,6 +450,11 @@ export class WorkflowExecutionService extends BaseService {
         };
 
         if (step.methodName.startsWith('noop')) {
+          continue;
+        }
+
+        // Gallery fork: gallery-core steps run in TypeScript; the plugin's WASM exports are no-ops.
+        if (await galleryHost.runStep(step, readResult.authUserId, data)) {
           continue;
         }
 

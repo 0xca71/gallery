@@ -1,200 +1,122 @@
-import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { Insertable } from 'kysely';
-import { isAbsolute } from 'node:path';
-import type { ArgOf } from 'src/repositories/event.repository.js';
-import type {
-  AccessibleIdentityFaceMatch,
-  SharedSpaceFaceMatchBackfillTarget,
-} from 'src/repositories/face-identity.repository.js';
-import type { MergeAuthorizer } from 'src/services/identity-merge-propagation.service.js';
-import type { JobItem, JobOf } from 'src/types.js';
-import { JOBS_ASSET_PAGINATION_SIZE } from 'src/constants.js';
-import { Chunked, OnEvent, OnJob } from 'src/decorators.js';
-import { BulkIdErrorReason, BulkIdResponseDto, BulkIdsDto } from 'src/dtos/asset-ids.response.dto.js';
+import { Chunked, OnJob } from 'src/decorators.js';
+import { BulkIdErrorReason, BulkIdResponseDto } from 'src/dtos/asset-ids.response.dto.js';
 import { AuthDto } from 'src/dtos/auth.dto.js';
 import {
   AssetFaceCreateDto,
   AssetFaceDeleteDto,
   AssetFaceResponseDto,
   AssetFaceUpdateDto,
-  DetachScopedPersonDto,
   FaceDto,
   MergePersonDto,
-  MergeScopedPeopleDto,
-  PeopleFaceStatisticsResponseDto,
+  PeopleDeleteDto,
   PeopleResponseDto,
-  PeopleStatisticsResponseDto,
   PeopleUpdateDto,
+  PeopleUsersUpsertDto,
   PersonCreateDto,
-  PersonFacePageQueryDto,
-  PersonFacePageResponseDto,
+  PersonDeleteDto,
   PersonResponseDto,
   PersonSearchDto,
   PersonStatisticsResponseDto,
   PersonUpdateDto,
-  RepresentativeFaceUpdateDto,
+  PersonUsersDeleteDto,
+  PersonUsersResponseDto,
+  PersonUsersSearchDto,
   mapFaces,
   mapPerson,
 } from 'src/dtos/person.dto.js';
 import {
   AssetVisibility,
   CacheControl,
-  ImmichWorker,
+  DatabaseLock,
   JobName,
   JobStatus,
   Permission,
   PersonPathType,
-  QueueJobStatus,
   QueueName,
   SourceType,
   SystemMetadataKey,
   VectorIndex,
 } from 'src/enum.js';
+import { FaceIdentityMaintenanceService } from 'src/gallery/services/face-identity-maintenance.service.js';
+import { requireThumbnailAccess } from 'src/gallery/services/gallery-people.service.js';
+import { requireAssetEditAccess } from 'src/gallery/utils/access-grants.js';
+import { withOwnedPersonAssetCounts } from 'src/gallery/utils/owned-person-asset-counts.js';
+import { crossOwnerMergeAuthorizer, resolveMinimumFaceCount } from 'src/gallery/utils/people-config.js';
+import { updatePersonWithType } from 'src/gallery/utils/person-type.js';
 import { BoundingBox } from 'src/repositories/machine-learning.repository.js';
 import { PersonId } from 'src/repositories/person.repository.js';
 import { DB } from 'src/schema/index.js';
 import { AssetFaceTable } from 'src/schema/tables/asset-face.table.js';
 import { FaceSearchTable } from 'src/schema/tables/face-search.table.js';
-import {
-  buildAutomaticReconciliationClaim,
-  chooseAutomaticTargetIdentity,
-} from 'src/services/accessible-identity-reconciliation.js';
 import { BaseService } from 'src/services/base.service.js';
-import { getDimensions } from 'src/utils/asset.util.js';
-import { asDateTimeString } from 'src/utils/date.js';
+import type { MergeAuthorizer } from 'src/services/identity-merge-propagation.service.js';
+import type { JobItem, JobOf } from 'src/types.js';
+import { convertFaceBoxToOriginalImageSpace, getDimensions } from 'src/utils/asset.util.js';
+import { isSuggestionScanTarget } from 'src/utils/face-repair.js';
 import { ImmichMediaResponse } from 'src/utils/file.js';
-import { createCrossOwnerMergeAuthorizer } from 'src/utils/merge-policy.js';
+import { isHttpException } from 'src/utils/logger.js';
 import { mimeTypes } from 'src/utils/mime-types.js';
 import { batched, findOrFail, isFaceSuggestionEnabled, isFacialRecognitionEnabled } from 'src/utils/misc.js';
 import { applyResolvedIdentityMetadata } from 'src/utils/person-identity.js';
-import { getPreferences } from 'src/utils/preferences.js';
-import { Point, transformPoints } from 'src/utils/transform.js';
 
 const personKey = ({ ownerId, personGroupId }: PersonId) => `${ownerId}/${personGroupId}`;
-const FACE_IDENTITY_BACKFILL_CHUNK_SIZE = 1000;
 
 /**
- * S9 (F19): upper bound on how long a forced `handleQueueRecognizeFaces` run waits for the
- * concurrency-1 PeopleBackfill queue before giving up and proceeding anyway. PeopleBackfill also
- * carries the person/space-person suggestion-scan sweep (F17/F18), which can legitimately take a
- * while on a large library — generous enough not to abandon a real drain in progress, bounded so a
- * forced recognition run is never wedged indefinitely behind it.
- */
+S9 (F19): upper bound on how long a forced `handleQueueRecognizeFaces` run waits for the
+concurrency-1 PeopleBackfill queue before giving up and proceeding anyway. PeopleBackfill also
+carries the person/space-person suggestion-scan sweep (F17/F18), which can legitimately take a
+while on a large library — generous enough not to abandon a real drain in progress, bounded so a
+forced recognition run is never wedged indefinitely behind it.
+*/
 const PEOPLE_BACKFILL_WAIT_TIMEOUT_MS = 10 * 60 * 1000;
 
 /**
- * Upper bound on full re-scan passes one backfill chain may take when getBackfillWork() keeps
- * reporting identity work. Repair passes are designed to converge in one or two passes; work that
- * is still outstanding at the cap indicates a convergence bug, and re-queueing would otherwise
- * loop full-table scans forever. The next external trigger (bootstrap, post-recognition
- * maintenance, or a manual run) starts a fresh chain.
- */
-export const FACE_IDENTITY_BACKFILL_MAX_CONTINUATIONS = 5;
+Gallery: upstream's person sharing (immich-31620) is pulled but dormant. Its model needs several `person` rows per
+person group, which Option M's `person_personGroupId_key` forbids, and it shares only inside a cluster group, which
+Gallery keeps inert. See specs/2026-10-01-upstream-person-sharing-dormant-design.md.
+*/
+export const personSharingUnsupported = () => new BadRequestException('Person sharing is not available in Gallery');
+
+/**
+Upstream lets `userId` address another owner's row of the same person through a `person_user` grant. Gallery's
+person access is owner-only, so an override naming anyone else would bypass it: refuse it.
+*/
+const assertOwnRecord = (auth: AuthDto, userId: string | undefined) => {
+  if (userId !== undefined && userId !== auth.user.id) {
+    throw personSharingUnsupported();
+  }
+};
 
 @Injectable()
 export class PersonService extends BaseService {
+  private faceIdentityMaintenance?: FaceIdentityMaintenanceService;
+
+  // Gallery: the face-identity steps of recognition live in FaceIdentityMaintenanceService.
+  private get faceIdentity() {
+    this.faceIdentityMaintenance ??= FaceIdentityMaintenanceService.createFor(this);
+    return this.faceIdentityMaintenance;
+  }
+
   private async crossOwnerMergeAuthorizer(dto: { confirmCrossOwner?: boolean }): Promise<MergeAuthorizer> {
-    // Resolve the toggle here, BEFORE the merge transaction opens. The authorizer runs inside that transaction
-    // while it holds the instance-wide advisory lock; reading config there would query a second pool connection
-    // that a saturated pool cannot grant, deadlocking every merge (#595). Handing over an already-resolved value
-    // keeps the transaction free of any `this.db` I/O.
-    const { server } = await this.getConfig({ withCache: false });
-    return createCrossOwnerMergeAuthorizer(() => Promise.resolve(server), dto);
+    return crossOwnerMergeAuthorizer(await this.getConfig({ withCache: false }), dto);
   }
 
-  @OnEvent({ name: 'AppBootstrap', workers: [ImmichWorker.Microservices] })
-  async onBootstrap(): Promise<void> {
-    await this.queueInitialFaceSuggestionSweep();
-
-    if (!(await this.faceIdentityRepository.hasBackfillWork())) {
-      return;
-    }
-
-    const activeBackfills = await this.jobRepository.searchJobs(QueueName.PeopleBackfill, {
-      status: [QueueJobStatus.Active, QueueJobStatus.Delayed, QueueJobStatus.Paused, QueueJobStatus.Waiting],
-    });
-    if (activeBackfills.some((job) => job.name === JobName.FaceIdentityBackfill)) {
-      return;
-    }
-
-    await this.jobRepository.queue({ name: JobName.FaceIdentityBackfill, data: {} });
-  }
-
-  /**
-   * Face suggestions ship enabled (`config.ts` defaults). An instance that upgrades *into* that default
-   * never emits a `ConfigUpdate`, so `onConfigUpdate`'s false -> true transition — the thing that normally
-   * starts the work — cannot fire for it. `FaceSuggestionMaintenance` has no cron either, so without this
-   * the settings page would report the feature on while the queue stayed empty until someone renamed a
-   * person or ran the job by hand: the same "the feature seems to be missing" report the opt-in toggle was
-   * introduced to fix, in a new shape.
-   *
-   * Runs at most once per instance, guarded by a system-metadata marker (same pattern as
-   * SharedSpaceService.onBootstrap). This method only ever QUEUES; the marker is written by the sweep
-   * itself, in `JobService.handleFaceSuggestionMaintenance`'s success path. Two failure modes make that
-   * split load-bearing, and burning the marker here reintroduces both:
-   *
-   *   - feature off at this boot. The old code burnt the marker anyway, reasoning that a later opt-in is
-   *     served by `onConfigUpdate`'s false -> true transition. That is untrue under IMMICH_CONFIG_FILE:
-   *     `updateSystemConfig` throws outright for file-mode instances, and a YAML edit + restart emits only
-   *     `ConfigInit`. Such an admin would get a toggle reading "on" over a queue nothing ever fills. The
-   *     cost of leaving it unset is one config read per boot.
-   *   - the sweep fails. `FaceSuggestionMaintenance` runs with `attempts: 1` and `removeOnFail: true`
-   *     (job.repository.ts), so a marker written at queue time would outlive a job that failed and
-   *     vanished — recorded as swept, never actually run, never retried.
-   *
-   * A fresh install still burns it on the first boot, against an empty library, which costs nothing: the
-   * sweep finds no named people, and `handleFaceIdentityBackfill`'s completion path keeps the queue current
-   * from then on.
-   */
-  private async queueInitialFaceSuggestionSweep(): Promise<void> {
-    const state = await this.systemMetadataRepository.get(SystemMetadataKey.FaceSuggestionDefaultOnState);
-    if (state?.sweptAt) {
-      return;
-    }
-
-    const { machineLearning } = await this.getConfig({ withCache: false });
-    if (!isFaceSuggestionEnabled(machineLearning)) {
-      return;
-    }
-
-    this.logger.log('Face suggestions are enabled and have never been swept; queueing face suggestion maintenance');
-    await this.jobRepository.queue({ name: JobName.FaceSuggestionMaintenance, data: {} });
-  }
-
-  @OnEvent({ name: 'ConfigValidate' })
-  onConfigValidate({ newConfig }: ArgOf<'ConfigValidate'>) {
-    const { maxDistance, suggestions } = newConfig.machineLearning.facialRecognition;
-    if (suggestions.enabled && suggestions.maxDistance <= maxDistance) {
-      throw new Error(
-        `Face suggestion max distance (${suggestions.maxDistance}) must be greater than the maximum recognition distance (${maxDistance}), otherwise no faces can ever be suggested.`,
-      );
-    }
-  }
-
-  @OnEvent({ name: 'ConfigUpdate', workers: [ImmichWorker.Microservices], server: true })
-  async onConfigUpdate({ oldConfig, newConfig }: ArgOf<'ConfigUpdate'>) {
-    // Transition-only: re-saving settings must not re-queue a library-wide sweep. Widening the band
-    // while already enabled is picked up by running the maintenance job manually.
-    if (!isFaceSuggestionEnabled(oldConfig.machineLearning) && isFaceSuggestionEnabled(newConfig.machineLearning)) {
-      await this.jobRepository.queue({ name: JobName.FaceSuggestionMaintenance, data: {} });
-    }
-  }
-
-  /**
-   * Resolve the caller's People face threshold. The per-user `people.minimumFaces` preference
-   * (default 3 via `getPreferences`) takes precedence over the ML config default. This keeps the
-   * People count/stats surfaces consistent with the People list, whose SQL (`getAllForUser`,
-   * `person.repository.ts`) already reads the same preference with a literal `3` fallback — so the
-   * resolved value matches what the list applies, and neither path double-filters.
-   */
   private async resolveMinimumFaceCount(auth: AuthDto): Promise<number> {
-    const { machineLearning } = await this.getConfig({ withCache: false });
-    const preferences = getPreferences(await this.userRepository.getMetadata(auth.user.id));
-    return preferences.people.minimumFaces ?? machineLearning.facialRecognition.minFaces;
+    return resolveMinimumFaceCount(
+      await this.getConfig({ withCache: false }),
+      await this.userRepository.getMetadata(auth.user.id),
+    );
   }
 
   async getAll(auth: AuthDto, dto: PersonSearchDto): Promise<PeopleResponseDto> {
-    const { withHidden = false, withSharedSpaces = false, closestAssetId, closestPersonId, page, size, type } = dto;
+    const { withHidden = false, withSharedSpaces = false, closestAssetId, closestPersonId, page, size } = dto;
+    const { isFavorite, isHidden } = dto;
+    // OD-14: upstream's name filter, for stock clients only (stock web's People page search).
+    const name = auth.stockClient ? dto.name : undefined;
+    // Gallery: stock sync withholds pets, so a stock client's list does too unless it asks for a type.
+    const type = dto.type ?? (auth.stockClient ? 'person' : undefined);
     const minimumFaceCount = await this.resolveMinimumFaceCount(auth);
 
     if (withSharedSpaces) {
@@ -227,6 +149,9 @@ export class PersonService extends BaseService {
       withHidden,
       closestFaceAssetId,
       type,
+      isFavorite,
+      isHidden,
+      name,
     });
     const { total, hidden } = await this.personRepository.getNumberOfPeople(auth.user.id, {
       minimumFaceCount,
@@ -234,83 +159,26 @@ export class PersonService extends BaseService {
     });
 
     return {
-      people: items.map((person) => mapPerson(person)),
+      people: await withOwnedPersonAssetCounts(
+        this.galleryPersonRepository,
+        auth,
+        items.map((person) => mapPerson(person)),
+      ),
       hasNextPage,
       total,
       hidden,
     };
   }
 
-  async getPeopleStatistics(auth: AuthDto, dto: PersonSearchDto): Promise<PeopleStatisticsResponseDto> {
-    if (dto.closestPersonId || dto.closestAssetId) {
-      throw new BadRequestException('closestPersonId and closestAssetId are not supported for people statistics');
-    }
-
-    const minimumFaceCount = await this.resolveMinimumFaceCount(auth);
-
-    if (dto.withSharedSpaces) {
-      return this.faceIdentityRepository.getAccessiblePeopleStatistics(auth.user.id, {
-        minimumFaceCount,
-      });
-    }
-
-    return this.personRepository.getPeopleOverviewStatistics(auth.user.id, {
-      minimumFaceCount,
-    });
-  }
-
-  async getPeopleFaceStatistics(auth: AuthDto, dto: PersonSearchDto): Promise<PeopleFaceStatisticsResponseDto> {
-    if (dto.closestPersonId || dto.closestAssetId) {
-      throw new BadRequestException('closestPersonId and closestAssetId are not supported for people face statistics');
-    }
-
-    const minimumFaceCount = await this.resolveMinimumFaceCount(auth);
-
-    if (dto.withSharedSpaces) {
-      return this.faceIdentityRepository.getAccessiblePeopleFaceStatistics(auth.user.id, {
-        minimumFaceCount,
-      });
-    }
-
-    return this.personRepository.getPeopleFaceStatistics(auth.user.id, {
-      minimumFaceCount,
-    });
-  }
-
-  /**
-   * The scoped merge (POST /people/same-person): merge people named by scoped refs — the actor's own people and
-   * any space person they can repair. The planner resolves and RBAC-checks the refs, collapses profiles that
-   * would land in the same scope, and propagates the identity merge everywhere it is attached (issue #733).
-   *
-   * The only thing gated here is the destructive cross-owner case: a merge that would combine two of ANOTHER
-   * user's people. Re-pointing another owner's single person is free — that is what recognition does on its own.
-   */
-  async mergeScopedPeople(auth: AuthDto, dto: MergeScopedPeopleDto): Promise<void> {
-    await this.identityMergePropagationService.mergeScopedProfiles(
-      auth,
-      dto,
-      await this.crossOwnerMergeAuthorizer(dto),
-    );
-  }
-
-  async detachScopedPerson(auth: AuthDto, dto: DetachScopedPersonDto): Promise<void> {
-    const resolved = await this.faceIdentityRepository.resolveDetachRef(auth.user.id, dto.profile);
-    if (!resolved.accessible) {
-      throw new BadRequestException('Person was not found or is not accessible');
-    }
-    if (!resolved.allBackingFacesRepairable) {
-      throw new ForbiddenException('Cannot detach a profile whose faces also back inaccessible profiles');
-    }
-
-    await this.faceIdentityRepository.detachScopedProfile(dto.profile);
-    await this.queueSpacePersonMetadataBackfill();
-  }
-
   async reassignFaces(auth: AuthDto, personGroupId: string, dto: AssetFaceUpdateDto): Promise<PersonResponseDto[]> {
+    for (const item of dto.data) {
+      assertOwnRecord(auth, item.userId);
+    }
     await this.requireAccess({ auth, permission: Permission.PersonUpdate, ids: [personGroupId] });
     const person = await this.findOrFail(auth, personGroupId);
     const result: PersonResponseDto[] = [];
     const changeFeaturePhoto = new Map<string, PersonId>();
+    const faceIds: string[] = [];
     for (const data of dto.data) {
       const faces = await this.personRepository.getFacesByIds(
         [{ personGroupId: data.personId, assetId: data.assetId }],
@@ -331,20 +199,12 @@ export class PersonService extends BaseService {
           changeFeaturePhoto.set(personKey(face.person), face.person);
         }
 
-        await this.personRepository.reassignFace(face.id, person.personGroupId);
-        await this.facePersonVerdictRepository.resolveAssignedFace(face.id);
-        const identityId = await this.replaceFaceIdentity(person.personGroupId, face.id, 'manual');
-        // Slice 8 (F15): the owner just stated a fact ("this face IS this person") that contradicts any
-        // durable rejected/ignored row for this SAME target — the newer human decision wins. Scoped to
-        // `personId` only: a negative recorded against a DIFFERENT person for this face must survive.
-        await this.facePersonVerdictRepository.clearNegativeForTarget(
-          { personGroupId: person.personGroupId, identityId },
-          [face.id],
-        );
+        faceIds.push(face.id);
       }
 
       result.push(mapPerson(person));
     }
+    await this.faceAssignmentService.assignFaces({ personGroupId: person.personGroupId, faceIds, strength: 'manual' });
     if (changeFeaturePhoto.size > 0) {
       await this.createNewFeaturePhoto(changeFeaturePhoto.values().toArray());
     }
@@ -357,14 +217,11 @@ export class PersonService extends BaseService {
     const face = await this.personRepository.getFaceById(dto.id, { viewingUserId: auth.user.id });
     const person = await this.findOrFail(auth, personGroupId);
 
-    await this.personRepository.reassignFace(face.id, person.personGroupId);
-    await this.facePersonVerdictRepository.resolveAssignedFace(face.id);
-    const identityId = await this.replaceFaceIdentity(person.personGroupId, face.id, 'manual');
-    // Slice 8 (F15): same clearing as reassignFaces above — scoped to `personId`, so a negative recorded
-    // against a DIFFERENT person for this face survives.
-    await this.facePersonVerdictRepository.clearNegativeForTarget({ personGroupId: person.personGroupId, identityId }, [
-      face.id,
-    ]);
+    await this.faceAssignmentService.assignFaces({
+      personGroupId: person.personGroupId,
+      faceIds: [face.id],
+      strength: 'manual',
+    });
     if (person.faceAssetId === null) {
       await this.createNewFeaturePhoto([person]);
     }
@@ -386,7 +243,7 @@ export class PersonService extends BaseService {
     // The owner keeps seeing their hidden people; the web decides whether to display them.
     const response = faces
       .filter((face) => !face.person?.isHidden || face.person?.ownerId === auth.user.id)
-      .map((face) => mapFaces(face, auth, asset.edits, assetDimensions));
+      .map((face) => mapFaces(face, asset.edits, assetDimensions));
 
     // #808: a name or birthday set inside a shared space lives on `shared_space_person` and is
     // resolved at read time — it is never written back to `person`. The asset viewer Info panel
@@ -418,10 +275,12 @@ export class PersonService extends BaseService {
     for (const { ownerId, personGroupId } of changeFeaturePhoto) {
       const assetFace = await this.personRepository.getRandomFace(personGroupId);
 
-      if (assetFace) {
-        await this.personRepository.update({ ownerId, personGroupId, faceAssetId: assetFace.id });
-        jobs.push({ name: JobName.PersonGenerateThumbnail, data: { ownerId, personGroupId } });
+      if (!assetFace) {
+        continue;
       }
+
+      await this.personRepository.update({ ownerId, personGroupId, faceAssetId: assetFace.id });
+      jobs.push({ name: JobName.PersonGenerateThumbnail, data: { ownerId, personGroupId } });
     }
 
     await this.jobRepository.queueAll(jobs);
@@ -456,110 +315,6 @@ export class PersonService extends BaseService {
     throw new BadRequestException(`Not found or no ${Permission.PersonRead} access`);
   }
 
-  async getFacesForPicker(auth: AuthDto, id: string, dto: PersonFacePageQueryDto): Promise<PersonFacePageResponseDto> {
-    await this.requireAccess({ auth, permission: Permission.PersonRead, ids: [id] });
-    const person = await this.findOrFail(auth, id);
-    const take = dto.size;
-    // Fork RBAC (Slice 2 / M1): PersonRead also admits non-owner space-granted callers. Scope those
-    // callers to space-reachable, shareable-visibility faces only — never the owner's Hidden/
-    // never-shared faces or faces pulled in via another user's identity. The owner keeps the full,
-    // unscoped list.
-    const isOwner = await this.accessRepository.person.checkOwnerAccess(auth.user.id, new Set([id]));
-    const scope = isOwner.has(id) ? undefined : { memberUserId: auth.user.id };
-    const rows = await this.personRepository.getRepresentativeFaces({
-      personId: id,
-      take,
-      skip: (dto.page - 1) * dto.size,
-      scope,
-      hasElevatedPermission: auth.session?.hasElevatedPermission,
-    });
-    const faces = rows.slice(0, take);
-
-    return {
-      faces: faces.map((face) => ({
-        id: face.id,
-        assetId: face.assetId,
-        imageHeight: face.imageHeight,
-        imageWidth: face.imageWidth,
-        boundingBoxX1: face.boundingBoxX1,
-        boundingBoxX2: face.boundingBoxX2,
-        boundingBoxY1: face.boundingBoxY1,
-        boundingBoxY2: face.boundingBoxY2,
-        sourceType: face.sourceType,
-        fileCreatedAt: asDateTimeString(face.fileCreatedAt) ?? undefined,
-        isRepresentative: face.id === person.faceAssetId,
-      })),
-      hasNextPage: rows.length > take,
-    };
-  }
-
-  async getFaceThumbnail(auth: AuthDto, personId: string, faceId: string): Promise<ImmichMediaResponse> {
-    await this.requireAccess({ auth, permission: Permission.PersonRead, ids: [personId] });
-    const face = await this.personRepository.getRepresentativeFaceForUpdate({ personId, assetFaceId: faceId });
-    if (!face) {
-      throw new NotFoundException();
-    }
-
-    await this.requireAccess({ auth, permission: Permission.AssetRead, ids: [face.assetId] });
-    const sourcePath = await this.getFaceThumbnailSource(face.assetId);
-    if (!sourcePath) {
-      throw new NotFoundException();
-    }
-
-    return this.generateFaceThumbnailResponse(face, sourcePath);
-  }
-
-  async updateRepresentativeFace(
-    auth: AuthDto,
-    id: string,
-    dto: RepresentativeFaceUpdateDto,
-  ): Promise<PersonResponseDto> {
-    // Setting the representative face manages the person's thumbnail, which shared-space Editors
-    // can also do — so gate on person.read (owner | shared space) rather than owner-only
-    // person.update. The chosen face is still gated on asset.read below.
-    await this.requireAccess({ auth, permission: Permission.PersonRead, ids: [id] });
-    const current = await this.findOrFail(auth, id);
-
-    // Fork RBAC (Slice 3 / M2): PersonRead only proves reachability (viewers included). Mutating the
-    // owner's GLOBAL representative face must be limited to the owner or an Editor/Owner of a space
-    // the person is shared through — mirror album writes. A viewer is denied.
-    const ids = new Set([id]);
-    const isOwner = await this.accessRepository.person.checkOwnerAccess(auth.user.id, ids);
-    if (!isOwner.has(id)) {
-      const canEdit = await this.accessRepository.person.checkSharedSpaceEditAccess(auth.user.id, ids);
-      if (!canEdit.has(id)) {
-        throw new ForbiddenException('Not authorized to change this person');
-      }
-    }
-
-    const face = await this.personRepository.getRepresentativeFaceForUpdate({
-      personId: id,
-      assetFaceId: dto.assetFaceId,
-    });
-    if (!face) {
-      throw new BadRequestException('Representative face must belong to the person');
-    }
-
-    await this.requireAccess({ auth, permission: Permission.AssetRead, ids: [face.assetId] });
-    const person = await this.personRepository.update({
-      ownerId: current.ownerId,
-      personGroupId: id,
-      faceAssetId: face.id,
-    });
-    if (current.identityId) {
-      await this.faceIdentityRepository.updateRepresentativeFace({
-        identityId: current.identityId,
-        assetFaceId: face.id,
-      });
-    }
-
-    await this.jobRepository.queue({
-      name: JobName.PersonGenerateThumbnail,
-      data: { ownerId: current.ownerId, personGroupId: id },
-    });
-    return mapPerson(person);
-  }
-
   async getStatistics(auth: AuthDto, id: string): Promise<PersonStatisticsResponseDto> {
     const allowedIds = await this.checkAccess({ auth, permission: Permission.PersonRead, ids: [id] });
     if (allowedIds.has(id)) {
@@ -588,42 +343,17 @@ export class PersonService extends BaseService {
   }
 
   async getThumbnail(auth: AuthDto, personGroupId: string): Promise<ImmichMediaResponse> {
-    await this.requireThumbnailAccess(auth, personGroupId);
+    await requireThumbnailAccess(this.accessRepository, auth, personGroupId);
     const person = await this.personRepository.getByGroupIdOnly(personGroupId);
     if (!person || !person.thumbnailPath) {
       throw new NotFoundException();
     }
 
-    return this.serveFromBackend(
+    return this.backendMedia.serveFromBackend(
       person.thumbnailPath,
       mimeTypes.lookup(person.thumbnailPath),
       CacheControl.PrivateWithoutCache,
     );
-  }
-
-  private async requireThumbnailAccess(auth: AuthDto, id: string) {
-    const ids = new Set([id]);
-    const ownerAccess = await this.accessRepository.person.checkOwnerAccess(auth.user.id, ids);
-    const isOwner = ownerAccess.has(id);
-    if (!isOwner) {
-      const isShared = await this.accessRepository.person.checkSharedSpaceAccess(auth.user.id, ids);
-      if (!isShared.has(id)) {
-        throw new BadRequestException('Not found or no person.read access');
-      }
-    }
-
-    // Fork (#869 follow-up): both arms above grant person.read off ANY reachable face, while the thumbnail
-    // is a crop of the representative face's photo specifically. The owner needs an elevated session to be
-    // handed back a crop of their own Locked Folder photo; a shared-space viewer must never receive one at
-    // all — the folder belongs to the owner, so the viewer's own elevation says nothing about it.
-    if (isOwner && auth.session?.hasElevatedPermission) {
-      return;
-    }
-
-    const isUnlocked = await this.accessRepository.person.checkUnlockedThumbnailAccess(ids);
-    if (!isUnlocked.has(id)) {
-      throw new BadRequestException('Not found or no person.read access');
-    }
   }
 
   async create(auth: AuthDto, dto: PersonCreateDto): Promise<PersonResponseDto> {
@@ -642,11 +372,12 @@ export class PersonService extends BaseService {
   }
 
   async update(auth: AuthDto, personGroupId: string, dto: PersonUpdateDto): Promise<PersonResponseDto> {
+    assertOwnRecord(auth, dto.userId);
     await this.requireAccess({ auth, permission: Permission.PersonUpdate, ids: [personGroupId] });
     const prior = await this.personRepository.getByGroupIdOnly(personGroupId);
 
     const { ownerId } = await this.findOrFail(auth, personGroupId);
-    const { name, birthDate, isHidden, featureFaceAssetId: assetId, isFavorite, color } = dto;
+    const { name, birthDate, isHidden, featureFaceAssetId: assetId, isFavorite, color, type } = dto;
     // TODO: set by faceId directly
     let faceId: string | undefined;
     if (assetId) {
@@ -659,7 +390,7 @@ export class PersonService extends BaseService {
       faceId = face.id;
     }
 
-    const person = await this.personRepository.update({
+    const person = await updatePersonWithType(this.databaseRepository, this.personRepository, {
       ownerId,
       personGroupId,
       faceAssetId: faceId,
@@ -668,6 +399,7 @@ export class PersonService extends BaseService {
       isHidden,
       isFavorite,
       color,
+      type,
     });
 
     if (assetId) {
@@ -683,7 +415,7 @@ export class PersonService extends BaseService {
 
     const { machineLearning } = await this.getConfig({ withCache: true });
     const featureEnabled = isFaceSuggestionEnabled(machineLearning);
-    const nowScannable = person.name !== '' && !person.isHidden && person.type === 'person';
+    const nowScannable = isSuggestionScanTarget(person);
     if (featureEnabled && nowScannable && prior && prior.name !== person.name) {
       await this.jobRepository.queue({ name: JobName.PersonSuggestionScan, data: { id: personGroupId } });
     }
@@ -691,8 +423,8 @@ export class PersonService extends BaseService {
     return mapPerson(person);
   }
 
-  delete(auth: AuthDto, id: string): Promise<void> {
-    return this.deleteAll(auth, { ids: [id] });
+  delete(auth: AuthDto, id: string, dto: PersonDeleteDto = {}): Promise<void> {
+    return this.deleteAll(auth, { ids: [id], ...dto });
   }
 
   async updateAll(auth: AuthDto, dto: PeopleUpdateDto): Promise<BulkIdResponseDto[]> {
@@ -705,21 +437,26 @@ export class PersonService extends BaseService {
           birthDate: person.birthDate,
           featureFaceAssetId: person.featureFaceAssetId,
           isFavorite: person.isFavorite,
+          type: person.type,
+          userId: person.userId,
         });
         results.push({ id: person.id, success: true });
       } catch (error: Error | any) {
-        this.logger.error(`Unable to update ${person.id} : ${error}`, error?.stack);
+        if (!isHttpException(error)) {
+          this.logger.error(`Unable to update ${person.id} : ${error}`, error?.stack);
+        }
         results.push({ id: person.id, success: false, error: BulkIdErrorReason.UNKNOWN });
       }
     }
     return results;
   }
 
-  async deleteAll(auth: AuthDto, { ids }: BulkIdsDto): Promise<void> {
+  async deleteAll(auth: AuthDto, { ids, userId }: PeopleDeleteDto): Promise<void> {
+    assertOwnRecord(auth, userId);
     await this.requireAccess({ auth, permission: Permission.PersonDelete, ids });
     await this.removeAllPersonGroups(ids, auth.user.id);
     if (ids.length > 0) {
-      await this.queueSpacePersonMetadataBackfill();
+      await this.faceIdentity.queueSpacePersonMetadataBackfill();
     }
   }
 
@@ -749,164 +486,9 @@ export class PersonService extends BaseService {
 
     this.logger.debug(`Deleted ${personGroups} empty person groups and ${clusterGroups} orphaned cluster groups`);
     if (people.length > 0) {
-      await this.queueSpacePersonMetadataBackfill();
+      await this.faceIdentity.queueSpacePersonMetadataBackfill();
     }
     return JobStatus.Success;
-  }
-
-  @OnJob({ name: JobName.FaceIdentityBackfill, queue: QueueName.PeopleBackfill })
-  async handleFaceIdentityBackfill({
-    stage = 'person',
-    cursor,
-    continuationId,
-    continuationCount,
-  }: JobOf<JobName.FaceIdentityBackfill>): Promise<JobStatus> {
-    const affectedSpaceAssets: SharedSpaceFaceMatchBackfillTarget[] = [];
-    this.logger.debug(
-      `FaceIdentityBackfill peopleBackfill start stage=${stage} cursor=${cursor ?? 'none'} continuation=${continuationId ?? 'none'}`,
-    );
-
-    if (stage === 'person') {
-      const result = await this.faceIdentityRepository.backfillPersonalIdentities({
-        cursor,
-        limit: FACE_IDENTITY_BACKFILL_CHUNK_SIZE,
-      });
-      affectedSpaceAssets.push(...this.getAffectedSpaceAssets(result));
-      this.logger.debug(
-        `FaceIdentityBackfill peopleBackfill personal page processed=${result.processed} nextCursor=${result.nextCursor ?? 'none'} affectedSpaceAssets=${affectedSpaceAssets.length}`,
-      );
-
-      if (result.nextCursor) {
-        this.logger.debug(`FaceIdentityBackfill peopleBackfill queue next stage=person cursor=${result.nextCursor}`);
-        await this.jobRepository.queue({
-          name: JobName.FaceIdentityBackfill,
-          data: { stage: 'person', cursor: result.nextCursor, continuationCount },
-        });
-        return JobStatus.Success;
-      }
-    }
-
-    const result = await this.faceIdentityRepository.backfillSpacePersonIdentities({
-      cursor: stage === 'space-person' ? cursor : undefined,
-      limit: FACE_IDENTITY_BACKFILL_CHUNK_SIZE,
-    });
-    affectedSpaceAssets.push(...this.getAffectedSpaceAssets(result));
-    this.logger.debug(
-      `FaceIdentityBackfill peopleBackfill space-person page processed=${result.processed} nextCursor=${result.nextCursor ?? 'none'} conflicts=${result.conflictCount} affectedSpaceAssets=${affectedSpaceAssets.length}`,
-    );
-
-    if (result.conflictCount > 0) {
-      this.logger.warn(`Face identity backfill left ${result.conflictCount} space people unresolved`);
-    }
-
-    if (result.nextCursor) {
-      this.logger.debug(
-        `FaceIdentityBackfill peopleBackfill queue next stage=space-person cursor=${result.nextCursor}`,
-      );
-      await this.jobRepository.queue({
-        name: JobName.FaceIdentityBackfill,
-        data: { stage: 'space-person', cursor: result.nextCursor, continuationCount },
-      });
-      return JobStatus.Success;
-    }
-
-    const work = await this.faceIdentityRepository.getBackfillWork();
-    this.logger.debug(
-      `FaceIdentityBackfill peopleBackfill remaining work personal=${work.hasPersonalIdentityWork} spacePerson=${work.hasSpacePersonIdentityWork} projection=${work.hasSharedSpaceProjectionWork}`,
-    );
-
-    if (work.hasPersonalIdentityWork || work.hasSpacePersonIdentityWork) {
-      const passCount = continuationCount ?? 0;
-      if (passCount >= FACE_IDENTITY_BACKFILL_MAX_CONTINUATIONS) {
-        this.logger.error(
-          `Face identity backfill still reports work after ${passCount} continuation passes — stopping to prevent an endless re-queue loop`,
-        );
-        return JobStatus.Success;
-      }
-      const nextContinuationId = this.getNextFaceIdentityBackfillContinuationId(continuationId);
-      this.logger.debug(`FaceIdentityBackfill peopleBackfill queue continuation=${nextContinuationId}`);
-      await this.jobRepository.queue({
-        name: JobName.FaceIdentityBackfill,
-        data: {
-          continuationId: nextContinuationId,
-          continuationCount: passCount + 1,
-        },
-      });
-      return JobStatus.Success;
-    }
-
-    const pendingTargets = await this.faceIdentityRepository.getPendingSharedSpaceFaceMatchBackfillTargets();
-    this.logger.debug(
-      `FaceIdentityBackfill peopleBackfill finalizing pendingTargets=${pendingTargets.length} affectedSpaceAssets=${affectedSpaceAssets.length}`,
-    );
-
-    if (work.hasSharedSpaceProjectionWork) {
-      const projectionTargets = await this.faceIdentityRepository.getSharedSpaceFaceMatchBackfillTargets();
-      this.logger.debug(`FaceIdentityBackfill peopleBackfill projectionTargets=${projectionTargets.length}`);
-      if (projectionTargets.length === 0) {
-        this.logger.warn('Face identity projection backfill work was reported but no targets were found');
-      }
-      affectedSpaceAssets.push(...projectionTargets);
-    }
-
-    const queuedTargets = await this.queueSharedSpaceFaceMatchTargets([...pendingTargets, ...affectedSpaceAssets]);
-    this.logger.debug(`FaceIdentityBackfill peopleBackfill queued face-match targets=${queuedTargets.length}`);
-    await this.faceIdentityRepository.deletePendingSharedSpaceFaceMatchBackfillTargets(pendingTargets);
-    if (queuedTargets.length === 0) {
-      await this.queueSpacePersonMetadataBackfill();
-      this.logger.debug('FaceIdentityBackfill peopleBackfill complete; queuedSpacePersonMetadataBackfill=true');
-
-      const { machineLearning } = await this.getConfig({ withCache: true });
-      if (isFaceSuggestionEnabled(machineLearning)) {
-        await this.jobRepository.queue({ name: JobName.PersonSuggestionScanQueueAll, data: {} });
-        await this.jobRepository.queue({ name: JobName.SpacePersonSuggestionScanQueueAll, data: {} });
-      }
-    }
-
-    return JobStatus.Success;
-  }
-
-  private getNextFaceIdentityBackfillContinuationId(currentContinuationId?: string): string {
-    return currentContinuationId === 'a' ? 'b' : 'a';
-  }
-
-  private getAffectedSpaceAssets(result: object): SharedSpaceFaceMatchBackfillTarget[] {
-    return (result as { affectedSpaceAssets?: SharedSpaceFaceMatchBackfillTarget[] }).affectedSpaceAssets ?? [];
-  }
-
-  private async queueSharedSpaceFaceMatchTargets(
-    targets: SharedSpaceFaceMatchBackfillTarget[],
-  ): Promise<SharedSpaceFaceMatchBackfillTarget[]> {
-    const uniqueTargets = new Map(
-      targets
-        .toSorted((a, b) => a.spaceId.localeCompare(b.spaceId) || a.assetId.localeCompare(b.assetId))
-        .map((target) => [`${target.spaceId}:${target.assetId}`, target]),
-    )
-      .values()
-      .toArray();
-
-    if (uniqueTargets.length === 0) {
-      return [];
-    }
-
-    let jobs: JobItem[] = [];
-    for (const { spaceId, assetId } of uniqueTargets) {
-      jobs.push({
-        name: JobName.SharedSpaceFaceMatchFromBackfill as const,
-        data: { spaceId, assetId },
-      });
-
-      if (jobs.length >= JOBS_ASSET_PAGINATION_SIZE) {
-        await this.jobRepository.queueAll(jobs);
-        jobs = [];
-      }
-    }
-
-    if (jobs.length > 0) {
-      await this.jobRepository.queueAll(jobs);
-    }
-
-    return uniqueTargets;
   }
 
   @OnJob({ name: JobName.AssetDetectFacesQueueAll, queue: QueueName.FaceDetection })
@@ -933,6 +515,7 @@ export class PersonService extends BaseService {
         })),
       );
     }
+    await this.videoFaces.queueMissing(machineLearning, force);
 
     if (force === undefined) {
       await this.jobRepository.queue({ name: JobName.PersonCleanup });
@@ -942,16 +525,20 @@ export class PersonService extends BaseService {
   }
 
   @OnJob({ name: JobName.AssetDetectFaces, queue: QueueName.FaceDetection })
-  async handleDetectFaces({ id, force }: JobOf<JobName.AssetDetectFaces>): Promise<JobStatus> {
+  async handleDetectFaces({ id, force, refreshEmbeddings }: JobOf<JobName.AssetDetectFaces>): Promise<JobStatus> {
     return this.databaseRepository.withAssetLock(id, async () => {
       if (await this.assetEditSaveRepository.isSaving(id, false)) {
         return JobStatus.Skipped;
       }
-      return this.handleDetectFacesUnlocked({ id, force });
+      return this.handleDetectFacesUnlocked({ id, force, refreshEmbeddings });
     });
   }
 
-  private async handleDetectFacesUnlocked({ id, force }: JobOf<JobName.AssetDetectFaces>): Promise<JobStatus> {
+  private async handleDetectFacesUnlocked({
+    id,
+    force,
+    refreshEmbeddings,
+  }: JobOf<JobName.AssetDetectFaces>): Promise<JobStatus> {
     const { machineLearning } = await this.getConfig({ withCache: true });
     if (!isFacialRecognitionEnabled(machineLearning)) {
       return JobStatus.Skipped;
@@ -967,6 +554,11 @@ export class PersonService extends BaseService {
       return JobStatus.Skipped;
     }
 
+    const videoResult = await this.videoFaces.detect(id, machineLearning, force);
+    if (videoResult) {
+      return videoResult;
+    }
+
     const { imageHeight, imageWidth, faces } = await this.machineLearningRepository.detectFaces(
       previewFile.path,
       machineLearning.facialRecognition,
@@ -976,6 +568,7 @@ export class PersonService extends BaseService {
     const facesToAdd: (Insertable<AssetFaceTable> & { id: string })[] = [];
     const embeddings: FaceSearchTable[] = [];
     const mlFaceIds = new Set<string>();
+    const refreshedUnassignedFaceIds: string[] = [];
 
     for (const face of asset.faces) {
       // Pet faces carry the same machine-learning sourceType as human faces, so without the isPet
@@ -986,27 +579,19 @@ export class PersonService extends BaseService {
     }
 
     for (const { boundingBox, embedding } of faces) {
-      const match = asset.faces.find((face) => {
-        // A detected human box must never resolve to a pet face: the match either consumes it or,
-        // once consumed, receives a human face_search embedding written over the pet (F4).
-        if (face.isPet) {
-          return false;
-        }
+      // A detected human box must never resolve to a pet face: the match either consumes it or,
+      // once consumed, receives a human face_search embedding written over the pet (F4).
+      const matches = asset.faces.filter(
+        (face) => !face.isPet && this.iou(face, boundingBox, imageWidth, imageHeight) > 0.5,
+      );
+      // prefer metadata faces over machine learning duplicates
+      const match = matches.find((face) => face.sourceType !== SourceType.MachineLearning) ?? matches[0];
 
-        const heightScale = face.imageHeight / imageHeight;
-        const widthScale = face.imageWidth / imageWidth;
-        const scaledBox = {
-          x1: boundingBox.x1 * widthScale,
-          y1: boundingBox.y1 * heightScale,
-          x2: boundingBox.x2 * widthScale,
-          y2: boundingBox.y2 * heightScale,
-        };
-
-        return this.iou(face, scaledBox) > 0.5;
-      });
-
-      if (match && !mlFaceIds.delete(match.id)) {
+      if (match && (!mlFaceIds.delete(match.id) || refreshEmbeddings)) {
         embeddings.push({ faceId: match.id, embedding });
+        if (refreshEmbeddings && match.sourceType === SourceType.MachineLearning && !match.personGroupId) {
+          refreshedUnassignedFaceIds.push(match.id);
+        }
       } else if (!match) {
         const faceId = this.cryptoRepository.randomUUID();
         facesToAdd.push({
@@ -1048,23 +633,54 @@ export class PersonService extends BaseService {
       this.logger.log(`Added ${embeddings.length} face embeddings for asset ${id}`);
     }
 
+    if (refreshedUnassignedFaceIds.length > 0) {
+      await this.jobRepository.queueAll(
+        refreshedUnassignedFaceIds.map((faceId) => ({
+          name: JobName.FacialRecognition,
+          data: { id: faceId },
+        })),
+      );
+    }
+
     await this.assetRepository.upsertJobStatus({ assetId: asset.id, facesRecognizedAt: new Date() });
 
     return JobStatus.Success;
   }
 
   private iou(
-    face: { boundingBoxX1: number; boundingBoxY1: number; boundingBoxX2: number; boundingBoxY2: number },
+    face: {
+      boundingBoxX1: number;
+      boundingBoxY1: number;
+      boundingBoxX2: number;
+      boundingBoxY2: number;
+      imageWidth: number;
+      imageHeight: number;
+    },
     newBox: BoundingBox,
+    imageWidth: number,
+    imageHeight: number,
   ): number {
-    const x1 = Math.max(face.boundingBoxX1, newBox.x1);
-    const y1 = Math.max(face.boundingBoxY1, newBox.y1);
-    const x2 = Math.min(face.boundingBoxX2, newBox.x2);
-    const y2 = Math.min(face.boundingBoxY2, newBox.y2);
+    const box1 = {
+      x1: face.boundingBoxX1 / face.imageWidth,
+      y1: face.boundingBoxY1 / face.imageHeight,
+      x2: face.boundingBoxX2 / face.imageWidth,
+      y2: face.boundingBoxY2 / face.imageHeight,
+    };
+    const box2 = {
+      x1: newBox.x1 / imageWidth,
+      y1: newBox.y1 / imageHeight,
+      x2: newBox.x2 / imageWidth,
+      y2: newBox.y2 / imageHeight,
+    };
+
+    const x1 = Math.max(box1.x1, box2.x1);
+    const y1 = Math.max(box1.y1, box2.y1);
+    const x2 = Math.min(box1.x2, box2.x2);
+    const y2 = Math.min(box1.y2, box2.y2);
 
     const intersection = Math.max(0, x2 - x1) * Math.max(0, y2 - y1);
-    const area1 = (face.boundingBoxX2 - face.boundingBoxX1) * (face.boundingBoxY2 - face.boundingBoxY1);
-    const area2 = (newBox.x2 - newBox.x1) * (newBox.y2 - newBox.y1);
+    const area1 = (box1.x2 - box1.x1) * (box1.y2 - box1.y1);
+    const area2 = (box2.x2 - box2.x1) * (box2.y2 - box2.y1);
     const union = area1 + area2 - intersection;
 
     return intersection / union;
@@ -1076,419 +692,299 @@ export class PersonService extends BaseService {
     nightly,
     clusterGroupId,
   }: JobOf<JobName.FacialRecognitionQueueAll>): Promise<JobStatus> {
-    const { machineLearning } = await this.getConfig({ withCache: false });
-    if (!isFacialRecognitionEnabled(machineLearning)) {
-      return JobStatus.Skipped;
-    }
-
-    if (nightly) {
-      const [state, latestFaceDate] = await Promise.all([
-        this.systemMetadataRepository.get(SystemMetadataKey.FacialRecognitionState),
-        this.personRepository.getLatestFaceDate(),
-      ]);
-
-      if (state?.lastRun && latestFaceDate && state.lastRun > latestFaceDate) {
-        this.logger.debug('Skipping facial recognition nightly since no face has been added since the last run');
+    return this.databaseRepository.withLock(DatabaseLock.FacialRecognition, async () => {
+      const { machineLearning } = await this.getConfig({ withCache: false });
+      if (!isFacialRecognitionEnabled(machineLearning)) {
         return JobStatus.Skipped;
       }
-    }
 
-    await this.jobRepository.waitForQueueCompletion(QueueName.ThumbnailGeneration, QueueName.FaceDetection);
+      if (nightly) {
+        const [state, latestFaceDate] = await Promise.all([
+          this.systemMetadataRepository.get(SystemMetadataKey.FacialRecognitionState),
+          this.personRepository.getLatestFaceDate(),
+        ]);
 
-    if (force) {
-      // S9 (F19): a separate, bounded wait — PersonSuggestionScanQueueAll/SpacePersonSuggestionScanQueueAll
-      // (F17/F18) can keep the concurrency-1 PeopleBackfill queue busy indefinitely, and this forced
-      // recognition run must proceed rather than park forever behind that sweep. Bounding only this call
-      // leaves the ThumbnailGeneration/FaceDetection wait above (and every other call site) unbounded.
-      await this.jobRepository.waitForQueueCompletion(QueueName.PeopleBackfill, {
-        timeoutMs: PEOPLE_BACKFILL_WAIT_TIMEOUT_MS,
-      });
-    }
+        if (state?.lastRun && latestFaceDate && state.lastRun > latestFaceDate) {
+          this.logger.debug('Skipping facial recognition nightly since no face has been added since the last run');
+          return JobStatus.Skipped;
+        }
+      }
 
-    if (force) {
-      await this.jobRepository.empty(QueueName.FacialRecognition, true);
-    }
+      await this.jobRepository.waitForQueueCompletion(QueueName.ThumbnailGeneration, QueueName.FaceDetection);
 
-    const { active, delayed, paused, waiting } = await this.jobRepository.getJobCounts(QueueName.FacialRecognition);
-    const hasOtherActiveRecognitionWork = active > 1;
-    const hasPendingRecognitionWork = waiting > 0 || delayed > 0 || paused > 0 || hasOtherActiveRecognitionWork;
+      if (force) {
+        // S9 (F19): a separate, bounded wait — PersonSuggestionScanQueueAll/SpacePersonSuggestionScanQueueAll
+        // (F17/F18) can keep the concurrency-1 PeopleBackfill queue busy indefinitely, and this forced
+        // recognition run must proceed rather than park forever behind that sweep. Bounding only this call
+        // leaves the ThumbnailGeneration/FaceDetection wait above (and every other call site) unbounded.
+        await this.jobRepository.waitForQueueCompletion(QueueName.PeopleBackfill, {
+          timeoutMs: PEOPLE_BACKFILL_WAIT_TIMEOUT_MS,
+        });
+      }
 
-    if (force) {
-      // excludePetFaces / excludePets throughout: pet faces share the machine-learning sourceType
-      // and space pet copies are untyped-wipe collateral, so an unfiltered human reset unassigns
-      // pet faces, unlinks their identities and deletes every space pet copy (F1).
-      await this.personRepository.unassignFaces({
-        clusterGroupId,
-        sourceType: SourceType.MachineLearning,
-        excludePetFaces: true,
-      });
-      await this.faceIdentityRepository.unlinkFacesBySourceType(SourceType.MachineLearning, {
-        excludePetFaces: true,
-      });
-      await this.handlePersonCleanup();
-      await this.vacuum('asset_face', 'person');
+      if (force) {
+        await this.jobRepository.empty(QueueName.FacialRecognition, true);
+      }
 
-      // Wipe shared-space person state so the new strict clustering algorithm can
-      // rebuild from scratch. Aliases cascade via the FK on personId; named
-      // space-persons are lost by design (Force already clears named native persons).
-      await this.sharedSpaceRepository.deleteAllPersonFaces({ excludePets: true });
-      await this.sharedSpaceRepository.deleteAllPersons({ excludePets: true });
-      await this.faceIdentityRepository.deleteUnreferencedIdentities();
-      // Slice 8 (F16): the reaper for face_person_verdict rows deleteUnreferencedIdentities is what nulls a
-      // row's LAST remaining key (personId/spacePersonId are already NULL by this point, via the person and
-      // space-person wipes above) — a row is only fully orphaned once this line has run, so the reaper must
-      // run strictly after it, not from inside handlePersonCleanup a few lines up (which runs BEFORE the
-      // space-person wipe and before this identity GC — see the ordering test in
-      // face-review-cross-flow.spec.ts for the discriminating case).
-      await this.facePersonVerdictRepository.deleteOrphanedVerdicts();
-    } else if (hasPendingRecognitionWork) {
-      this.logger.debug(
-        `Skipping facial recognition queueing because recognition work is already pending ` +
-          `(${active} active, ${waiting} waiting, ${delayed} delayed, ${paused} paused)`,
+      const { active, delayed, waiting } = await this.jobRepository.getJobCounts(QueueName.FacialRecognition);
+      const hasOtherActiveRecognitionWork = active > 1;
+      const hasPendingRecognitionWork = waiting > 0 || delayed > 0 || hasOtherActiveRecognitionWork;
+
+      if (force) {
+        // excludePetFaces / excludePets throughout: pet faces share the machine-learning sourceType
+        // and space pet copies are untyped-wipe collateral, so an unfiltered human reset unassigns
+        // pet faces, unlinks their identities and deletes every space pet copy (F1).
+        await this.personRepository.unassignFaces({
+          clusterGroupId,
+          sourceType: SourceType.MachineLearning,
+          excludePetFaces: true,
+        });
+        await this.faceIdentityRepository.unlinkFacesBySourceType(SourceType.MachineLearning, {
+          excludePetFaces: true,
+        });
+        await this.handlePersonCleanup();
+        await this.vacuum('asset_face', 'person');
+
+        await this.faceIdentity.resetSharedSpacePeople();
+      } else if (hasPendingRecognitionWork) {
+        this.logger.debug(
+          `Skipping facial recognition queueing because recognition work is already pending ` +
+            `(${active} active, ${waiting} waiting, ${delayed} delayed)`,
+        );
+        return JobStatus.Skipped;
+      }
+
+      await this.databaseRepository.prewarm(VectorIndex.Face);
+
+      const lastRun = new Date().toISOString();
+
+      // Slice 5 (F9): excludeManuallyPlaced only applies on the non-forced branch. The forced branch already
+      // wiped every face_identity_face row via unassignFaces above, so there is nothing left to preserve —
+      // passing it there would be meaningless.
+      // excludePetFaces on both arms: pet faces would otherwise be fanned out as human
+      // FacialRecognition jobs, which fail (no face_search embedding) on every run (F2).
+      const faces = this.personRepository.getAllFaces(
+        force
+          ? { clusterGroupId, sourceType: SourceType.MachineLearning, excludePetFaces: true }
+          : {
+              personGroupId: null,
+              clusterGroupId,
+              sourceType: SourceType.MachineLearning,
+              excludeManuallyPlaced: true,
+              excludePetFaces: true,
+            },
       );
-      return JobStatus.Skipped;
-    }
+      for await (const batch of batched(faces)) {
+        await this.jobRepository.queueAll(
+          batch.map((face) => ({
+            name: JobName.FacialRecognition as const,
+            data: {
+              id: face.id,
+              deferred: false as const,
+              ...(force && { skipSharedSpaceMatch: true as const }),
+            },
+          })),
+        );
+      }
 
-    await this.databaseRepository.prewarm(VectorIndex.Face);
+      // Queue SharedSpaceFaceMatchAll AFTER recognition jobs so it runs last.
+      // This catches EXIF/manual-sourced faces whose personIds survive
+      // unassignFaces (non-ML source). Force-created recognition jobs suppress
+      // incremental space matching, so the paged rebuild is the authoritative
+      // shared-space reconciliation pass.
+      if (force) {
+        const spaceIds = await this.sharedSpaceRepository.getSpaceIdsWithFaceRecognitionEnabled();
+        await this.jobRepository.queueAll(
+          spaceIds.map((spaceId) => ({
+            name: JobName.SharedSpaceFaceMatchAll as const,
+            data: { spaceId },
+          })),
+        );
+      }
 
-    const lastRun = new Date().toISOString();
+      await this.jobRepository.queue({ name: JobName.FaceIdentityMaintenanceAfterRecognition, data: {} });
 
-    // Slice 5 (F9): excludeManuallyPlaced only applies on the non-forced branch. The forced branch already
-    // wiped every face_identity_face row via unassignFaces above, so there is nothing left to preserve —
-    // passing it there would be meaningless.
-    // excludePetFaces on both arms: pet faces would otherwise be fanned out as human
-    // FacialRecognition jobs, which fail (no face_search embedding) on every run (F2).
-    const faces = this.personRepository.getAllFaces(
-      force
-        ? { clusterGroupId, sourceType: SourceType.MachineLearning, excludePetFaces: true }
-        : {
-            personGroupId: null,
-            clusterGroupId,
-            sourceType: SourceType.MachineLearning,
-            excludeManuallyPlaced: true,
-            excludePetFaces: true,
-          },
-    );
-    for await (const batch of batched(faces)) {
-      await this.jobRepository.queueAll(
-        batch.map((face) => ({
-          name: JobName.FacialRecognition as const,
-          data: {
-            id: face.id,
-            deferred: false as const,
-            ...(force && { skipSharedSpaceMatch: true as const }),
-          },
-        })),
-      );
-    }
+      await this.systemMetadataRepository.set(SystemMetadataKey.FacialRecognitionState, { lastRun });
 
-    // Queue SharedSpaceFaceMatchAll AFTER recognition jobs so it runs last.
-    // This catches EXIF/manual-sourced faces whose personIds survive
-    // unassignFaces (non-ML source). Force-created recognition jobs suppress
-    // incremental space matching, so the paged rebuild is the authoritative
-    // shared-space reconciliation pass.
-    if (force) {
-      const spaceIds = await this.sharedSpaceRepository.getSpaceIdsWithFaceRecognitionEnabled();
-      await this.jobRepository.queueAll(
-        spaceIds.map((spaceId) => ({
-          name: JobName.SharedSpaceFaceMatchAll as const,
-          data: { spaceId },
-        })),
-      );
-    }
-
-    await this.jobRepository.queue({ name: JobName.FaceIdentityMaintenanceAfterRecognition, data: {} });
-
-    await this.systemMetadataRepository.set(SystemMetadataKey.FacialRecognitionState, { lastRun });
-
-    return JobStatus.Success;
-  }
-
-  @OnJob({ name: JobName.FaceIdentityMaintenanceAfterRecognition, queue: QueueName.FacialRecognition })
-  async handleFaceIdentityMaintenanceAfterRecognition(
-    _data: JobOf<JobName.FaceIdentityMaintenanceAfterRecognition>,
-  ): Promise<JobStatus> {
-    const counts = await this.jobRepository.getJobCounts(QueueName.FacialRecognition);
-
-    if (counts.waiting > 0 || counts.delayed > 0 || counts.paused > 0) {
-      await this.jobRepository.queue({
-        name: JobName.FaceIdentityMaintenanceAfterRecognition,
-        data: { delay: 10_000 },
-      });
       return JobStatus.Success;
-    }
-
-    // active=1 means only this marker is running — queue has drained
-    if (counts.active > 1) {
-      await this.jobRepository.queue({
-        name: JobName.FaceIdentityMaintenanceAfterRecognition,
-        data: { delay: 10_000 },
-      });
-      return JobStatus.Success;
-    }
-
-    const activeBackfills = await this.jobRepository.searchJobs(QueueName.PeopleBackfill, {
-      status: [QueueJobStatus.Active, QueueJobStatus.Delayed, QueueJobStatus.Paused, QueueJobStatus.Waiting],
     });
-    if (activeBackfills.some((job) => job.name === JobName.FaceIdentityBackfill)) {
-      return JobStatus.Skipped;
-    }
-
-    await this.jobRepository.queue({ name: JobName.FaceIdentityBackfill, data: {} });
-    return JobStatus.Success;
   }
 
   @OnJob({ name: JobName.FacialRecognition, queue: QueueName.FacialRecognition })
-  async handleRecognizeFaces({
-    id,
-    deferred,
-    skipSharedSpaceMatch,
-  }: JobOf<JobName.FacialRecognition>): Promise<JobStatus> {
+  async handleRecognizeFaces(job: JobOf<JobName.FacialRecognition>): Promise<JobStatus> {
     const { machineLearning } = await this.getConfig({ withCache: true });
     if (!isFacialRecognitionEnabled(machineLearning)) {
       return JobStatus.Skipped;
     }
-
-    const face = await this.personRepository.getFaceForFacialRecognitionJob(id);
-    if (!face || !face.asset) {
-      this.logger.warn(`Face ${id} not found`);
-      return JobStatus.Failed;
+    const face = await this.personRepository.getFaceForFacialRecognitionJob(job.id);
+    if (!face) {
+      return this.handleRecognizeFacesUnlocked(job);
     }
+    return this.databaseRepository.withAssetLock(face.assetId, async () => {
+      if (await this.assetEditSaveRepository.isSaving(face.assetId, false)) {
+        return JobStatus.Skipped;
+      }
+      return this.handleRecognizeFacesUnlocked(job);
+    });
+  }
 
-    if (face.sourceType !== SourceType.MachineLearning) {
-      this.logger.warn(`Skipping face ${id} due to source ${face.sourceType}`);
-      return JobStatus.Skipped;
-    }
-
-    if (!face.faceSearch?.embedding) {
-      this.logger.warn(`Face ${id} does not have an embedding`);
-      return JobStatus.Failed;
-    }
-
-    if (face.personGroupId) {
-      this.logger.debug(`Face ${id} already has a person assigned`);
-      await this.replaceFaceIdentity(face.personGroupId, face.id, 'owner-person');
-
-      if (skipSharedSpaceMatch) {
+  private async handleRecognizeFacesUnlocked({
+    id,
+    deferred,
+    skipSharedSpaceMatch,
+  }: JobOf<JobName.FacialRecognition>): Promise<JobStatus> {
+    return this.databaseRepository.withLock(DatabaseLock.FacialRecognition, async () => {
+      const { machineLearning } = await this.getConfig({ withCache: true });
+      if (!isFacialRecognitionEnabled(machineLearning)) {
         return JobStatus.Skipped;
       }
 
-      // Still queue space face matching because this face may belong to a space
-      // that was created or linked after the face was originally recognized.
-      await this.queueSharedSpaceFaceMatchesForAsset(face.assetId);
+      const face = await this.personRepository.getFaceForFacialRecognitionJob(id);
+      if (!face || !face.asset) {
+        this.logger.warn(`Face ${id} not found`);
+        return JobStatus.Failed;
+      }
 
-      return JobStatus.Skipped;
-    }
+      if (face.sourceType !== SourceType.MachineLearning) {
+        this.logger.warn(`Skipping face ${id} due to source ${face.sourceType}`);
+        return JobStatus.Skipped;
+      }
 
-    const { ownerId } = face.asset;
-    const matches = await this.searchRepository.searchFaces({
-      userIds: [ownerId],
-      embedding: face.faceSearch.embedding,
-      maxDistance: machineLearning.facialRecognition.maxDistance,
-      numResults: machineLearning.facialRecognition.minFaces,
-      minBirthDate: new Date(face.asset.fileCreatedAt),
-    });
+      if (!face.faceSearch?.embedding) {
+        this.logger.warn(`Face ${id} does not have an embedding`);
+        return JobStatus.Failed;
+      }
 
-    this.logger.debug(`Face ${id} has ${matches.length} matches`);
+      if (face.personGroupId) {
+        this.logger.debug(`Face ${id} already has a person assigned`);
+        await this.faceIdentity.replaceFaceIdentity(face.personGroupId, face.id, 'owner-person');
 
-    let personGroupId = matches.find((match) => match.personGroupId)?.personGroupId;
-    const accessibleIdentityMatch = personGroupId
-      ? undefined
-      : await this.findClosestAccessibleSharedIdentity({
+        if (skipSharedSpaceMatch) {
+          return JobStatus.Skipped;
+        }
+
+        // Still queue space face matching because this face may belong to a space
+        // that was created or linked after the face was originally recognized.
+        await this.faceIdentity.queueSharedSpaceFaceMatchesForAsset(face.assetId);
+
+        return JobStatus.Skipped;
+      }
+
+      if (!(await this.videoFaces.mayRecognize(face.id, machineLearning))) {
+        this.logger.debug(`Skipping face ${id}: a video face below the minimum recognition score`);
+        return JobStatus.Skipped;
+      }
+
+      const { ownerId, clusterGroupId } = face.asset;
+      const matches = await this.searchRepository.searchFaces({
+        clusterGroupId,
+        embedding: face.faceSearch.embedding,
+        maxDistance: machineLearning.facialRecognition.maxDistance,
+        numResults: machineLearning.facialRecognition.minFaces,
+        minBirthDate: new Date(face.asset.fileCreatedAt),
+        excludeOtherFacesOfVideo: face.id,
+      });
+
+      this.logger.debug(`Face ${id} has ${matches.length} matches`);
+
+      let personGroupId = matches.find((match) => match.personGroupId)?.personGroupId;
+      const accessibleIdentityMatch = personGroupId
+        ? undefined
+        : await this.faceIdentity.findClosestAccessibleSharedIdentity({
+            userId: face.asset.ownerId,
+            embedding: face.faceSearch.embedding,
+            maxDistance: machineLearning.facialRecognition.maxDistance,
+          });
+
+      // `matches` also includes the face itself
+      const matchedOnlySelf =
+        machineLearning.facialRecognition.minFaces > 1 && matches.length <= 1 && !accessibleIdentityMatch;
+      if (matchedOnlySelf && !skipSharedSpaceMatch) {
+        this.logger.debug(`Face ${id} only matched the face itself, skipping`);
+        return JobStatus.Skipped;
+      }
+
+      const isCore =
+        (matches.length >= machineLearning.facialRecognition.minFaces || !!accessibleIdentityMatch) &&
+        face.asset.visibility === AssetVisibility.Timeline &&
+        (await this.videoFaces.mayStartPerson(face.id, machineLearning));
+      if (!isCore && !deferred) {
+        this.logger.debug(`Deferring non-core face ${id} for later processing`);
+        await this.jobRepository.queue({
+          name: JobName.FacialRecognition,
+          data: {
+            id,
+            deferred: true,
+            ...(skipSharedSpaceMatch && { skipSharedSpaceMatch: true }),
+          },
+        });
+        return JobStatus.Skipped;
+      }
+
+      if (matchedOnlySelf) {
+        this.logger.debug(`Face ${id} only matched the face itself, skipping`);
+        return JobStatus.Skipped;
+      }
+
+      if (!personGroupId) {
+        const [matchWithPerson] = await this.searchRepository.searchFaces({
+          clusterGroupId,
+          embedding: face.faceSearch.embedding,
+          maxDistance: machineLearning.facialRecognition.maxDistance,
+          numResults: 1,
+          hasPerson: true,
+          minBirthDate: new Date(face.asset.fileCreatedAt),
+          excludeOtherFacesOfVideo: face.id,
+        });
+
+        personGroupId = matchWithPerson?.personGroupId ?? undefined;
+      }
+
+      if (!personGroupId && isCore) {
+        const group = await this.personRepository.createGroup(ownerId);
+        personGroupId = group.id;
+        this.logger.log(`Created person group ${personGroupId} for face ${id}`);
+      }
+
+      if (personGroupId) {
+        const person = await this.personRepository.getByGroupId({ ownerId, personGroupId });
+        let personCreated = false;
+        if (person) {
+          this.logger.debug(`Face ${id} matched person ${person.personGroupId}`);
+        } else {
+          personCreated = true;
+          await this.personRepository.create({ ownerId, faceAssetId: face.id, personGroupId });
+          this.logger.log(`Created person for face ${id} in group ${personGroupId}`);
+          await this.jobRepository.queue({
+            name: JobName.PersonGenerateThumbnail,
+            data: { ownerId, personGroupId },
+          });
+        }
+
+        this.logger.debug(`Assigning face ${id} to person group ${personGroupId}`);
+        await this.personRepository.reassignFaces({ faceIds: [id], newPersonGroupId: personGroupId });
+        const sourceIdentityId = await this.faceIdentity.replaceFaceIdentity(personGroupId, id, 'owner-person');
+        await this.faceIdentity.mergeWithAccessibleSharedIdentity({
           userId: face.asset.ownerId,
           embedding: face.faceSearch.embedding,
           maxDistance: machineLearning.facialRecognition.maxDistance,
-        });
-
-    // `matches` also includes the face itself
-    const matchedOnlySelf =
-      machineLearning.facialRecognition.minFaces > 1 && matches.length <= 1 && !accessibleIdentityMatch;
-    if (matchedOnlySelf && !skipSharedSpaceMatch) {
-      this.logger.debug(`Face ${id} only matched the face itself, skipping`);
-      return JobStatus.Skipped;
-    }
-
-    const isCore =
-      (matches.length >= machineLearning.facialRecognition.minFaces || !!accessibleIdentityMatch) &&
-      face.asset.visibility === AssetVisibility.Timeline;
-    if (!isCore && !deferred) {
-      this.logger.debug(`Deferring non-core face ${id} for later processing`);
-      await this.jobRepository.queue({
-        name: JobName.FacialRecognition,
-        data: {
-          id,
-          deferred: true,
-          ...(skipSharedSpaceMatch && { skipSharedSpaceMatch: true }),
-        },
-      });
-      return JobStatus.Skipped;
-    }
-
-    if (matchedOnlySelf) {
-      this.logger.debug(`Face ${id} only matched the face itself, skipping`);
-      return JobStatus.Skipped;
-    }
-
-    if (!personGroupId) {
-      const [matchWithPerson] = await this.searchRepository.searchFaces({
-        userIds: [ownerId],
-        embedding: face.faceSearch.embedding,
-        maxDistance: machineLearning.facialRecognition.maxDistance,
-        numResults: 1,
-        hasPerson: true,
-        minBirthDate: new Date(face.asset.fileCreatedAt),
-      });
-
-      personGroupId = matchWithPerson?.personGroupId ?? undefined;
-    }
-
-    if (!personGroupId && isCore) {
-      const group = await this.personRepository.createGroup(ownerId);
-      personGroupId = group.id;
-      this.logger.log(`Created person group ${personGroupId} for face ${id}`);
-    }
-
-    if (personGroupId) {
-      const person = await this.personRepository.getByGroupId({ ownerId, personGroupId });
-      let personCreated = false;
-      if (person) {
-        this.logger.debug(`Face ${id} matched person ${person.personGroupId}`);
-      } else {
-        personCreated = true;
-        await this.personRepository.create({ ownerId, faceAssetId: face.id, personGroupId });
-        this.logger.log(`Created person for face ${id} in group ${personGroupId}`);
-        await this.jobRepository.queue({
-          name: JobName.PersonGenerateThumbnail,
-          data: { ownerId, personGroupId },
+          sourceIdentityId,
+          match: personCreated ? accessibleIdentityMatch : undefined,
         });
       }
 
-      this.logger.debug(`Assigning face ${id} to person group ${personGroupId}`);
-      await this.personRepository.reassignFaces({ faceIds: [id], newPersonGroupId: personGroupId });
-      const sourceIdentityId = await this.replaceFaceIdentity(personGroupId, id, 'owner-person');
-      await this.mergeWithAccessibleSharedIdentity({
-        userId: face.asset.ownerId,
-        embedding: face.faceSearch.embedding,
-        maxDistance: machineLearning.facialRecognition.maxDistance,
-        sourceIdentityId,
-        match: personCreated ? accessibleIdentityMatch : undefined,
-      });
-    }
+      if (!personGroupId) {
+        this.logger.debug(`Face ${id} did not resolve to a person, skipping shared-space face matching`);
+        return JobStatus.Skipped;
+      }
 
-    if (!personGroupId) {
-      this.logger.debug(`Face ${id} did not resolve to a person, skipping shared-space face matching`);
-      return JobStatus.Skipped;
-    }
+      if (skipSharedSpaceMatch) {
+        return JobStatus.Success;
+      }
 
-    if (skipSharedSpaceMatch) {
+      await this.faceIdentity.queueSharedSpaceFaceMatchesForAsset(face.assetId);
+
       return JobStatus.Success;
-    }
-
-    await this.queueSharedSpaceFaceMatchesForAsset(face.assetId);
-
-    return JobStatus.Success;
-  }
-
-  private async queueSharedSpaceFaceMatchesForAsset(assetId: string): Promise<void> {
-    const spaceIds = await this.sharedSpaceRepository.getSpaceIdsForAsset(assetId);
-    const queuedSpaceIds = new Set<string>();
-    for (const { spaceId } of spaceIds) {
-      if (queuedSpaceIds.has(spaceId)) {
-        continue;
-      }
-      queuedSpaceIds.add(spaceId);
-      await this.jobRepository.queue({
-        name: JobName.SharedSpaceFaceMatch,
-        data: { spaceId, assetId },
-      });
-    }
-  }
-
-  private async replaceFaceIdentity(
-    personId: string,
-    assetFaceId: string,
-    source: 'owner-person' | 'manual',
-  ): Promise<string> {
-    const identity = await this.faceIdentityRepository.ensurePersonIdentity(personId);
-    await this.faceIdentityRepository.replaceFaceIdentity({ assetFaceId, identityId: identity.id, source });
-    return identity.id;
-  }
-
-  private async mergeWithAccessibleSharedIdentity(input: {
-    userId: string;
-    embedding: string;
-    maxDistance: number;
-    sourceIdentityId: string;
-    match?: AccessibleIdentityFaceMatch;
-  }): Promise<void> {
-    const match =
-      input.match ??
-      (await this.findClosestAccessibleSharedIdentity({
-        userId: input.userId,
-        embedding: input.embedding,
-        maxDistance: input.maxDistance,
-        excludeIdentityId: input.sourceIdentityId,
-      }));
-    if (!match || match.identityId === input.sourceIdentityId) {
-      return;
-    }
-
-    const target = chooseAutomaticTargetIdentity({
-      bridge: 'personal-upload',
-      localIdentityId: input.sourceIdentityId,
-      spaceIdentityId: match.identityId,
-    });
-    const claim = buildAutomaticReconciliationClaim({
-      bridge: 'personal-upload',
-      localIdentityId: input.sourceIdentityId,
-      spaceIdentityId: match.identityId,
-      sourceIdentityId: target.sourceIdentityId,
-      targetIdentityId: target.targetIdentityId,
-      distance: match.distance,
-      hasAccessBridge: true,
-      compatibleType: true,
-      hasEmbedding: true,
-      hiddenOrIgnored: false,
-      alreadySameIdentity: match.identityId === input.sourceIdentityId,
-      sameOwnerConflict: false,
-      sameSpaceConflict: false,
-    });
-    if (!claim) {
-      return;
-    }
-
-    const conflicts = await this.faceIdentityRepository.getMergeConflicts({
-      targetIdentityId: claim.targetIdentityId,
-      sourceIdentityIds: [claim.sourceIdentityId],
-    });
-    if (conflicts.personalProfileConflictCount > 0 || conflicts.spaceProfileConflictCount > 0) {
-      this.logger.warn(
-        `Skipping accessible identity merge due to conflicts: ${conflicts.personalProfileConflictCount} personal, ${conflicts.spaceProfileConflictCount} space`,
-      );
-      return;
-    }
-
-    await this.faceIdentityRepository.mergeIdentities({
-      targetIdentityId: claim.targetIdentityId,
-      sourceIdentityIds: [claim.sourceIdentityId],
-      source: 'shared-space-evidence',
-    });
-
-    await this.queueSpacePersonMetadataBackfill(claim.targetIdentityId);
-  }
-
-  private findClosestAccessibleSharedIdentity(input: {
-    userId: string;
-    embedding: string;
-    maxDistance: number;
-    excludeIdentityId?: string | null;
-  }): Promise<AccessibleIdentityFaceMatch | undefined> {
-    return this.faceIdentityRepository.findClosestAccessibleIdentityForFace({
-      userId: input.userId,
-      embedding: input.embedding,
-      maxDistance: input.maxDistance,
-      type: 'person',
-      excludeIdentityId: input.excludeIdentityId ?? null,
     });
   }
 
@@ -1499,27 +995,21 @@ export class PersonService extends BaseService {
       return JobStatus.Failed;
     }
 
-    if (!person.thumbnailPath || !isAbsolute(person.thumbnailPath)) {
-      // S3 thumbnails live under relative keys and are managed by the S3 backend, not fs.rename.
-      this.logger.debug(`Skipping person file migration for S3 person ${personGroupId}`);
-      return JobStatus.Skipped;
-    }
-
     await this.storageCore.movePersonFile(person, PersonPathType.Face);
 
     return JobStatus.Success;
   }
 
   /**
-   * Multi-person bulk merge (upstream's cluster-group `mergePeople`, adopted inert). Upstream's own
-   * "merge an ordered list of people into a single person" contract already reduces to a single
-   * target: `ids[0]` is that person, everything after it merges into it — exactly what
-   * {@link mergePerson} does, cross-owner authorizer included. An earlier per-owner grouping here
-   * (splitting `ids` into same-owner clusters) silently no-opped a target/source pair that
-   * belonged to different owners instead of merging them, which broke the fork's real cross-owner
-   * flow (#733: a personal merge that reaches into another owner's identity). Delegating directly
-   * avoids that trap and matches `origin/main`'s `mergePerson` behavior.
-   */
+  Multi-person bulk merge (upstream's cluster-group `mergePeople`, adopted inert). Upstream's own
+  "merge an ordered list of people into a single person" contract already reduces to a single
+  target: `ids[0]` is that person, everything after it merges into it — exactly what
+  {@link mergePerson} does, cross-owner authorizer included. An earlier per-owner grouping here
+  (splitting `ids` into same-owner clusters) silently no-opped a target/source pair that
+  belonged to different owners instead of merging them, which broke the fork's real cross-owner
+  flow (#733: a personal merge that reaches into another owner's identity). Delegating directly
+  avoids that trap and matches `origin/main`'s `mergePerson` behavior.
+  */
   async mergePeople(auth: AuthDto, { ids, confirmCrossOwner }: MergePersonDto): Promise<BulkIdResponseDto[]> {
     if (ids.length < 2) {
       throw new BadRequestException('At least two people are required for merging');
@@ -1578,13 +1068,6 @@ export class PersonService extends BaseService {
     );
   }
 
-  private async queueSpacePersonMetadataBackfill(identityId?: string | null): Promise<void> {
-    await this.jobRepository.queue({
-      name: JobName.SharedSpacePersonMetadataBackfill,
-      data: identityId ? { identityId } : {},
-    });
-  }
-
   // Upstream looks the person up owner-scoped (`getByGroupId({ ownerId, personGroupId })`) because it has
   // no concept of a person reachable by anyone but its owner. In the fork, `requireAccess` above each call
   // site is the authorization gate, and several of those permissions (PersonRead in particular) admit
@@ -1598,8 +1081,10 @@ export class PersonService extends BaseService {
   // TODO return a asset face response
   async createFace(auth: AuthDto, dto: AssetFaceCreateDto): Promise<void> {
     await Promise.all([
-      this.requireAccess({ auth, permission: Permission.AssetUpdate, ids: [dto.assetId] }),
-      this.requireAccess({ auth, permission: Permission.PersonRead, ids: [dto.personId] }),
+      requireAssetEditAccess(this.accessRepository, { auth, ids: [dto.assetId] }),
+      // Upstream requires the caller's own person. PersonRead also admits space members, which would let them write
+      // faces into another member's person; space people go through SharedSpaceService.createSpaceAssetFace.
+      this.requireAccess({ auth, permission: Permission.PersonUpdate, ids: [dto.personId] }),
     ]);
 
     const [asset, person] = await Promise.all([
@@ -1611,58 +1096,28 @@ export class PersonService extends BaseService {
       throw new NotFoundException('Asset not found');
     }
 
-    const edits = asset.edits || [];
-
-    let topLeft: Point = { x: dto.x, y: dto.y };
-    let bottomRight: Point = { x: dto.x + dto.width, y: dto.y + dto.height };
-
-    // the coordinates received from the client are based on the edited preview image
-    // we need to convert them to the coordinate space of the original unedited image
-    if (edits.length > 0) {
-      if (!asset.width || !asset.height || !asset.exifInfo?.exifImageWidth || !asset.exifInfo?.exifImageHeight) {
-        throw new BadRequestException('Asset does not have valid dimensions');
-      }
-
-      // convert from preview to full dimensions
-      const scaleFactor = asset.width / dto.imageWidth;
-      topLeft = { x: topLeft.x * scaleFactor, y: topLeft.y * scaleFactor };
-      bottomRight = { x: bottomRight.x * scaleFactor, y: bottomRight.y * scaleFactor };
-
-      const [invertedTopLeft, invertedBottomRight] = transformPoints(
-        [topLeft, bottomRight],
-        edits,
-        { width: asset.width, height: asset.height },
-        { inverse: true },
-      ).points;
-
-      // make sure topLeft is top-left and bottomRight is bottom-right
-      topLeft = {
-        x: Math.min(invertedTopLeft.x, invertedBottomRight.x),
-        y: Math.min(invertedTopLeft.y, invertedBottomRight.y),
-      };
-      bottomRight = {
-        x: Math.max(invertedTopLeft.x, invertedBottomRight.x),
-        y: Math.max(invertedTopLeft.y, invertedBottomRight.y),
-      };
-
-      // now coordinates are in original image space
-      const originalDimensions = getDimensions(asset.exifInfo);
-      dto.imageWidth = originalDimensions.width;
-      dto.imageHeight = originalDimensions.height;
-    }
+    // the coordinates received from the client are based on the edited preview image; convert
+    // them to the coordinate space of the original unedited image. Shared with the space
+    // face-assign endpoint (SharedSpaceService.createSpaceAssetFace) so the two can never drift.
+    const { topLeft, bottomRight, imageWidth, imageHeight } = convertFaceBoxToOriginalImageSpace(dto, asset);
 
     const faceId = await this.personRepository.createAssetFace({
       personGroupId: person.personGroupId,
       assetId: dto.assetId,
-      imageHeight: dto.imageHeight,
-      imageWidth: dto.imageWidth,
+      imageHeight,
+      imageWidth,
       boundingBoxX1: Math.round(topLeft.x),
       boundingBoxX2: Math.round(bottomRight.x),
       boundingBoxY1: Math.round(topLeft.y),
       boundingBoxY2: Math.round(bottomRight.y),
       sourceType: SourceType.Manual,
     });
-    await this.replaceFaceIdentity(dto.personId, faceId, 'manual');
+    await this.faceAssignmentService.assignFaces({
+      personGroupId: person.personGroupId,
+      faceIds: [faceId],
+      strength: 'manual',
+      from: person.personGroupId,
+    });
 
     if (!person.faceAssetId) {
       await this.createNewFeaturePhoto([person]);
@@ -1674,6 +1129,18 @@ export class PersonService extends BaseService {
 
     await (dto.force ? this.personRepository.deleteAssetFace(id) : this.personRepository.softDeleteAssetFaces(id));
     await this.faceIdentityRepository.unlinkFaces([id]);
+  }
+
+  getUsersForPeople(_auth: AuthDto, _dto: PersonUsersSearchDto): Promise<PersonUsersResponseDto> {
+    return Promise.resolve([]);
+  }
+
+  upsertPeopleUsers(_auth: AuthDto, _dto: PeopleUsersUpsertDto): Promise<void> {
+    throw personSharingUnsupported();
+  }
+
+  removeUsersFromPeople(_auth: AuthDto, _dto: PersonUsersDeleteDto): Promise<void> {
+    throw personSharingUnsupported();
   }
 
   private vacuum(...tables: (keyof DB)[]): Promise<unknown> {

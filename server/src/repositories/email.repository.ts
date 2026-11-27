@@ -1,13 +1,13 @@
 import { Injectable } from '@nestjs/common';
-import { render } from '@react-email/render';
 import { createTransport } from 'nodemailer';
 import React, { createElement } from 'react';
-import type { EmailImageAttachment } from 'src/types.js';
+import { render } from 'react-email';
 import { AlbumInviteEmail } from 'src/emails/album-invite.email.js';
 import { AlbumUpdateEmail } from 'src/emails/album-update.email.js';
 import { TestEmail } from 'src/emails/test.email.js';
 import { WelcomeEmail } from 'src/emails/welcome.email.js';
 import { LoggingRepository } from 'src/repositories/logging.repository.js';
+import type { EmailImageAttachment } from 'src/types.js';
 
 export type SendEmailOptions = {
   from: string;
@@ -126,8 +126,8 @@ export class EmailRepository {
 
     const attachments = imageAttachments?.map((attachment) => ({
       filename: attachment.filename,
+      path: attachment.path,
       cid: attachment.cid,
-      ...(attachment.content ? { content: attachment.content } : { path: attachment.path }),
     }));
 
     try {

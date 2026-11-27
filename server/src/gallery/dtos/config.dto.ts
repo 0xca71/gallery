@@ -1,0 +1,411 @@
+import z from 'zod';
+import { QueueName } from 'src/enum.js';
+
+// Deliberate copy of the module-private `configBool` in src/dtos/config.dto.ts. This module must
+// stay a leaf — importing from config.dto.ts would be circular and leave this undefined at
+// module-init time. Keep the two in sync; the coercion is what makes IMMICH_CONFIG_FILE string
+// booleans parse.
+export const galleryConfigBool = z
+  .preprocess((val) => {
+    if (val === 'true') {
+      return true;
+    }
+    if (val === 'false') {
+      return false;
+    }
+    return val;
+  }, z.boolean())
+  .meta({ type: 'boolean' });
+
+// Gallery-fork: scheduled database backups to S3. Deliberately a single on/off flag. Bucket, credentials,
+// region and endpoint are not here because the feature is only offered when the server's storage backend is
+// already S3 (IMMICH_STORAGE_BACKEND=s3), so the only S3 configuration that could apply is the one the media
+// backend is already using; and the key prefix is fixed at `backups/` (see BACKUP_PREFIX in
+// src/gallery/utils/backup-store.ts), which is what guarantees the dumps stay out of the media key space.
+// The result is that nothing about the destination is stored in the database, so there is no S3 secret for
+// GET /admin/config to hand back in the clear, and nothing an admin can misconfigure.
+export const GalleryBackupS3Schema = z
+  .object({
+    enabled: galleryConfigBool.describe('Upload scheduled database backups to S3'),
+  })
+  .meta({ id: 'AdminConfigDatabaseBackupS3Dto' });
+
+const GalleryClassificationFaceExclusionSchema = z
+  .enum(['off', 'any_assigned_face', 'named_people', 'named_visible_people'])
+  .default('off')
+  .describe('Face exclusion rule for this classification category')
+  .meta({ id: 'ClassificationFaceExclusion' });
+
+export type ClassificationFaceExclusion = z.infer<typeof GalleryClassificationFaceExclusionSchema>;
+
+const GalleryClassificationCategorySchema = z
+  .object({
+    name: z.string().describe('Category name'),
+    prompts: z.array(z.string()).min(1).describe('CLIP text prompts for this category'),
+    similarity: z
+      .number()
+      .meta({ format: 'double' })
+      .min(0)
+      .max(1)
+      .describe('Cosine similarity threshold for matching this category'),
+    action: z.enum(['tag', 'tag_and_archive']).describe('Action to take when an asset matches'),
+    enabled: z.boolean().describe('Whether this category is enabled'),
+    faceExclusion: GalleryClassificationFaceExclusionSchema,
+  })
+  .meta({ id: 'AdminConfigClassificationCategoryDto' });
+
+export const GalleryClassificationSchema = z
+  .object({
+    enabled: galleryConfigBool.describe('Enable classification globally'),
+    categories: z
+      .array(GalleryClassificationCategorySchema)
+      .refine((cats) => new Set(cats.map((c) => c.name)).size === cats.length, {
+        message: 'Category names must be unique',
+      })
+      .describe('Classification categories'),
+  })
+  .meta({ id: 'AdminConfigClassificationDto' });
+
+export const GalleryMemoriesSchema = z
+  .object({
+    retentionDays: z.coerce.number().int().min(0).describe('Retention days'),
+    /** @deprecated inert since birthday memories moved to Immich's generator (OD-3); kept so existing configs validate */
+    birthday: galleryConfigBool.describe('Birthday memories'),
+    /** @deprecated superseded by `types['recent_trip']`; kept for back-compat */
+    recentTrips: galleryConfigBool.describe('Recent trip memories'),
+    types: z.record(z.string(), z.boolean()).default({}).describe('Per-type memory availability overrides'),
+    themeMaxDistance: z.coerce
+      .number()
+      .meta({ format: 'double' })
+      .min(0)
+      .max(2)
+      .default(0.75)
+      .describe('Max CLIP cosine distance for themed memories'),
+    personThrowbackDormancyMonths: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(120)
+      .default(6)
+      .describe('Months a person must be absent from photos before person_throwback resurfaces them'),
+  })
+  .meta({ id: 'AdminConfigMemoriesDto' });
+
+// Gallery-fork: opt-in accounting for server-generated files (thumbnails, transcodes).
+export const GalleryStorageUsageSchema = z
+  .object({
+    includeDerivatives: galleryConfigBool.describe('Include thumbnails and transcoded videos in storage usage'),
+  })
+  .meta({ id: 'AdminConfigStorageUsageDto' });
+
+// NOT built from AdminConfigMachineLearningModelSchema: that schema's `enabled` leaf is annotated
+// `visibility: User`, which would expose pet detection to every logged-in user. Pet detection is
+// surfaced to no client today, so it stays admin-only like every other fork config field.
+// Pet detection across the whole video (specs/2026-11-16-video-pet-detection-design.md). Off by default, so a video's
+// pets come from its poster, as before.
+export const GalleryVideoPetsSchema = z
+  .object({
+    enabled: galleryConfigBool.describe('Detect pets in frames sampled across the whole video'),
+    sampleInterval: z.number().meta({ format: 'double' }).min(0.5).max(60).describe('Seconds between sampled frames'),
+    sceneDetection: galleryConfigBool.describe('Also sample a frame just after every scene cut'),
+    maxFrames: z
+      .int()
+      .min(10)
+      .max(10_000)
+      .describe('Frame budget per video. Past it the interval is stretched, so the whole video is still covered.'),
+    maxDistance: z
+      .number()
+      .meta({ format: 'double' })
+      .min(0.1)
+      .max(2)
+      .describe('Largest pet embedding distance at which two views of a pet in one video count as the same pet'),
+    minSightings: z.int().min(1).max(100).describe('Sampled frames a pet must be seen in to be kept'),
+  })
+  .meta({ id: 'AdminConfigVideoPetsDto' });
+
+export type VideoPetsConfig = z.infer<typeof GalleryVideoPetsSchema>;
+
+export const GalleryPetDetectionSchema = z
+  .object({
+    enabled: z.boolean().describe('Whether the task is enabled'),
+    modelName: z.string().min(1).describe('Name of the model to use'),
+    minScore: z
+      .number()
+      .meta({ format: 'double' })
+      .min(0.1)
+      .max(1)
+      .describe('Minimum confidence score for pet detection'),
+    video: GalleryVideoPetsSchema,
+  })
+  .meta({ id: 'AdminConfigPetDetectionDto' });
+
+// Standalone for the same reason as GalleryPetDetectionSchema above: building on
+// AdminConfigMachineLearningModelSchema would inherit its `visibility: User` `enabled` leaf and
+// expose pet recognition to every logged-in user. It is surfaced to no client, so it stays
+// admin-only.
+export const GalleryPetRecognitionSchema = z
+  .object({
+    enabled: z.boolean().describe('Whether the task is enabled'),
+    modelName: z.string().min(1).describe('Name of the model to use'),
+    maxDistance: z
+      .number()
+      .meta({ format: 'double' })
+      .min(0.1)
+      .max(2)
+      .describe('Maximum distance threshold for pet recognition'),
+    // Upper bound mirrors PetFaceRepository.searchPets's own `numResults` guard (1..1000): minFaces
+    // is passed straight through as the NN window size, so a larger value would make every
+    // recognition job throw rather than being rejected at save time.
+    minFaces: z.int().min(1).max(1000).describe('Minimum number of faces required for recognition'),
+  })
+  .meta({ id: 'AdminConfigPetRecognitionDto' });
+
+// Admin-only for the same reason as GalleryPetDetectionSchema. Clients learn whether a photo is offered from
+// `spatialScene` on the asset itself, decided against these thresholds when it is opened
+// (specs/2026-10-29-spatial-scene-design.md, "Deciding which photos to offer it on").
+export const GallerySpatialSceneSchema = z
+  .object({
+    enabled: z.boolean().describe('Whether the task is enabled'),
+    modelName: z.string().min(1).describe('Name of the depth model to use'),
+    offer: z
+      .enum(['suitable', 'all'])
+      .describe('Offer Spatial Scene on suitable photos only, or on every photo with a depth map')
+      .meta({ id: 'SpatialSceneOffer' }),
+    minBoundarySharpness: z
+      .number()
+      .meta({ format: 'double' })
+      .min(0)
+      .max(1)
+      .describe('Minimum depth sharpness along the subject outline for a photo to count as suitable'),
+    minEdgeDensity: z
+      .number()
+      .meta({ format: 'double' })
+      .min(0)
+      .max(1)
+      .describe('Alternatively, the minimum share of the photo made of sharp depth edges'),
+    minForegroundRatio: z
+      .number()
+      .meta({ format: 'double' })
+      .min(0)
+      .max(1)
+      .describe('Smallest share of the photo the subject may cover'),
+    maxForegroundRatio: z
+      .number()
+      .meta({ format: 'double' })
+      .min(0)
+      .max(1)
+      .describe('Largest share of the photo the subject may cover'),
+    minFaceHeight: z
+      .number()
+      .meta({ format: 'double' })
+      .min(0)
+      .max(1)
+      .describe('Alternatively, the smallest person or pet face, as a share of the photo height. 0 ignores faces.'),
+  })
+  .meta({ id: 'AdminConfigSpatialSceneDto' });
+
+export type SpatialSceneConfig = z.infer<typeof GallerySpatialSceneSchema>;
+
+export const GalleryFaceSuggestionSchema = z
+  .object({
+    enabled: z.boolean().describe('Whether face suggestions are enabled'),
+    maxDistance: z
+      .number()
+      .meta({ format: 'double' })
+      .min(0.1)
+      .max(2)
+      .describe('Maximum embedding distance for a face to be surfaced as a suggestion on a named person'),
+  })
+  .meta({ id: 'AdminConfigFaceSuggestionDto' });
+
+// Video face detection across the whole video (specs/2026-10-31-video-face-frames-design.md). Admin-only, off by
+// default like the fork's other heavier ML jobs, so a fresh install detects video faces as upstream does.
+export const GalleryVideoFacesSchema = z
+  .object({
+    enabled: galleryConfigBool.describe('Detect video faces in frames sampled across the whole video'),
+    sampleInterval: z.number().meta({ format: 'double' }).min(0.5).max(60).describe('Seconds between sampled frames'),
+    sceneDetection: galleryConfigBool.describe('Also sample a frame just after every scene cut'),
+    maxFrames: z
+      .int()
+      .min(10)
+      .max(10_000)
+      .describe('Frame budget per video. Past it the interval is stretched, so the whole video is still covered.'),
+    tiledDetection: galleryConfigBool.describe(
+      'Also search each high-resolution frame as four overlapping quarters, to find small faces such as a crowd. Costs about five times the detection work.',
+    ),
+    maxDistance: z
+      .number()
+      .meta({ format: 'double' })
+      .min(0.1)
+      .max(1)
+      .describe(
+        'Largest embedding distance at which two views of a face in one video count as the same person. Separate from recognition, so recognition can stay strict without splitting people inside a video.',
+      ),
+    minFaceSize: z
+      .int()
+      .min(0)
+      .max(500)
+      .describe(
+        'A person whose largest face in the video is narrower than this, in pixels of the sampled frame, is not kept',
+      ),
+    minSightings: z.int().min(1).max(100).describe('Sampled frames a person must be seen in to be kept'),
+    createPeople: galleryConfigBool.describe(
+      'Let video faces start new people. When off, a video face only joins a person already found elsewhere.',
+    ),
+    minRecognitionScore: z
+      .number()
+      .meta({ format: 'double' })
+      .min(0)
+      .max(1)
+      .describe(
+        'A video face whose best detection score in the video is below this neither joins nor starts a person, and stays unassigned for naming by hand. 0 turns the check off.',
+      ),
+  })
+  .meta({ id: 'AdminConfigVideoFacesDto' });
+
+export type VideoFacesConfig = z.infer<typeof GalleryVideoFacesSchema>;
+
+export const GalleryFacialRecognitionExtension = {
+  suggestions: GalleryFaceSuggestionSchema,
+  video: GalleryVideoFacesSchema,
+};
+
+export const GalleryClipExtension = {
+  maxDistance: z
+    .number()
+    .meta({ format: 'double' })
+    .min(0)
+    .max(2)
+    .describe('Maximum cosine distance for smart search results. 0 = disabled.'),
+};
+
+export const GalleryServerExtension = {
+  mergePeopleAcrossOwners: galleryConfigBool.describe(
+    "Allow a people merge to combine two of another user's people, or two people in a shared space the actor cannot edit, into one (a destructive collapse). Re-points that only move a single person to another identity are always allowed. When off, such combining merges are blocked; when on, each still requires an explicit confirmation.",
+  ),
+  spaceEditorsCanAddMembers: galleryConfigBool.describe(
+    'Let editors of a shared space add members (as viewers). A space owner can override this per space.',
+  ),
+  spaceEditorsCanChangeRoles: galleryConfigBool.describe(
+    'Let editors of a shared space switch members between viewer and editor. A space owner can override this per space.',
+  ),
+};
+
+export const galleryJobDefaults = {
+  [QueueName.PeopleBackfill]: { concurrency: 1 },
+  [QueueName.PetDetection]: { concurrency: 1 },
+  [QueueName.Classification]: { concurrency: 1 },
+  [QueueName.QualityAnalysis]: { concurrency: 2 },
+  [QueueName.SpatialScene]: { concurrency: 1 },
+};
+
+export const galleryMachineLearningDefaults = {
+  clipMaxDistance: 0,
+  faceSuggestions: { enabled: true, maxDistance: 0.7 },
+  videoFaces: {
+    enabled: false,
+    sampleInterval: 2,
+    sceneDetection: true,
+    maxFrames: 1800,
+    tiledDetection: false,
+    maxDistance: 0.5,
+    minFaceSize: 20,
+    minSightings: 1,
+    createPeople: true,
+    // Small, blurry faces get similar embeddings whoever they belong to, so below this they chain into "people" who
+    // do not exist (specs/2026-10-31-video-face-frames-design.md, "Recognition of weak video faces").
+    minRecognitionScore: 0.75,
+  },
+  petDetection: {
+    enabled: false,
+    modelName: 'rfdetr-nano',
+    minScore: 0.3,
+    // Half the video face budget: the pet queue runs one job at a time, and a pet stays in frame for longer than a
+    // face stays turned to the camera.
+    // minSightings 2: a pet found in one sampled frame is most often a fragment of one found in others, or a misfire
+    // (specs/2026-11-16-video-pet-detection-design.md, "Replays").
+    video: {
+      enabled: false,
+      sampleInterval: 2,
+      sceneDetection: true,
+      maxFrames: 900,
+      maxDistance: 0.55,
+      minSightings: 2,
+    },
+  },
+  petRecognition: { enabled: false, modelName: 'pet-recognition-base', maxDistance: 0.55, minFaces: 1 },
+  spatialScene: {
+    enabled: false,
+    modelName: 'depth-anything-v2-small',
+    offer: 'suitable' as const,
+    minBoundarySharpness: 0.03,
+    minEdgeDensity: 0.02,
+    minForegroundRatio: 0.01,
+    maxForegroundRatio: 0.75,
+    minFaceHeight: 0.03,
+  },
+};
+
+export const galleryFacialRecognitionDefaults = {
+  suggestions: galleryMachineLearningDefaults.faceSuggestions,
+  video: galleryMachineLearningDefaults.videoFaces,
+};
+
+export const galleryBackupDatabaseDefaults = {
+  // off out of the box, so a fresh install behaves exactly like upstream Immich
+  s3: { enabled: false },
+};
+
+export const galleryServerDefaults = {
+  mergePeopleAcrossOwners: false,
+  spaceEditorsCanAddMembers: false,
+  spaceEditorsCanChangeRoles: false,
+};
+
+export const galleryTopLevelDefaults = {
+  // CLIP text->image distances sit far higher than the image->image thresholds used elsewhere
+  // (duplicateDetection 0.01, facialRecognition 0.5) because of the modality gap: even a perfect
+  // textual match rarely drops below ~0.6. Matches the 0.75 the admin UI recommends for
+  // `machineLearning.clip.maxDistance`, the same metric over the same embeddings.
+  memories: {
+    retentionDays: 365,
+    birthday: true,
+    recentTrips: true,
+    types: {},
+    themeMaxDistance: 0.75,
+    personThrowbackDormancyMonths: 6,
+  },
+  classification: { enabled: true, categories: [] },
+  // Gallery-fork: defaults to false, so out of the box storage usage matches upstream Immich
+  // and counts original files only.
+  storageUsage: { includeDerivatives: false },
+};
+
+/**
+Settings Gallery added inside one of its own sections after that section shipped, as dotted paths. An older Gallery
+admin page saves the section without them; the interceptor keeps their stored values, as it does for the whole
+sections an upstream-shaped body leaves out.
+*/
+export const galleryNestedConfigPaths = [
+  // specs/2026-11-16-video-pet-detection-design.md
+  'machineLearning.petDetection.video',
+];
+
+/**
+Every setting Gallery adds to upstream's config, as a dotted path into SystemConfig. A body that leaves one out
+is upstream-shaped (src/gallery/middleware/upstream-config-body.interceptor.ts).
+*/
+export const galleryConfigPaths = [
+  ...Object.keys(galleryTopLevelDefaults),
+  ...Object.keys(galleryJobDefaults).map((key) => `job.${key}`),
+  ...Object.keys(galleryServerDefaults).map((key) => `server.${key}`),
+  ...Object.keys(galleryBackupDatabaseDefaults).map((key) => `backup.database.${key}`),
+  ...Object.keys(GalleryClipExtension).map((key) => `machineLearning.clip.${key}`),
+  'machineLearning.petDetection',
+  'machineLearning.petRecognition',
+  'machineLearning.spatialScene',
+  ...Object.keys(GalleryFacialRecognitionExtension).map((key) => `machineLearning.facialRecognition.${key}`),
+  'nightlyTasks.clusterNewPets',
+  // Data Saver video (src/gallery/dtos/data-saver-video.dto.ts), spread into the upstream FFmpeg section
+  'ffmpeg.dataSaver',
+];

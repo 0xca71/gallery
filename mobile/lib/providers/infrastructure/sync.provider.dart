@@ -15,6 +15,7 @@ final syncStreamServiceProvider = Provider((ref) {
   return SyncStreamService(
     syncApiRepository: ref.watch(syncApiRepositoryProvider),
     syncStreamRepository: db.syncStreamRepository,
+    gallerySyncStreamRepository: db.syncStreamRepository.gallery,
     localAssetRepository: db.localAssetRepository,
     trashedLocalAssetRepository: db.trashedLocalAssetRepository,
     assetMediaRepository: ref.watch(assetMediaRepositoryProvider),

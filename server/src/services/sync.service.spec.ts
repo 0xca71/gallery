@@ -1,9 +1,10 @@
 import { BadRequestException, ForbiddenException } from '@nestjs/common';
 import { Writable } from 'node:stream';
 import { AlbumUserRole, AssetVisibility, MemoryType, SyncEntityType, SyncRequestType } from 'src/enum.js';
-import { SYNC_TYPES_ORDER, SyncService, send } from 'src/services/sync.service.js';
+import { GallerySyncStreams } from 'src/gallery/utils/gallery-sync.streams.js';
+import { SYNC_TYPES_ORDER, SyncService } from 'src/services/sync.service.js';
 import { ClientDisconnectedError } from 'src/utils/response.js';
-import { serialize, toAck } from 'src/utils/sync.js';
+import { send, serialize, toAck } from 'src/utils/sync.js';
 import { authStub } from 'test/fixtures/auth.stub.js';
 import { newUuid } from 'test/small.factory.js';
 import { ServiceMocks, makeStream, newTestService } from 'test/utils.js';
@@ -135,12 +136,21 @@ const parseChunks = (chunks: string[]) => {
 };
 
 /**
- * Create mock sub-repos for SyncRepository. The automock doesn't handle
- * nested instance properties created in the constructor, so we wire them up manually.
- */
+Create mock sub-repos for SyncRepository. The automock doesn't handle
+nested instance properties created in the constructor, so we wire them up manually.
+*/
 const makeSub = () => ({
   getDeletes: vi.fn().mockReturnValue(makeStream([])),
   getUpserts: vi.fn().mockReturnValue(makeStream([])),
+  // immich-31591 split assetFace's stream accessors by version. They live on the shared
+  // sub-mock so a future sub that gains them is covered without editing this again.
+  getDeletesV2: vi.fn().mockReturnValue(makeStream([])),
+  getUpsertsV2: vi.fn().mockReturnValue(makeStream([])),
+  getDeletesV3: vi.fn().mockReturnValue(makeStream([])),
+  getUpsertsV3: vi.fn().mockReturnValue(makeStream([])),
+  // memoryToAsset: upstream's on_this_day-only V1 links, and the fork's per-policy links.
+  getUpsertsV1: vi.fn().mockReturnValue(makeStream([])),
+  getUpsertsForTypes: vi.fn().mockReturnValue(makeStream([])),
   getBackfill: vi.fn().mockReturnValue(makeStream([])),
   getCreatedAfter: vi.fn().mockResolvedValue([]),
   getAlbumUsers: vi.fn().mockResolvedValue([{ userId: 'u1', role: AlbumUserRole.Owner }]),
@@ -163,6 +173,7 @@ const setupSyncMocks = (mocks: ServiceMocks) => {
     assetFace: makeSub(),
     assetMetadata: makeSub(),
     assetOcr: makeSub(),
+    assetFavorite: makeSub(),
     authUser: makeSub(),
     memory: makeSub(),
     memoryToAsset: makeSub(),
@@ -191,11 +202,67 @@ const setupSyncMocks = (mocks: ServiceMocks) => {
     sharedSpaceAlbumToAsset: makeSub(),
   };
 
-  // Assign onto the mock
+  // Assign onto the mock; the fork streams live on GallerySyncRepository, backed by the same sub-mocks.
   Object.assign(mocks.sync, subs);
+  Object.assign(mocks.gallerySync, subs);
 
   return subs;
 };
+
+// A stock Immich client requests no gallery-fork-only sync type; a Gallery app always adds SharedSpacesV1.
+const stockClient = (...types: SyncRequestType[]) => types;
+const galleryClient = (...types: SyncRequestType[]) => [...types, SyncRequestType.SharedSpacesV1];
+
+describe('isForkAwareClient', () => {
+  const { isForkAwareClient } = GallerySyncStreams;
+
+  // upstream Immich v3.3.1's SyncRequestType: everything a stock client can send
+  const upstreamTypes = [
+    'AlbumsV1',
+    'AlbumsV2',
+    'AlbumUsersV1',
+    'AlbumToAssetsV1',
+    'AlbumAssetsV1',
+    'AlbumAssetsV2',
+    'AlbumAssetExifsV1',
+    'AssetsV1',
+    'AssetsV2',
+    'AssetExifsV1',
+    'AssetEditsV1',
+    'AssetMetadataV1',
+    'AssetOcrV1',
+    'AuthUsersV1',
+    'AuthUsersV2',
+    'MemoriesV1',
+    'MemoriesV2',
+    'MemoryToAssetsV1',
+    'MemoryToAssetsV2',
+    'PartnersV1',
+    'PartnerAssetsV1',
+    'PartnerAssetsV2',
+    'PartnerAssetExifsV1',
+    'PartnerStacksV1',
+    'StacksV1',
+    'UsersV1',
+    'PeopleV1',
+    'AssetFacesV1',
+    'AssetFacesV2',
+    'AssetFacesV3',
+    'UserMetadataV1',
+  ] as SyncRequestType[];
+
+  it('should be false for a request made only of upstream types', () => {
+    expect(isForkAwareClient({ types: upstreamTypes })).toBe(false);
+  });
+
+  it('should be true when any fork-only type is requested', () => {
+    const forkTypes = Object.values(SyncRequestType).filter((type) => !upstreamTypes.includes(type));
+    expect(forkTypes.length).toBeGreaterThan(0);
+    for (const type of forkTypes) {
+      expect(isForkAwareClient({ types: [SyncRequestType.AssetsV2, type] })).toBe(true);
+    }
+  });
+});
 
 describe(SyncService.name, () => {
   let sut: SyncService;
@@ -210,6 +277,37 @@ describe(SyncService.name, () => {
     mocks.syncCheckpoint.deleteAll.mockResolvedValue(undefined as any);
     mocks.session.resetSyncProgress.mockResolvedValue(undefined as any);
   });
+
+  // Streams one memory of each type and returns the types the client was sent as `entityType`.
+  const streamMemories = async (types: SyncRequestType[], entityType: SyncEntityType) => {
+    const { writable, chunks } = makeWritable();
+    mocks.session.isPendingSyncReset.mockResolvedValue(false);
+    mocks.syncCheckpoint.getAll.mockResolvedValue([]);
+    mocks.syncCheckpoint.getNow.mockResolvedValue({ nowId: 'now-id' });
+    syncSubs.memory.getUpserts.mockReturnValue(
+      makeStream([
+        { updateId: newUuid(), id: 'm1', ownerId: 'u1', type: MemoryType.OnThisDay },
+        { updateId: newUuid(), id: 'm2', ownerId: 'u1', type: MemoryType.Rule },
+        { updateId: newUuid(), id: 'm3', ownerId: 'u1', type: MemoryType.Birthday },
+      ]),
+    );
+
+    await sut.stream(authStub.user1, writable, { types });
+
+    return parseChunks(chunks)
+      .filter((m: any) => m.type === entityType)
+      .map((m: any) => m.data.type);
+  };
+
+  // Streams `types` and returns the messages of `entityType`.
+  const streamTypes = async (types: SyncRequestType[], entityType: SyncEntityType) => {
+    const { writable, chunks } = makeWritable();
+    mocks.session.isPendingSyncReset.mockResolvedValue(false);
+    mocks.syncCheckpoint.getAll.mockResolvedValue([]);
+    mocks.syncCheckpoint.getNow.mockResolvedValue({ nowId: 'now-id' });
+    await sut.stream(authStub.user1, writable, { types });
+    return parseChunks(chunks).filter((m: any) => m.type === entityType);
+  };
 
   it('should exist', () => {
     expect(sut).toBeDefined();
@@ -654,6 +752,33 @@ describe(SyncService.name, () => {
       expect(memoryMessages).toHaveLength(2);
     });
 
+    it('should omit birthday memory upserts on MemoriesV1 for every client, and still stream their deletes', async () => {
+      for (const types of [
+        [SyncRequestType.MemoriesV1],
+        [SyncRequestType.MemoriesV1, SyncRequestType.SharedSpacesV1],
+      ]) {
+        const { writable, chunks } = makeWritable();
+
+        mocks.session.isPendingSyncReset.mockResolvedValue(false);
+        mocks.syncCheckpoint.getAll.mockResolvedValue([]);
+        mocks.syncCheckpoint.getNow.mockResolvedValue({ nowId: 'now-id' });
+        syncSubs.memory.getDeletes.mockReturnValue(makeStream([{ id: newUuid(), memoryId: 'm3' }]));
+        syncSubs.memory.getUpserts.mockReturnValue(
+          makeStream([
+            { updateId: newUuid(), id: 'm1', ownerId: 'u1', type: MemoryType.OnThisDay },
+            { updateId: newUuid(), id: 'm3', ownerId: 'u1', type: MemoryType.Birthday },
+          ]),
+        );
+
+        await sut.stream(authStub.user1, writable, { types });
+
+        const messages = parseChunks(chunks);
+        const upserts = messages.filter((m: any) => m.type === SyncEntityType.MemoryV1);
+        expect(upserts.map((m: any) => m.data.type)).toEqual([MemoryType.OnThisDay]);
+        expect(messages.some((m: any) => m.type === SyncEntityType.MemoryDeleteV1)).toBe(true);
+      }
+    });
+
     it('should handle MemoryToAssetsV1 sync type', async () => {
       const { writable, chunks } = makeWritable();
       const deleteId = newUuid();
@@ -663,13 +788,90 @@ describe(SyncService.name, () => {
       mocks.syncCheckpoint.getAll.mockResolvedValue([]);
       mocks.syncCheckpoint.getNow.mockResolvedValue({ nowId: 'now-id' });
       syncSubs.memoryToAsset.getDeletes.mockReturnValue(makeStream([{ id: deleteId, memoryId: 'm1', assetId: 'a1' }]));
-      syncSubs.memoryToAsset.getUpserts.mockReturnValue(makeStream([{ updateId, memoryId: 'm1', assetId: 'a1' }]));
+      syncSubs.memoryToAsset.getUpsertsForTypes.mockReturnValue(
+        makeStream([{ updateId, memoryId: 'm1', assetId: 'a1' }]),
+      );
 
       await sut.stream(authStub.user1, writable, { types: [SyncRequestType.MemoryToAssetsV1] });
 
       const messages = parseChunks(chunks);
       expect(messages.some((m: any) => m.type === SyncEntityType.MemoryToAssetDeleteV1)).toBe(true);
       expect(messages.some((m: any) => m.type === SyncEntityType.MemoryToAssetV1)).toBe(true);
+    });
+
+    // immich-32167 added MemoriesV2 / MemoryToAssetsV2 and narrowed V1 to on_this_day. A Gallery
+    // server keeps upstream's split for `birthday` (V2 only: a client on V1 cannot decode it, and
+    // that includes every Gallery app before 5.8.0) and sends `rule` to fork-aware clients only: a
+    // stock Immich app at 3.3+ requests V2 from a Gallery server and cannot decode `rule`, and
+    // installed Gallery apps stay on V1 yet need their rule memories and those memories' photos.
+    describe('memory sync policy across MemoriesV1/V2 and MemoryToAssetsV1/V2', () => {
+      it('should send a stock client on_this_day on V1, and on_this_day and birthday on V2', async () => {
+        await expect(streamMemories(stockClient(SyncRequestType.MemoriesV1), SyncEntityType.MemoryV1)).resolves.toEqual(
+          [MemoryType.OnThisDay],
+        );
+        await expect(streamMemories(stockClient(SyncRequestType.MemoriesV2), SyncEntityType.MemoryV2)).resolves.toEqual(
+          [MemoryType.OnThisDay, MemoryType.Birthday],
+        );
+      });
+
+      it('should send a Gallery client on_this_day and rule on V1, and birthday too on V2', async () => {
+        await expect(
+          streamMemories(galleryClient(SyncRequestType.MemoriesV1), SyncEntityType.MemoryV1),
+        ).resolves.toEqual([MemoryType.OnThisDay, MemoryType.Rule]);
+        await expect(
+          streamMemories(galleryClient(SyncRequestType.MemoriesV2), SyncEntityType.MemoryV2),
+        ).resolves.toEqual([MemoryType.OnThisDay, MemoryType.Rule, MemoryType.Birthday]);
+      });
+
+      it('should scope memory photo links to the memory types the client is sent', async () => {
+        for (const [types, expected] of [
+          [stockClient(SyncRequestType.MemoryToAssetsV1), [MemoryType.OnThisDay]],
+          [stockClient(SyncRequestType.MemoryToAssetsV2), [MemoryType.OnThisDay, MemoryType.Birthday]],
+          [galleryClient(SyncRequestType.MemoryToAssetsV1), [MemoryType.OnThisDay, MemoryType.Rule]],
+          [
+            galleryClient(SyncRequestType.MemoryToAssetsV2),
+            [MemoryType.OnThisDay, MemoryType.Rule, MemoryType.Birthday],
+          ],
+        ] as const) {
+          syncSubs.memoryToAsset.getUpsertsForTypes.mockClear();
+          const { writable } = makeWritable();
+          mocks.session.isPendingSyncReset.mockResolvedValue(false);
+          mocks.syncCheckpoint.getAll.mockResolvedValue([]);
+          mocks.syncCheckpoint.getNow.mockResolvedValue({ nowId: 'now-id' });
+
+          await sut.stream(authStub.user1, writable, { types: [...types] });
+
+          expect(syncSubs.memoryToAsset.getUpsertsForTypes).toHaveBeenCalledWith(expect.anything(), expected);
+        }
+        // upstream's on_this_day-only and unscoped link queries must not serve either version
+        expect(syncSubs.memoryToAsset.getUpsertsV1).not.toHaveBeenCalled();
+        expect(syncSubs.memoryToAsset.getUpserts).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('stock Immich client gating', () => {
+      it('should ask for pet people and faces only for a Gallery client', async () => {
+        for (const [types, withPets] of [
+          [stockClient(SyncRequestType.PeopleV1, SyncRequestType.AssetFacesV2, SyncRequestType.AssetFacesV3), false],
+          [galleryClient(SyncRequestType.PeopleV1, SyncRequestType.AssetFacesV2, SyncRequestType.AssetFacesV3), true],
+        ] as const) {
+          syncSubs.person.getUpserts.mockClear();
+          syncSubs.assetFace.getUpsertsV2.mockClear();
+          syncSubs.assetFace.getUpsertsV3.mockClear();
+
+          await streamTypes([...types], SyncEntityType.PersonV1);
+
+          expect(syncSubs.person.getUpserts).toHaveBeenCalledWith(
+            expect.objectContaining({ forkAwareClient: withPets }),
+          );
+          expect(syncSubs.assetFace.getUpsertsV2).toHaveBeenCalledWith(
+            expect.objectContaining({ forkAwareClient: withPets }),
+          );
+          expect(syncSubs.assetFace.getUpsertsV3).toHaveBeenCalledWith(
+            expect.objectContaining({ forkAwareClient: withPets }),
+          );
+        }
+      });
     });
 
     it('should handle StacksV1 sync type', async () => {
@@ -716,8 +918,8 @@ describe(SyncService.name, () => {
       mocks.session.isPendingSyncReset.mockResolvedValue(false);
       mocks.syncCheckpoint.getAll.mockResolvedValue([]);
       mocks.syncCheckpoint.getNow.mockResolvedValue({ nowId: 'now-id' });
-      syncSubs.assetFace.getDeletes.mockReturnValue(makeStream([{ id: deleteId, assetFaceId: 'f1' }]));
-      syncSubs.assetFace.getUpserts.mockReturnValue(
+      syncSubs.assetFace.getDeletesV2.mockReturnValue(makeStream([{ id: deleteId, assetFaceId: 'f1' }]));
+      syncSubs.assetFace.getUpsertsV2.mockReturnValue(
         makeStream([{ updateId, id: 'f1', assetId: 'a1', personId: 'p1', deletedAt: null, isVisible: true }]),
       );
 
@@ -726,6 +928,26 @@ describe(SyncService.name, () => {
       const messages = parseChunks(chunks);
       expect(messages.some((m: any) => m.type === SyncEntityType.AssetFaceDeleteV1)).toBe(true);
       expect(messages.some((m: any) => m.type === SyncEntityType.AssetFaceV2)).toBe(true);
+    });
+
+    it('should handle AssetFacesV3 sync type', async () => {
+      const { writable, chunks } = makeWritable();
+      const deleteId = newUuid();
+      const updateId = newUuid();
+
+      mocks.session.isPendingSyncReset.mockResolvedValue(false);
+      mocks.syncCheckpoint.getAll.mockResolvedValue([]);
+      mocks.syncCheckpoint.getNow.mockResolvedValue({ nowId: 'now-id' });
+      syncSubs.assetFace.getDeletesV3.mockReturnValue(makeStream([{ id: deleteId, assetFaceId: 'f1' }]));
+      syncSubs.assetFace.getUpsertsV3.mockReturnValue(
+        makeStream([{ updateId, id: 'f1', assetId: 'a1', personId: 'p1', deletedAt: null, isVisible: true }]),
+      );
+
+      await sut.stream(authStub.user1, writable, { types: [SyncRequestType.AssetFacesV3] });
+
+      const messages = parseChunks(chunks);
+      expect(messages.some((m: any) => m.type === SyncEntityType.AssetFaceDeleteV1)).toBe(true);
+      expect(messages.some((m: any) => m.type === SyncEntityType.AssetFaceV3)).toBe(true);
     });
 
     it('should reject deprecated AssetFacesV1 sync type', async () => {
@@ -1232,6 +1454,7 @@ describe(SyncService.name, () => {
       expect(syncSubs.partnerAsset.getBackfill).toHaveBeenCalledWith(
         expect.objectContaining({ afterUpdateId: partialExtraId }),
         partnerId,
+        authStub.user1.user.id,
       );
     });
   });
@@ -1263,17 +1486,23 @@ describe(SyncService.name, () => {
       SyncRequestType.SharedSpaceAlbumAssetsV1,
     ];
 
-    it('should stream every asset-bearing type before MemoryToAssetsV1', () => {
-      const linkIndex = SYNC_TYPES_ORDER.indexOf(SyncRequestType.MemoryToAssetsV1);
-      expect(linkIndex).toBeGreaterThan(-1);
+    // immich-32167's V2 link stream writes the same `memory_asset_entity` rows.
+    for (const linkType of [SyncRequestType.MemoryToAssetsV1, SyncRequestType.MemoryToAssetsV2]) {
+      it(`should stream every asset-bearing type before ${linkType}`, () => {
+        const linkIndex = SYNC_TYPES_ORDER.indexOf(linkType);
+        expect(linkIndex).toBeGreaterThan(-1);
 
-      const streamedAfter = assetBearingTypes.filter((type) => SYNC_TYPES_ORDER.indexOf(type) > linkIndex);
-      expect(streamedAfter).toEqual([]);
-    });
+        const streamedAfter = assetBearingTypes.filter((type) => SYNC_TYPES_ORDER.indexOf(type) > linkIndex);
+        expect(streamedAfter).toEqual([]);
+      });
+    }
 
-    it('should stream MemoriesV1 before MemoryToAssetsV1', () => {
+    it('should stream each memory version before its links', () => {
       expect(SYNC_TYPES_ORDER.indexOf(SyncRequestType.MemoriesV1)).toBeLessThan(
         SYNC_TYPES_ORDER.indexOf(SyncRequestType.MemoryToAssetsV1),
+      );
+      expect(SYNC_TYPES_ORDER.indexOf(SyncRequestType.MemoriesV2)).toBeLessThan(
+        SYNC_TYPES_ORDER.indexOf(SyncRequestType.MemoryToAssetsV2),
       );
     });
 
@@ -1294,6 +1523,7 @@ describe(SyncService.name, () => {
       expect(syncSubs.assetFace.cleanupAuditTable).toHaveBeenCalledWith(31);
       expect(syncSubs.assetMetadata.cleanupAuditTable).toHaveBeenCalledWith(31);
       expect(syncSubs.assetEdit.cleanupAuditTable).toHaveBeenCalledWith(31);
+      expect(syncSubs.assetFavorite.cleanupAuditTable).toHaveBeenCalledWith(31);
       expect(syncSubs.memory.cleanupAuditTable).toHaveBeenCalledWith(31);
       expect(syncSubs.memoryToAsset.cleanupAuditTable).toHaveBeenCalledWith(31);
       expect(syncSubs.partner.cleanupAuditTable).toHaveBeenCalledWith(31);

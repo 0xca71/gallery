@@ -113,9 +113,6 @@ void main() {
     test('v5.0.0 (last pre-feature release): EXCLUDES all 5 album types', () async {
       final types = await capturedRequestTypes(const SemVer(major: 5, minor: 0, patch: 0));
       expect(albumTypes.any(types.contains), isFalse, reason: 'v5.0.0 has no SharedSpaceAlbum enum values');
-      // Unconditional fork types are unaffected.
-      expect(types, contains('SharedSpacesV1'));
-      expect(types, contains('SharedSpaceLibrariesV1'));
     });
 
     test('old upstream-numbered fork server (3.0.1): EXCLUDES all 5 album types (fail-safe to old)', () async {
@@ -344,6 +341,238 @@ void main() {
       expect(received.single.type, SyncEntityType.sharedSpaceAlbumFolderDeleteV1);
       expect(received.single.data, isA<SyncSharedSpaceAlbumFolderDeleteV1>());
       expect((received.single.data as SyncSharedSpaceAlbumFolderDeleteV1).folderId, 'folder-3');
+    });
+  });
+
+  test('an undecodable line (a trim AssetEditV1 from an older server) is skipped and the rest still parses', () async {
+    final received = <SyncEvent>[];
+    final streamChangesFuture = streamChanges(
+      (events, _, _) async => received.addAll(events),
+      const SemVer(major: 5, minor: 8, patch: 0),
+    );
+    await Future.delayed(const Duration(milliseconds: 50));
+
+    Map<String, dynamic> edit(String id, String action) => {
+      'id': id,
+      'assetId': 'asset-1',
+      'action': action,
+      'parameters': <String, dynamic>{},
+      'sequence': 0,
+    };
+    responseStreamController.add(
+      utf8.encode(
+        _createJsonLine(SyncEntityType.assetEditV1.toString(), edit('edit-trim', 'trim'), 'ack-trim') +
+            _createJsonLine(SyncEntityType.assetEditV1.toString(), edit('edit-crop', 'crop'), 'ack-crop') +
+            _createJsonLine(SyncEntityType.userDeleteV1.toString(), {'userId': 'user-1'}, 'ack-user'),
+      ),
+    );
+
+    await responseStreamController.close();
+    await expectLater(streamChangesFuture, completes);
+
+    expect(received.map((e) => e.ack), ['ack-crop', 'ack-user']);
+    expect((received.first.data as SyncAssetEditV1).id, 'edit-crop');
+  });
+
+  test('an undecodable line of any other type fails the sync', () async {
+    final failed = expectLater(
+      streamChanges((_, _, _) async {}, const SemVer(major: 5, minor: 8, patch: 0)),
+      throwsA(anything),
+    );
+    await Future.delayed(const Duration(milliseconds: 50));
+
+    responseStreamController.add(
+      utf8.encode(_createJsonLine(SyncEntityType.userDeleteV1.toString(), <String, dynamic>{}, 'ack-user')),
+    );
+    await responseStreamController.close();
+
+    await failed;
+  });
+
+  group('#763: AssetFavoritesV1 is requested ONLY behind a server declaration', () {
+    // AssetFavoritesV1 post-dates capability signalling (v5.7.0), so like SharedSpaceAlbumFoldersV1
+    // it has no version-gate fallback: a server without a declaration (fork 5.2.1–5.6.x) does not
+    // know the type, and an unknown request type 400s the WHOLE /sync/stream request.
+    test('no declaration: EXCLUDES AssetFavoritesV1 at every version', () async {
+      for (final version in [
+        const SemVer(major: 3, minor: 0, patch: 1),
+        const SemVer(major: 5, minor: 2, patch: 0),
+        const SemVer(major: 5, minor: 2, patch: 1),
+        const SemVer(major: 5, minor: 6, patch: 3),
+        const SemVer(major: 5, minor: 7, patch: 1),
+        const SemVer(major: 6, minor: 0, patch: 0),
+      ]) {
+        final types = await capturedRequestTypes(version);
+        expect(types, isNot(contains('AssetFavoritesV1')), reason: 'no declaration must never send it at $version');
+        clearInteractions(mockHttpClient);
+      }
+    });
+
+    test('a declaring server INCLUDES AssetFavoritesV1 regardless of its reported version', () async {
+      // RC images stamp the bare upstream base version, unbranded dev servers the upstream
+      // version: the declaration must win.
+      for (final version in [const SemVer(major: 3, minor: 2, patch: 2), const SemVer(major: 5, minor: 7, patch: 1)]) {
+        final types = await capturedRequestTypes(version, supportedSyncTypes: {'AssetFavoritesV1', 'AssetsV1'});
+        expect(types, contains('AssetFavoritesV1'), reason: 'declared capability must open the gate at $version');
+        clearInteractions(mockHttpClient);
+      }
+    });
+
+    test('a declaring server WITHOUT AssetFavoritesV1 (released 5.7.x) EXCLUDES it', () async {
+      final types = await capturedRequestTypes(
+        const SemVer(major: 6, minor: 0, patch: 0),
+        supportedSyncTypes: {'AssetsV1', 'SharedSpaceAlbumFoldersV1'},
+      );
+      expect(types, isNot(contains('AssetFavoritesV1')), reason: 'the declaration is authoritative in both directions');
+    });
+  });
+
+  group('#1243: SharedSpaceStacksV1', () {
+    test('is requested only when the server declares it', () async {
+      const version = SemVer(major: 5, minor: 9, patch: 0);
+      expect(
+        await capturedRequestTypes(version, supportedSyncTypes: {'SharedSpaceStacksV1'}),
+        contains('SharedSpaceStacksV1'),
+      );
+      clearInteractions(mockHttpClient);
+      expect(
+        await capturedRequestTypes(version, supportedSyncTypes: {'SharedSpacesV1'}),
+        isNot(contains('SharedSpaceStacksV1')),
+      );
+      clearInteractions(mockHttpClient);
+      expect(await capturedRequestTypes(version), isNot(contains('SharedSpaceStacksV1')));
+    });
+
+    test('its lines parse into the stack payloads', () async {
+      final received = <SyncEvent>[];
+      final streamChangesFuture = streamChanges(
+        (events, _, _) async => received.addAll(events),
+        const SemVer(major: 5, minor: 9, patch: 0),
+      );
+      await Future.delayed(const Duration(milliseconds: 50));
+
+      final stack = {
+        'id': 'stack-1',
+        'ownerId': 'peer',
+        'primaryAssetId': 'edit-1',
+        'createdAt': DateTime(2026, 10, 24).toIso8601String(),
+        'updatedAt': DateTime(2026, 10, 24).toIso8601String(),
+      };
+      const upserts = [
+        SyncEntityType.sharedSpaceStackV1,
+        SyncEntityType.sharedSpaceStackBackfillV1,
+        SyncEntityType.sharedSpaceStackAlbumBackfillV1,
+        SyncEntityType.sharedSpaceStackLibraryBackfillV1,
+      ];
+      responseStreamController.add(
+        utf8.encode(
+          upserts.map((type) => _createJsonLine(type.toString(), stack, '$type-ack')).join() +
+              _createJsonLine(SyncEntityType.sharedSpaceStackDeleteV1.toString(), {'stackId': 'stack-1'}, 'delete-ack'),
+        ),
+      );
+
+      await responseStreamController.close();
+      await streamChangesFuture;
+
+      expect(received.map((event) => event.type), [...upserts, SyncEntityType.sharedSpaceStackDeleteV1]);
+      expect(
+        received.take(upserts.length).map((event) => (event.data as SyncStackV1).primaryAssetId),
+        everyElement('edit-1'),
+      );
+      expect((received.last.data as SyncStackDeleteV1).stackId, 'stack-1');
+    });
+  });
+
+  group('fork shared-space and library request types ride the declaration-or-version gate', () {
+    const forkTypes = <String>[
+      'SharedSpacesV1',
+      'SharedSpaceMembersV1',
+      'SharedSpaceAssetsV1',
+      'SharedSpaceAssetExifsV1',
+      'SharedSpaceToAssetsV1',
+      'LibrariesV1',
+      'LibraryAssetsV1',
+      'LibraryAssetExifsV1',
+      'SharedSpaceLibrariesV1',
+    ];
+
+    test('stock Immich server (no declaration, upstream version): sends no fork type', () async {
+      final types = await capturedRequestTypes(const SemVer(major: 3, minor: 3, patch: 1));
+      expect(types.where(forkTypes.contains), isEmpty);
+      expect(types.where((t) => t.startsWith('SharedSpace') || t.startsWith('Librar')), isEmpty);
+      expect(types, containsAll(['AuthUsersV1', 'AssetsV2', 'AlbumsV2', 'PeopleV1']));
+    });
+
+    test('fork server predating capability signalling (no declaration, 5.6.0): sends every fork type', () async {
+      final types = await capturedRequestTypes(const SemVer(major: 5, minor: 6, patch: 0));
+      expect(types, containsAll(forkTypes));
+    });
+
+    test('a full declaration sends every fork type, whatever the reported version', () async {
+      final everything = SyncRequestType.values.map((t) => t.toJson()).toSet();
+      final types = await capturedRequestTypes(
+        const SemVer(major: 3, minor: 3, patch: 1),
+        supportedSyncTypes: everything,
+      );
+      expect(types, containsAll(forkTypes));
+    });
+
+    test('a declaration without the fork types sends none of them, even above the version gate', () async {
+      final types = await capturedRequestTypes(
+        const SemVer(major: 6, minor: 0, patch: 0),
+        supportedSyncTypes: {'AssetsV1', 'AlbumsV2'},
+      );
+      expect(types.where(forkTypes.contains), isEmpty);
+    });
+  });
+
+  group("upstream's 3.3-era request types are requested ONLY behind a server declaration", () {
+    // Upstream gates these on serverVersion >= 3.3.0, but a Gallery server reports its own 5.x
+    // version, which clears that gate even on the released 5.7.x line that does not know the types,
+    // and one unknown request type 400s the WHOLE /sync/stream request.
+    const upgraded = {'AuthUsersV2': 'AuthUsersV1', 'MemoriesV2': 'MemoriesV1', 'MemoryToAssetsV2': 'MemoryToAssetsV1'};
+
+    test('no declaration: stays on the earlier version of every stream, at every version', () async {
+      for (final version in [
+        const SemVer(major: 3, minor: 3, patch: 0),
+        const SemVer(major: 5, minor: 7, patch: 1),
+        const SemVer(major: 6, minor: 0, patch: 0),
+      ]) {
+        final types = await capturedRequestTypes(version);
+        for (final MapEntry(key: newer, value: older) in upgraded.entries) {
+          expect(types, isNot(contains(newer)), reason: 'no declaration must never send $newer at $version');
+          expect(types, contains(older), reason: 'no declaration must fall back to $older at $version');
+        }
+        expect(
+          types,
+          isNot(contains('AssetFacesV3')),
+          reason: 'no declaration must never send AssetFacesV3 at $version',
+        );
+        clearInteractions(mockHttpClient);
+      }
+    });
+
+    test('a released 5.7.x server that does not declare them gets the earlier versions', () async {
+      final types = await capturedRequestTypes(
+        const SemVer(major: 5, minor: 7, patch: 1),
+        supportedSyncTypes: {'AuthUsersV1', 'MemoriesV1', 'MemoryToAssetsV1', 'AssetFacesV2', 'AssetsV1'},
+      );
+      expect(types, containsAll(['AuthUsersV1', 'MemoriesV1', 'MemoryToAssetsV1', 'AssetFacesV2']));
+      for (final newer in ['AuthUsersV2', 'MemoriesV2', 'MemoryToAssetsV2', 'AssetFacesV3']) {
+        expect(types, isNot(contains(newer)), reason: 'the 5.7.x line does not know $newer');
+      }
+    });
+
+    test('a declaring server gets the newer versions regardless of its reported version', () async {
+      for (final version in [const SemVer(major: 3, minor: 3, patch: 0), const SemVer(major: 5, minor: 8, patch: 0)]) {
+        final types = await capturedRequestTypes(
+          version,
+          supportedSyncTypes: {'AuthUsersV2', 'MemoriesV2', 'MemoryToAssetsV2', 'AssetFacesV3', 'AssetsV1'},
+        );
+        expect(types, containsAll(['AuthUsersV2', 'MemoriesV2', 'MemoryToAssetsV2', 'AssetFacesV3']));
+        expect(types, isNot(contains('MemoriesV1')), reason: 'one version of each stream at $version');
+        clearInteractions(mockHttpClient);
+      }
     });
   });
 

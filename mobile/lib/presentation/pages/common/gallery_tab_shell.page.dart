@@ -3,6 +3,9 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:immich_mobile/extensions/build_context_extensions.dart';
+import 'package:immich_mobile/gallery/dock/gallery_dock_fold.dart';
+import 'package:immich_mobile/gallery/motion/motion_host.dart';
+import 'package:immich_mobile/gallery/motion/transitions.dart';
 import 'package:immich_mobile/presentation/widgets/gallery_nav/gallery_bottom_nav.widget.dart';
 import 'package:immich_mobile/providers/gallery_nav/gallery_nav_destination.dart';
 import 'package:immich_mobile/providers/gallery_nav/gallery_tab_enum.dart';
@@ -45,6 +48,8 @@ class _GalleryTabShellPageState extends ConsumerState<GalleryTabShellPage> {
     }
     _lastTab = tab;
     ref.read(galleryTabProvider.notifier).state = tab;
+    // A new tab starts with the whole dock showing.
+    ref.read(galleryDockFoldedProvider.notifier).state = false;
   }
 
   /// Keeps the user on the SLOT they were standing on when the routes list
@@ -83,6 +88,13 @@ class _GalleryTabShellPageState extends ConsumerState<GalleryTabShellPage> {
   }
 
   @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // App-wide motion (favourite bursts, photos thrown to the trash) draws in the root overlay.
+    GalleryMotionHost.attach(Overlay.of(context, rootOverlay: true));
+  }
+
+  @override
   void dispose() {
     _router?.removeListener(_syncTab);
     super.dispose();
@@ -109,8 +121,8 @@ class _GalleryTabShellPageState extends ConsumerState<GalleryTabShellPage> {
       // list, a closure) and equality fails every frame, which tears down and
       // rebuilds the entire tab stack every frame.
       routes: [for (final tab in slots) GalleryNavDestination.forTab(tab).routeBuilder()],
-      duration: const Duration(milliseconds: 600),
-      transitionBuilder: (_, child, animation) => FadeTransition(opacity: animation, child: child),
+      duration: GalleryTransitions.tabDuration,
+      transitionBuilder: GalleryTransitions.tab,
       builder: (context, child) {
         final tabsRouter = AutoTabsRouter.of(context);
         if (_router != tabsRouter) {
@@ -137,7 +149,8 @@ class _GalleryTabShellPageState extends ConsumerState<GalleryTabShellPage> {
                       Expanded(child: child),
                     ],
                   )
-                : child,
+                // The active tab's scrolling folds and unfolds the dock.
+                : GalleryDockScrollListener(child: child),
             bottomNavigationBar: isLandscape ? null : GalleryBottomNav(tabsRouter: tabsRouter),
           ),
         );

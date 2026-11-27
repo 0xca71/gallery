@@ -1,5 +1,5 @@
 import { ImmichTelemetry } from 'src/enum.js';
-import { ConfigRepository, clearEnvCache } from 'src/repositories/config.repository.js';
+import { ConfigRepository, applyCspHashes, clearEnvCache } from 'src/repositories/config.repository.js';
 
 const getEnv = () => {
   clearEnvCache();
@@ -49,13 +49,6 @@ const resetEnv = () => {
     'IMMICH_S3_SECRET_ACCESS_KEY',
     'IMMICH_S3_PRESIGNED_URL_EXPIRY',
     'IMMICH_S3_SERVE_MODE',
-    'IMMICH_BACKUP_S3_ENABLED',
-    'IMMICH_BACKUP_S3_ENDPOINT',
-    'IMMICH_BACKUP_S3_BUCKET',
-    'IMMICH_BACKUP_S3_REGION',
-    'IMMICH_BACKUP_S3_ACCESS_KEY_ID',
-    'IMMICH_BACKUP_S3_SECRET_ACCESS_KEY',
-    'IMMICH_BACKUP_S3_PREFIX',
   ]) {
     delete process.env[env];
   }
@@ -97,18 +90,19 @@ describe('getEnv', () => {
 
     expect(config.plugins.external).toEqual({ allow: false });
     expect(config.setup).toEqual({ allow: true });
-    expect(config.webDeleteToastThreshold).toBe(20);
+  });
+
+  it('should use the existing delete toast threshold default', () => {
+    expect(getEnv().webDeleteToastThreshold).toBe(20);
   });
 
   it('should read the delete toast threshold from the environment', () => {
     process.env.IMMICH_WEB_DELETE_TOAST_THRESHOLD = '42';
-
     expect(getEnv().webDeleteToastThreshold).toBe(42);
   });
 
   it('should reject a negative delete toast threshold', () => {
     process.env.IMMICH_WEB_DELETE_TOAST_THRESHOLD = '-1';
-
     expect(() => getEnv()).toThrowError('[IMMICH_WEB_DELETE_TOAST_THRESHOLD] Too small: expected number to be >=0');
   });
 
@@ -368,52 +362,6 @@ describe('getEnv', () => {
     });
   });
 
-  describe('backup S3', () => {
-    it('should disable uploads by default', () => {
-      expect(getEnv().backup.s3).toEqual({
-        enabled: false,
-        bucket: '',
-        region: 'us-east-1',
-        endpoint: undefined,
-        accessKeyId: undefined,
-        secretAccessKey: undefined,
-        prefix: 'database',
-      });
-    });
-
-    it('should read backup S3 settings independently of media storage', () => {
-      process.env.IMMICH_S3_BUCKET = 'media-bucket';
-      process.env.IMMICH_S3_ACCESS_KEY_ID = 'media-key';
-      process.env.IMMICH_S3_SECRET_ACCESS_KEY = 'media-secret';
-      process.env.IMMICH_BACKUP_S3_ENABLED = 'true';
-      process.env.IMMICH_BACKUP_S3_ENDPOINT = 'https://account.r2.cloudflarestorage.com';
-      process.env.IMMICH_BACKUP_S3_BUCKET = 'backup-bucket';
-      process.env.IMMICH_BACKUP_S3_REGION = 'auto';
-      process.env.IMMICH_BACKUP_S3_ACCESS_KEY_ID = 'backup-key';
-      process.env.IMMICH_BACKUP_S3_SECRET_ACCESS_KEY = 'backup-secret';
-      process.env.IMMICH_BACKUP_S3_PREFIX = 'gallery/database';
-
-      const { backup, storage } = getEnv();
-      expect(storage.backend).toBe('disk');
-      expect(storage.s3.bucket).toBe('media-bucket');
-      expect(backup.s3).toEqual({
-        enabled: true,
-        bucket: 'backup-bucket',
-        region: 'auto',
-        endpoint: 'https://account.r2.cloudflarestorage.com',
-        accessKeyId: 'backup-key',
-        secretAccessKey: 'backup-secret',
-        prefix: 'gallery/database',
-      });
-    });
-
-    it('should honor false and an empty prefix', () => {
-      process.env.IMMICH_BACKUP_S3_ENABLED = 'false';
-      process.env.IMMICH_BACKUP_S3_PREFIX = '';
-      expect(getEnv().backup.s3).toMatchObject({ enabled: false, prefix: '' });
-    });
-  });
-
   describe('storage', () => {
     it('should default storage backend to disk', () => {
       const { storage } = getEnv();
@@ -460,5 +408,37 @@ describe('getEnv', () => {
         serveMode: 'redirect',
       });
     });
+  });
+});
+
+describe('applyCspHashes', () => {
+  const manifest = { 'script-src': [`'sha256-script'`], 'style-src': [`'sha256-style'`] };
+
+  it('should append the hashes of the inline content', () => {
+    const directives = applyCspHashes({ 'script-src': [`'self'`], 'style-src': [`'self'`] }, manifest);
+
+    expect(directives).toEqual({
+      'script-src': [`'self'`, `'sha256-script'`],
+      'style-src': [`'self'`, `'sha256-style'`],
+    });
+  });
+
+  it('should skip a directive that allows unsafe-inline, which a hash would disable', () => {
+    const directives = applyCspHashes({ 'script-src': [`'self'`, `'unsafe-inline'`] }, manifest);
+
+    expect(directives['script-src']).toEqual([`'self'`, `'unsafe-inline'`]);
+  });
+
+  it('should skip a directive the policy does not declare', () => {
+    const directives = applyCspHashes({ 'script-src': [`'self'`] }, manifest);
+
+    expect(directives).not.toHaveProperty('style-src');
+  });
+
+  it('should not mutate the directives it is given', () => {
+    const directives = { 'script-src': [`'self'`] };
+    applyCspHashes(directives, manifest);
+
+    expect(directives).toEqual({ 'script-src': [`'self'`] });
   });
 });

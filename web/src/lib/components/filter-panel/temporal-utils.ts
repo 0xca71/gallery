@@ -23,7 +23,7 @@ export function aggregateYears(
   }
   const maxCount = Math.max(...yearMap.values(), 1);
   return [...yearMap]
-    .sort(([a], [b]) => (sortOrder === 'asc' ? a - b : b - a))
+    .sort(([a], [b]) => (sortOrder === 'desc' ? b - a : a - b))
     .map(([year, count]) => ({
       year,
       count,
@@ -35,6 +35,7 @@ export function getMonthsForYear(buckets: Array<{ timeBucket: string; count: num
   const monthMap = new Map<number, number>();
   for (const b of buckets) {
     const d = new Date(b.timeBucket);
+    // eslint-disable-next-line unicorn/prefer-continue
     if (d.getUTCFullYear() === year) {
       const month = d.getUTCMonth() + 1;
       monthMap.set(month, (monthMap.get(month) ?? 0) + b.count);

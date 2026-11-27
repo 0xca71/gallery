@@ -10,9 +10,11 @@ import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart' hide Store;
 import 'package:fluttertoast/fluttertoast.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:immich_mobile/data/store/passkey.dart';
 import 'package:immich_mobile/domain/models/store.model.dart';
 import 'package:immich_mobile/entities/store.entity.dart';
 import 'package:immich_mobile/extensions/build_context_extensions.dart';
+import 'package:immich_mobile/gallery/widgets/demo_login_button.dart';
 import 'package:immich_mobile/generated/translations.g.dart';
 import 'package:immich_mobile/infrastructure/repositories/settings.repository.dart';
 import 'package:immich_mobile/models/auth/login_response.model.dart';
@@ -22,9 +24,11 @@ import 'package:immich_mobile/providers/feature_message.provider.dart';
 import 'package:immich_mobile/providers/gallery_permission.provider.dart';
 import 'package:immich_mobile/providers/oauth.provider.dart';
 import 'package:immich_mobile/providers/server_info.provider.dart';
+import 'package:immich_mobile/providers/view_intent/view_intent_handler.provider.dart';
 import 'package:immich_mobile/providers/websocket.provider.dart';
 import 'package:immich_mobile/repositories/permission.repository.dart';
 import 'package:immich_mobile/routing/router.dart';
+import 'package:immich_mobile/utils/error_handler.dart';
 import 'package:immich_mobile/utils/provider_utils.dart';
 import 'package:immich_mobile/utils/semver.dart';
 import 'package:immich_mobile/utils/url_helper.dart';
@@ -36,8 +40,6 @@ import 'package:immich_ui/immich_ui.dart';
 import 'package:logging/logging.dart';
 import 'package:openapi/api.dart';
 import 'package:package_info_plus/package_info_plus.dart';
-
-const _demoServerUrl = 'https://demo.opennoodle.de';
 
 class LoginForm extends HookConsumerWidget {
   LoginForm({super.key});
@@ -71,12 +73,12 @@ class LoginForm extends HookConsumerWidget {
     final passwordFocusNode = useFocusNode();
     final isOauthEnable = useState<bool>(false);
     final isPasswordLoginEnable = useState<bool>(false);
+    final isPasskeyEnable = useState<bool>(false);
     final oAuthButtonLabel = useState<String>('OAuth');
     final logoAnimationController = useAnimationController(duration: const Duration(seconds: 60));
     unawaited(logoAnimationController.repeat());
     final serverInfo = ref.watch(serverInfoProvider);
     final warningMessage = useState<String?>(null);
-    final isDemoLoginLoading = useState<bool>(false);
     final loginFormKey = GlobalKey<FormState>();
     final ValueNotifier<String?> serverEndpoint = useState<String?>(null);
 
@@ -115,11 +117,17 @@ class LoginForm extends HookConsumerWidget {
         }
 
         final serverInfo = ref.read(serverInfoProvider);
+        final passkeyEnabled = await ref.read(PasskeyStore.instance.enabled().future);
+        if (!context.mounted) {
+          return;
+        }
+
         final features = serverInfo.serverFeatures;
         final config = serverInfo.serverConfig;
 
         isOauthEnable.value = features.oauthEnabled;
         isPasswordLoginEnable.value = features.passwordLogin;
+        isPasskeyEnable.value = passkeyEnabled;
         oAuthButtonLabel.value = config.oauthButtonText.isNotEmpty ? config.oauthButtonText : 'OAuth';
 
         serverEndpoint.value = endpoint;
@@ -187,9 +195,11 @@ class LoginForm extends HookConsumerWidget {
 
     Future<void> handleSyncFlow() async {
       final backgroundManager = ref.read(backgroundSyncProvider);
+      final viewIntentHandler = ref.read(viewIntentHandlerProvider);
 
       await backgroundManager.syncLocal(full: true);
       await backgroundManager.syncRemote();
+      await viewIntentHandler.flushDeferredViewIntent();
       await backgroundManager.hashAssets();
 
       if (SettingsRepository.instance.appConfig.backup.syncAlbums) {
@@ -250,13 +260,7 @@ class LoginForm extends HookConsumerWidget {
 
     bool isSyncRemoteDeletionsMode() => Platform.isAndroid && Store.get(StoreKey.manageLocalMediaAndroid, false);
 
-    Future<void> completeLogin(LoginResponse result) async {
-      if (result.shouldChangePassword && !result.isAdmin) {
-        unawaited(context.pushRoute(const ChangePasswordRoute()));
-        passwordController.clear();
-        return;
-      }
-
+    Future<void> finishLogin() async {
       await ref.read(galleryPermissionNotifier.notifier).requestGalleryPermission();
       if (isSyncRemoteDeletionsMode()) {
         await getManageMediaPermission();
@@ -269,6 +273,16 @@ class LoginForm extends HookConsumerWidget {
       }
 
       unawaited(context.replaceRoute(const GalleryTabShellRoute()));
+    }
+
+    Future<void> onLogin(LoginResponse result) async {
+      if (result.shouldChangePassword && !result.isAdmin && isPasswordLoginEnable.value) {
+        unawaited(context.pushRoute(const ChangePasswordRoute()));
+        passwordController.clear();
+        return;
+      }
+
+      await finishLogin();
     }
 
     Future<void> login() async {
@@ -284,7 +298,7 @@ class LoginForm extends HookConsumerWidget {
           return;
         }
 
-        await completeLogin(result);
+        await onLogin(result);
       } catch (error) {
         if (!context.mounted) {
           return;
@@ -296,42 +310,6 @@ class LoginForm extends HookConsumerWidget {
           toastType: ToastType.error,
           gravity: ToastGravity.TOP,
         );
-      }
-    }
-
-    Future<void> demoLogin() async {
-      if (isDemoLoginLoading.value) {
-        return;
-      }
-
-      TextInput.finishAutofillContext();
-      isDemoLoginLoading.value = true;
-
-      try {
-        serverEndpointController.text = _demoServerUrl;
-        await ref.read(authProvider.notifier).validateServerUrl(_demoServerUrl);
-
-        // Invalidate all api repository provider instance to take into account the demo endpoint and access token.
-        invalidateAllApiRepositoryProviders(ref);
-
-        await ref.read(serverInfoProvider.notifier).getServerInfo();
-        final result = await ref.read(authProvider.notifier).demoLogin();
-        await completeLogin(result);
-      } catch (error, stack) {
-        log.severe('Error logging into demo mode: $error', error, stack);
-
-        if (!context.mounted) {
-          return;
-        }
-
-        ImmichToast.show(
-          context: context,
-          msg: context.t.login_form_failed_demo_login,
-          toastType: ToastType.error,
-          gravity: ToastGravity.TOP,
-        );
-      } finally {
-        isDemoLoginLoading.value = false;
       }
     }
 
@@ -408,17 +386,7 @@ class LoginForm extends HookConsumerWidget {
               .saveAuthInfo(accessToken: loginResponseDto.accessToken);
 
           if (isSuccess && context.mounted) {
-            await ref.read(galleryPermissionNotifier.notifier).requestGalleryPermission();
-            if (isSyncRemoteDeletionsMode()) {
-              await getManageMediaPermission();
-            }
-            unawaited(ref.read(featureMessageServiceProvider).markSeen());
-            unawaited(handleSyncFlow());
-            if (!context.mounted) {
-              return;
-            }
-
-            unawaited(context.replaceRoute(const GalleryTabShellRoute()));
+            await finishLogin();
             return;
           }
         } catch (error, stack) {
@@ -447,6 +415,30 @@ class LoginForm extends HookConsumerWidget {
           gravity: ToastGravity.TOP,
         );
         return;
+      }
+    }
+
+    Future<void> passkeyLogin() async {
+      invalidateAllApiRepositoryProviders(ref);
+
+      try {
+        final result = await ref.read(authProvider.notifier).passkeyLogin();
+        if (result != null && context.mounted) {
+          await onLogin(result);
+        }
+      } catch (error, stack) {
+        log.severe('Error logging in with passkey', error, stack);
+
+        if (!context.mounted) {
+          return;
+        }
+
+        ImmichToast.show(
+          context: context,
+          msg: serverErrorMessage(error) ?? context.t.errors.something_went_wrong,
+          toastType: ToastType.error,
+          gravity: ToastGravity.TOP,
+        );
       }
     }
 
@@ -500,13 +492,7 @@ class LoginForm extends HookConsumerWidget {
                     onSubmit: (_) => form.submit(),
                   ),
                 ),
-                ImmichTextButton(
-                  labelText: context.t.login_form_try_demo,
-                  icon: Icons.travel_explore_rounded,
-                  variant: ImmichVariant.ghost,
-                  loading: isDemoLoginLoading.value,
-                  onPressed: demoLogin,
-                ),
+                GalleryDemoLoginButton(serverEndpointController: serverEndpointController, onLoggedIn: onLogin),
                 ImmichTextButton(
                   labelText: context.t.settings,
                   icon: Icons.settings,
@@ -569,7 +555,20 @@ class LoginForm extends HookConsumerWidget {
                           )
                         : const SizedBox.shrink(),
                   ),
-                if (!isOauthEnable.value && !isPasswordLoginEnable.value) Center(child: Text(context.t.login_disabled)),
+                if (isPasskeyEnable.value)
+                  ImmichForm(
+                    onSubmit: passkeyLogin,
+                    submitText: context.t.login_with_passkey,
+                    submitIcon: Icons.key_outlined,
+                    builder: (context, _) => isPasswordLoginEnable.value || isOauthEnable.value
+                        ? Padding(
+                            padding: const EdgeInsets.only(left: 18.0, right: 18.0, top: 12.0),
+                            child: Divider(color: context.colorScheme.onSurface, height: 5),
+                          )
+                        : const SizedBox.shrink(),
+                  ),
+                if (!isOauthEnable.value && !isPasswordLoginEnable.value && !isPasskeyEnable.value)
+                  Center(child: Text(context.t.login_disabled)),
                 ImmichTextButton(
                   labelText: context.t.back,
                   icon: Icons.arrow_back,
@@ -598,10 +597,7 @@ class LoginForm extends HookConsumerWidget {
                       GestureDetector(
                         onDoubleTap: () => populateTestLoginInfo(),
                         onLongPress: () => populateTestLoginInfo1(),
-                        child: RotationTransition(
-                          turns: logoAnimationController,
-                          child: const ImmichLogo(heroTag: 'logo'),
-                        ),
+                        child: RotationTransition(turns: logoAnimationController, child: const ImmichLogo()),
                       ),
                       const Padding(padding: EdgeInsets.only(top: 8.0, bottom: 16), child: ImmichTitleText()),
                     ],

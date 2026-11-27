@@ -1,10 +1,9 @@
-import { Selectable, ShallowDehydrateObject } from 'kysely';
+import { Selectable, ShallowDehydrateObject, SqlBool } from 'kysely';
 import { createZodDto } from 'nestjs-zod';
 import z from 'zod';
-import type { MaybeDehydrated } from 'src/types.js';
 import { AssetFace, AssetFile, Exif, Stack, Tag, User } from 'src/database.js';
 import { HistoryBuilder } from 'src/decorators.js';
-import { AuthDto } from 'src/dtos/auth.dto.js';
+import { AuthDto, isMetadataHidden } from 'src/dtos/auth.dto.js';
 import { AssetEditActionItem } from 'src/dtos/editing.dto.js';
 import { ExifResponseSchema, mapExif } from 'src/dtos/exif.dto.js';
 import { PersonResponseDto, PersonResponseSchema, mapPerson } from 'src/dtos/person.dto.js';
@@ -18,6 +17,8 @@ import {
   AssetVisibilitySchema,
   ChecksumAlgorithm,
 } from 'src/enum.js';
+import { GalleryAssetResponseExtension } from 'src/gallery/dtos/asset-response.dto.js';
+import type { MaybeDehydrated } from 'src/types.js';
 import { hexOrBufferToBase64 } from 'src/utils/bytes.js';
 import { asDateTimeString } from 'src/utils/date.js';
 import { mimeTypes } from 'src/utils/mime-types.js';
@@ -113,7 +114,7 @@ export const AssetResponseSchema = SanitizedAssetResponseSchema.extend(
       .boolean()
       .describe('Is edited')
       .meta(new HistoryBuilder().added('v2.5.0').beta('v2.5.0').getExtensions()),
-    resolvedSpaceId: z.string().optional().describe('Resolved space ID (when server auto-detects space context)'),
+    ...GalleryAssetResponseExtension,
   }).shape,
 ).meta({ id: 'AssetResponseDto' });
 
@@ -137,7 +138,14 @@ export type MapAsset = {
   fileModifiedAt: Date;
   files?: ShallowDehydrateObject<AssetFile>[];
   isExternal: boolean;
-  isFavorite: boolean;
+  // #763: resolved per-user by the query via favoriteExistsFor(...).as('isFavoriteForUser'). There
+  // is deliberately no plain `isFavorite` field here: asset."isFavorite" is the owner's favorite, and
+  // mapping it would leak the owner's flag to non-owners and to auth-less callers such as
+  // mapSharedLink. See mapAsset.
+  // Typed `SqlBool` (kysely's `boolean | 0 | 1`), not plain `boolean` — that's what `.select()`
+  // infers for a projected `favoriteExistsFor(...)` expression (used in EXISTS/WHERE position
+  // elsewhere in the codebase, where SqlBool is the natural fit). mapAsset coerces with `!!`.
+  isFavoriteForUser?: SqlBool;
   isOffline: boolean;
   visibility: AssetVisibility;
   libraryId: string | null;
@@ -158,7 +166,6 @@ export type MapAsset = {
 };
 
 export type AssetMapOptions = {
-  stripMetadata?: boolean;
   withStack?: boolean;
   auth?: AuthDto;
 };
@@ -192,9 +199,9 @@ const mapStack = (entity: { stack?: Stack | null }) => {
 };
 
 export function mapAsset(entity: MaybeDehydrated<MapAsset>, options: AssetMapOptions = {}): AssetResponseDto {
-  const { stripMetadata = false, withStack = false } = options;
+  const { withStack = false, auth } = options;
 
-  if (stripMetadata) {
+  if (isMetadataHidden(auth)) {
     const sanitizedAssetResponse: SanitizedAssetResponseDto = {
       id: entity.id,
       type: entity.type,
@@ -214,7 +221,7 @@ export function mapAsset(entity: MaybeDehydrated<MapAsset>, options: AssetMapOpt
     id: entity.id,
     createdAt: asDateTimeString(entity.createdAt),
     ownerId: entity.ownerId,
-    owner: entity.owner ? mapUser(entity.owner) : undefined,
+    owner: entity.owner && !auth?.sharedLink ? mapUser(entity.owner) : undefined,
     libraryId: entity.libraryId,
     type: entity.type,
     originalPath: entity.originalPath,
@@ -225,7 +232,12 @@ export function mapAsset(entity: MaybeDehydrated<MapAsset>, options: AssetMapOpt
     fileModifiedAt: asDateTimeString(entity.fileModifiedAt),
     localDateTime: asDateTimeString(entity.localDateTime),
     updatedAt: asDateTimeString(entity.updatedAt),
-    isFavorite: options.auth?.user.id === entity.ownerId && entity.isFavorite,
+    // #763: resolved per-user by the query via favoriteExistsFor(...).as('isFavoriteForUser'), never
+    // from asset."isFavorite", which is the owner's favorite and would leak to non-owners and to
+    // auth-less callers such as mapSharedLink. A query that does not project the field yields
+    // undefined -> false (fail-safe).
+    // `!!` (not `?? false`) also normalizes SqlBool's `0`/`1` to a real boolean.
+    isFavorite: !!entity.isFavoriteForUser,
     isArchived: entity.visibility === AssetVisibility.Archive,
     isTrashed: !!entity.deletedAt,
     visibility: entity.visibility,
@@ -233,7 +245,7 @@ export function mapAsset(entity: MaybeDehydrated<MapAsset>, options: AssetMapOpt
     exifInfo: entity.exifInfo ? mapExif(entity.exifInfo) : undefined,
     livePhotoVideoId: entity.livePhotoVideoId,
     tags: entity.tags?.map((tag) => mapTag(tag)),
-    people: peopleFromFaces(entity.faces),
+    people: auth?.sharedLink ? [] : peopleFromFaces(entity.faces),
     checksum: hexOrBufferToBase64(entity.checksum)!,
     stack: withStack ? mapStack(entity) : undefined,
     isOffline: entity.isOffline,

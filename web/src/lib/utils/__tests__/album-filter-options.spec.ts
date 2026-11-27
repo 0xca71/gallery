@@ -1,11 +1,11 @@
-import { AssetOrder, AssetTypeEnum, AssetVisibility } from '@immich/sdk';
-import { describe, expect, it } from 'vitest';
-import { createFilterState } from '$lib/components/filter-panel/filter-panel';
+import { createFilterState } from '#lib/components/filter-panel/filter-panel.ts';
 import {
   buildAlbumAssetPickerOptions,
   buildAlbumTimelineOptions,
   buildSpaceAlbumAssetPickerOptions,
-} from '$lib/utils/album-filter-options';
+} from '#lib/utils/album-filter-options.ts';
+import { AssetOrder, AssetTypeEnum, AssetVisibility } from '@immich/sdk';
+import { describe, expect, it } from 'vitest';
 
 describe('buildAlbumTimelineOptions', () => {
   it('maps all supported filters without changing the passed album order', () => {
@@ -27,6 +27,7 @@ describe('buildAlbumTimelineOptions', () => {
     expect(buildAlbumTimelineOptions('album-1', AssetOrder.Asc, filters)).toEqual({
       albumId: 'album-1',
       order: AssetOrder.Asc,
+      withStacked: true,
       personIds: ['person-1'],
       country: 'Germany',
       city: 'Berlin',
@@ -166,7 +167,7 @@ describe('buildAlbumAssetPickerOptions', () => {
     );
   });
 
-  it('maps favorites and omits partners for album asset picker options', () => {
+  it('maps favorites and keeps partner scope active for album asset picker options (#763 slice 4)', () => {
     const filters = { ...createFilterState(), isFavorite: true };
     const options = buildAlbumAssetPickerOptions('album-1', filters);
 
@@ -174,9 +175,9 @@ describe('buildAlbumAssetPickerOptions', () => {
       expect.objectContaining({
         timelineAlbumId: 'album-1',
         isFavorite: true,
+        withPartners: true,
       }),
     );
-    expect(options).not.toHaveProperty('withPartners');
   });
 
   // Pinned per the #767c Step-3 decision: buildAlbumAssetPickerOptions deliberately does NOT
@@ -204,9 +205,9 @@ describe('buildAlbumAssetPickerOptions', () => {
 });
 
 /**
- * #802 — album views were missing the "Text" filter section. Both album builders feed
- * TimeBucketDto, which already supports description/originalFileName/ocr server-side.
- */
+#802 — album views were missing the "Text" filter section. Both album builders feed
+TimeBucketDto, which already supports description/originalFileName/ocr server-side.
+*/
 describe('text filters (#802)', () => {
   const textFilters = {
     ...createFilterState(),

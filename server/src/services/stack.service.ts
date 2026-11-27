@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable } from '@nestjs/common';
 import { BulkIdsDto } from 'src/dtos/asset-ids.response.dto.js';
 import { AuthDto } from 'src/dtos/auth.dto.js';
 import { StackCreateDto, StackResponseDto, StackSearchDto, StackUpdateDto, mapStack } from 'src/dtos/stack.dto.js';
@@ -10,10 +10,13 @@ import { UUIDAssetIDParamDto } from 'src/validation.js';
 @Injectable()
 export class StackService extends BaseService {
   async search(auth: AuthDto, dto: StackSearchDto): Promise<StackResponseDto[]> {
-    const stacks = await this.stackRepository.search({
-      ownerId: auth.user.id,
-      primaryAssetId: dto.primaryAssetId,
-    });
+    const stacks = await this.stackRepository.search(
+      {
+        ownerId: auth.user.id,
+        primaryAssetId: dto.primaryAssetId,
+      },
+      auth.user.id,
+    );
 
     return stacks.map((stack) => mapStack(stack, { auth }));
   }
@@ -21,7 +24,16 @@ export class StackService extends BaseService {
   async create(auth: AuthDto, dto: StackCreateDto): Promise<StackResponseDto> {
     await this.requireAccess({ auth, permission: Permission.AssetUpdate, ids: dto.assetIds });
 
-    const stack = await this.stackRepository.create({ ownerId: auth.user.id }, dto.assetIds);
+    // #734: stacking is owner-only filing — StackUpdate/StackDelete are stack-owner-only, so a
+    // stack created over someone else's assets would leave the asset owner unable to manage it.
+    // AssetDelete is the pure owner arm (checkOwnerAccess, same hasElevatedPermission as the
+    // AssetUpdate gate). Kept explicit so the rule never depends on how AssetUpdate is granted.
+    const ownedIds = await this.checkAccess({ auth, permission: Permission.AssetDelete, ids: dto.assetIds });
+    if (ownedIds.size !== new Set(dto.assetIds).size) {
+      throw new ForbiddenException('Stacks can only be created from assets you own');
+    }
+
+    const stack = await this.stackRepository.create({ ownerId: auth.user.id }, dto.assetIds, auth.user.id);
 
     await this.eventRepository.emit('StackCreate', { stackId: stack.id, userId: auth.user.id });
 
@@ -30,18 +42,22 @@ export class StackService extends BaseService {
 
   async get(auth: AuthDto, id: string): Promise<StackResponseDto> {
     await this.requireAccess({ auth, permission: Permission.StackRead, ids: [id] });
-    const stack = await this.findOrFail(id);
+    const stack = await this.findOrFail(id, auth.user.id);
     return mapStack(stack, { auth });
   }
 
   async update(auth: AuthDto, id: string, dto: StackUpdateDto): Promise<StackResponseDto> {
     await this.requireAccess({ auth, permission: Permission.StackUpdate, ids: [id] });
-    const stack = await this.findOrFail(id);
+    const stack = await this.findOrFail(id, auth.user.id);
     if (dto.primaryAssetId && stack.assets.every(({ id }) => id !== dto.primaryAssetId)) {
       throw new BadRequestException('Primary asset must be in the stack');
     }
 
-    const updatedStack = await this.stackRepository.update(id, { id, primaryAssetId: dto.primaryAssetId });
+    const updatedStack = await this.stackRepository.update(
+      id,
+      { id, primaryAssetId: dto.primaryAssetId },
+      auth.user.id,
+    );
 
     await this.eventRepository.emit('StackUpdate', { stackId: id, userId: auth.user.id });
 
@@ -78,7 +94,8 @@ export class StackService extends BaseService {
     await this.eventRepository.emit('StackUpdate', { stackId, userId: auth.user.id });
   }
 
-  private findOrFail(id: string) {
-    return findOrFail(() => this.stackRepository.getById(id), 'Asset stack');
+  // #763: authUserId is threaded into getById so mapStack's assets carry isFavoriteForUser.
+  private findOrFail(id: string, authUserId?: string) {
+    return findOrFail(() => this.stackRepository.getById(id, authUserId), 'Asset stack');
   }
 }

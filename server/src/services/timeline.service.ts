@@ -1,5 +1,5 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
-import { AuthDto } from 'src/dtos/auth.dto.js';
+import { AuthDto, isMetadataHidden } from 'src/dtos/auth.dto.js';
 import {
   TimeBucketAssetDto,
   TimeBucketCoverDto,
@@ -7,14 +7,14 @@ import {
   TimeBucketDto,
   TimeBucketsResponseDto,
 } from 'src/dtos/time-bucket.dto.js';
-import { AssetVisibility, Permission, TimeBucketSize } from 'src/enum.js';
+import { AssetVisibility, Permission } from 'src/enum.js';
+import { isFavoritesAcrossScope } from 'src/gallery/utils/favorites-scope.js';
+import { galleryTimeBucketChecks, galleryTimeBucketOptions } from 'src/gallery/utils/timeline-scope.js';
+import { requireTimelineTagAccess } from 'src/gallery/utils/timeline-tag-access.js';
 import { TimeBucketOptions } from 'src/repositories/asset.repository.js';
 import { BaseService } from 'src/services/base.service.js';
 import { requireElevatedPermission } from 'src/utils/access.js';
-import { getAlbumSpaceIds } from 'src/utils/album-space-ids.js';
 import { getMyPartnerIds } from 'src/utils/asset.util.js';
-import { timelineHiddenScopeIsEmpty } from 'src/utils/shared-space-album-scope.js';
-import { normalizeTimeBucketForBucketSize } from 'src/utils/timeline-bucket.js';
 
 @Injectable()
 export class TimelineService extends BaseService {
@@ -25,9 +25,9 @@ export class TimelineService extends BaseService {
   }
 
   async getTimeBucketCovers(auth: AuthDto, dto: TimeBucketCoverDto): Promise<TimeBucketCoverResponseDto[]> {
-    await this.timeBucketChecks(auth, dto as Partial<TimeBucketDto>);
-    const timeBucketOptions = await this.buildTimeBucketOptions(auth, dto as Partial<TimeBucketDto>);
-    return this.assetRepository.getTimeBucketCovers({ ...timeBucketOptions, timeBuckets: dto.timeBuckets });
+    await this.timeBucketChecks(auth, dto);
+    const timeBucketOptions = await this.buildTimeBucketOptions(auth, dto);
+    return this.galleryAssetRepository.getTimeBucketCovers({ ...timeBucketOptions, timeBuckets: dto.timeBuckets });
   }
 
   // pre-jsonified response
@@ -36,143 +36,30 @@ export class TimelineService extends BaseService {
     dto: Partial<TimeBucketAssetDto> & Pick<TimeBucketAssetDto, 'timeBucket'>,
   ): Promise<string> {
     await this.timeBucketChecks(auth, dto);
-    const bucketSize = dto.bucketSize ?? TimeBucketSize.Month;
-    const timeBucket = normalizeTimeBucketForBucketSize(dto.timeBucket, bucketSize);
-    const timeBucketOptions = await this.buildTimeBucketOptions(auth, { ...dto, bucketSize, timeBucket });
+    const timeBucketOptions = await this.buildTimeBucketOptions(auth, { ...dto });
 
     // TODO: use id cursor for pagination
-    const bucket = await this.assetRepository.getTimeBucket(timeBucket, timeBucketOptions, auth);
+    const bucket = await this.assetRepository.getTimeBucket(dto.timeBucket, timeBucketOptions, auth);
     return bucket.assets;
   }
 
-  private async buildTimeBucketOptions(
-    auth: AuthDto,
-    dto: Partial<TimeBucketDto> & { timeBucket?: string },
-  ): Promise<TimeBucketOptions & { bucketSize: TimeBucketSize }> {
-    const { userId, personId, spacePersonId, tagId, type, ...options } = dto;
-
-    // Normalize deprecated single-value fields to arrays
-    if (personId && !options.personIds?.length) {
-      options.personIds = [personId];
-    }
-    if (spacePersonId && !options.spacePersonIds?.length) {
-      options.spacePersonIds = [spacePersonId];
-    }
-    if (tagId && !options.tagIds?.length) {
-      options.tagIds = [tagId];
-    }
-    // Map type to assetType
-    if (type) {
-      (options as any).assetType = type;
-    }
-
+  private async buildTimeBucketOptions(auth: AuthDto, dto: Partial<TimeBucketDto>): Promise<TimeBucketOptions> {
+    const { userId, ...options } = dto;
     let userIds: string[] | undefined;
-    let timelineSpaceIds: string[] | undefined;
-    // #1041: the REQUESTING user's own id, distinct from `userIds` below (which also carries
-    // partner ids). See TimeBucketOptions.callerId — the subtraction below attaches ONLY here.
-    let callerId: string | undefined;
-    let hiddenScope: TimeBucketOptions['hiddenScope'];
-    let visibleSpaceIds: string[] | undefined;
 
     if (userId) {
       userIds = [userId];
-      callerId = auth.user.id;
       if (dto.withPartners) {
         const partnerIds = await getMyPartnerIds({
           userId: auth.user.id,
           repository: this.partnerRepository,
-          timelineEnabled: true,
+          timelineEnabled: !options.personId || undefined,
         });
         userIds.push(...partnerIds);
       }
-
-      if (dto.withSharedSpaces) {
-        const spaceRows = await this.sharedSpaceRepository.getSpaceIdsForTimeline(auth.user.id);
-        if (spaceRows.length > 0) {
-          timelineSpaceIds = spaceRows.map((row) => row.spaceId);
-        }
-      }
-
-      // #1041 §4: the subtraction is a PERSONAL TIMELINE rule, and this is the only place that
-      // decides which surfaces are one. Trash, Archive and Favorites all reach this method — they
-      // are not album/space browses, so `timeBucketChecks` fills in `dto.userId` for them too —
-      // but none is in §4's scope, and each is a recovery/curation surface where subtracting an
-      // owned asset makes it unreachable from the UI entirely (E2/E2b/E2c). Independent of
-      // `withSharedSpaces`, which is a merge switch, not a surface: E12 still applies.
-      // Written as an EXCLUSION list, not `visibility === Timeline`: a client that omits
-      // `visibility` is asking for the default timeline browse and must still get the hide, so the
-      // guard has to fail CLOSED (E2e). Archive/Hidden/Locked are the caller's own private buckets —
-      // subtracting there strands an owned asset exactly the way trash does.
-      const isPersonalTimeline =
-        !dto.isTrashed &&
-        dto.isFavorite === undefined &&
-        dto.visibility !== AssetVisibility.Archive &&
-        dto.visibility !== AssetVisibility.Hidden &&
-        dto.visibility !== AssetVisibility.Locked;
-
-      if (isPersonalTimeline) {
-        hiddenScope = await this.sharedSpaceRepository.getTimelineHiddenScope(auth.user.id);
-        if (!timelineHiddenScopeIsEmpty(hiddenScope)) {
-          // §3's rescue needs the viewer's visible spaces even when this browse is NOT merging
-          // space content (E12b/E12c). Reuse the list resolved above when we already have it; the
-          // extra lookup only happens for a caller who has actually hidden something AND turned
-          // shared spaces off for this browse.
-          if (timelineSpaceIds) {
-            visibleSpaceIds = timelineSpaceIds;
-          } else {
-            const rows = await this.sharedSpaceRepository.getSpaceIdsForTimeline(auth.user.id);
-            visibleSpaceIds = rows.map((row) => row.spaceId);
-          }
-        }
-      }
     }
 
-    // #752 P0-2: album browse — resolve the viewer's live member-spaces linking this album so the
-    // repository unions member-gated contributions. Shared with the album archive (#1048) so the
-    // grid and "download all" can never disagree about what the album contains.
-    const albumSpaceIds = dto.albumId
-      ? await getAlbumSpaceIds({ auth, albumId: dto.albumId, repository: this.sharedSpaceRepository })
-      : undefined;
-
-    const scopedOptions = await this.resolveScopedPersonFilters(auth, { ...options, timelineSpaceIds });
-
-    return {
-      ...scopedOptions,
-      bucketSize: dto.bucketSize ?? TimeBucketSize.Month,
-      userIds,
-      albumSpaceIds,
-      callerId,
-      hiddenScope,
-      visibleSpaceIds,
-    };
-  }
-
-  private async resolveScopedPersonFilters(auth: AuthDto, options: TimeBucketOptions): Promise<TimeBucketOptions> {
-    const tokens = options.personIds?.filter(Boolean) ?? [];
-    const hasScopedTokens = tokens.some((token) => token.includes(':'));
-    const shouldResolve = tokens.length > 0 && (options.withSharedSpaces || hasScopedTokens);
-
-    if (!shouldResolve) {
-      return options;
-    }
-
-    const resolution = await this.faceIdentityRepository.resolveScopedPersonTokens({
-      userId: auth.user.id,
-      tokens,
-      scope: {
-        withSharedSpaces: options.withSharedSpaces,
-        timelineSpaceIds: options.timelineSpaceIds,
-        spaceId: options.spaceId,
-      },
-    });
-
-    return {
-      ...options,
-      personIds: resolution.legacyPersonIds,
-      identityIds: resolution.identityIds,
-      spacePersonIds: [...new Set([...(options.spacePersonIds ?? []), ...resolution.legacySpacePersonIds])],
-      forceEmptyResult: options.forceEmptyResult || resolution.hasInaccessibleToken,
-    };
+    return { ...options, userIds, ...(await galleryTimeBucketOptions(this, this.sharedSpaceRepository, auth, dto)) };
   }
 
   private async timeBucketChecks(auth: AuthDto, dto: Partial<TimeBucketDto>) {
@@ -180,87 +67,41 @@ export class TimelineService extends BaseService {
       requireElevatedPermission(auth);
     }
 
-    // Fork RBAC (Fix A) defense-in-depth: a pure space browse (spaceId / spacePersonId, no
-    // per-user timeline) must never request Hidden/Locked — those are owner-private states that
-    // make no sense across a shared scope. The repository query gates other members' Hidden/Locked
-    // regardless, but rejecting here short-circuits the leak vector before it reaches the DB. The
-    // per-user timeline paths (userId / withSharedSpaces) are intentionally untouched so a caller
-    // can still view their OWN hidden assets.
-    const spaceBrowse = !!dto.spaceId || !!dto.spacePersonId || !!dto.albumId;
-    const requestsPrivateVisibility =
-      dto.visibility === AssetVisibility.Hidden || dto.visibility === AssetVisibility.Locked;
-    if (spaceBrowse && requestsPrivateVisibility) {
-      throw new BadRequestException('Hidden and locked assets are not available when browsing a shared space or album');
-    }
-
-    // Fork RBAC (Slice 1 / H1): trash is an owner-private state; an album/space browse must
-    // never enumerate trashed assets. Closes the timeline vector before it reaches the repo
-    // (belt-and-suspenders data-layer gate also lives in the album arm of
-    // withTimeBucketAssetFilters / getTimeBucket in asset.repository.ts).
-    if (spaceBrowse && dto.isTrashed === true) {
-      throw new BadRequestException('Trashed assets are not available when browsing a shared space or album');
-    }
-
-    // Each scope that is REQUESTED is checked — never `else if`. Both predicates go into the query
-    // when both are present (an AND), so gating on only the first one let a caller with access to
-    // album A learn which of A's assets belong to a space S they are not a member of: a membership
-    // oracle (no asset leaks — every returned asset is in an album they may read — but the space
-    // boundary was still answering questions for them). The filtered map endpoint refuses the
-    // combination outright (shared-space.service.ts getFilteredMapMarkers); the timeline answers it,
-    // so it must enforce the boundary it is querying.
     if (dto.albumId) {
       await this.requireAccess({ auth, permission: Permission.AlbumRead, ids: [dto.albumId] });
-    }
-
-    if (dto.spaceId) {
-      await this.requireAccess({ auth, permission: Permission.SharedSpaceRead, ids: [dto.spaceId] });
-    }
-
-    // Only the un-scoped timeline defaults to "my assets". Under an album (or a space) the CALLER
-    // states the owner scope: the album page sends none, because album ACCESS is its whole scope and
-    // a viewer must see the owner's assets (medium E22); /photos sends `userId`, because it is my
-    // personal timeline and the album chip must NARROW it, not redefine it (D3 — see
-    // web/src/lib/utils/photos-filter-options.ts). Defaulting userId here would break the former.
-    if (!dto.albumId && !dto.spaceId) {
+    } else if (!dto.spaceId) {
       dto.userId ||= auth.user.id;
     }
 
     if (dto.userId) {
       await this.requireAccess({ auth, permission: Permission.TimelineRead, ids: [dto.userId] });
-      if (dto.visibility === AssetVisibility.Archive) {
-        await this.requireAccess({ auth, permission: Permission.ArchiveRead, ids: [dto.userId] });
+    }
+
+    const includesOtherUsers = dto.withPartners || (dto.userId && dto.userId !== auth.user.id);
+    if (includesOtherUsers) {
+      // Gallery: the Favorites screen keeps visibility unset; withOwnArchiveOnly then admits only the caller's own archive.
+      const ownArchiveGated = dto.withPartners && dto.userId === auth.user.id && isFavoritesAcrossScope(dto);
+      if (!ownArchiveGated) {
+        dto.visibility ??= AssetVisibility.Timeline;
       }
-      if (dto.visibility === AssetVisibility.Locked && dto.userId !== auth.user.id) {
-        throw new BadRequestException("You may not access another user's locked timeline");
+      // #763 slice 4: isFavorite is deliberately not rejected here — favorites are a per-user overlay
+      // (asset_favorite) resolved for the CALLER, so they compose with cross-user scopes.
+      if ((dto.visibility ?? AssetVisibility.Timeline) !== AssetVisibility.Timeline || dto.isTrashed) {
+        throw new BadRequestException(
+          'Only non-archived, non-trashed, non-favorited, non-locked assets can be requested for other users',
+        );
       }
     }
 
-    if (auth.sharedLink && !auth.sharedLink.showExif) {
+    if (dto.tagId) {
+      await requireTimelineTagAccess(this.accessRepository, auth, dto.tagId);
+    }
+
+    // After the tag check: it folds tagId into tagIds.
+    await galleryTimeBucketChecks(this.accessRepository, auth, dto);
+
+    if (isMetadataHidden(auth)) {
       dto.withCoordinates = false;
-    }
-    if (dto.withPartners) {
-      const isRequestedLocked = dto.visibility === AssetVisibility.Locked;
-      const isRequestedArchived = dto.visibility === AssetVisibility.Archive || dto.visibility === undefined;
-      const isRequestedFavorite = dto.isFavorite === true || dto.isFavorite === false;
-      const isRequestedTrash = dto.isTrashed === true;
-
-      if (isRequestedLocked || isRequestedArchived || isRequestedFavorite || isRequestedTrash) {
-        throw new BadRequestException(
-          'withPartners is only supported for non-archived, non-trashed, non-favorited, non-locked assets',
-        );
-      }
-    }
-
-    if (dto.withSharedSpaces) {
-      const requestedArchived = dto.visibility === AssetVisibility.Archive || dto.visibility === undefined;
-      const requestedFavorite = dto.isFavorite === true || dto.isFavorite === false;
-      const requestedTrash = dto.isTrashed === true;
-
-      if (requestedArchived || requestedFavorite || requestedTrash) {
-        throw new BadRequestException(
-          'withSharedSpaces is only supported for non-archived, non-trashed, non-favorited assets',
-        );
-      }
     }
   }
 }

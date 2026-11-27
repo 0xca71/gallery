@@ -1,22 +1,19 @@
 <script lang="ts">
-  import FaceEditor from '$lib/components/asset-viewer/face-editor/FaceEditor.svelte';
-  import VideoRemoteViewer from '$lib/components/asset-viewer/VideoRemoteViewer.svelte';
-  import { assetViewerFadeDuration } from '$lib/constants';
-  import { assetViewerManager } from '$lib/managers/asset-viewer-manager.svelte';
-  import { castManager } from '$lib/managers/cast-manager.svelte';
-  import { featureFlagsManager } from '$lib/managers/feature-flags-manager.svelte';
-  import { authManager } from '$lib/managers/auth-manager.svelte';
-  import { mediaCapabilitiesManager } from '$lib/managers/media-capabilities-manager.svelte';
-  import {
-    autoPlayVideo,
-    lang,
-    loopVideo as loopVideoPreference,
-    videoViewerMuted,
-    videoViewerVolume,
-  } from '$lib/stores/preferences.store';
-  import { getAssetHlsSessionUrl, getAssetHlsUrl, getAssetMediaUrl, getAssetPlaybackUrl } from '$lib/utils';
+  import VideoRemoteViewer from '#lib/components/asset-viewer/VideoRemoteViewer.svelte';
+  import FaceEditorPanel from '#lib/components/asset-viewer/face-editor/FaceEditorPanel.svelte';
+  import { assetViewerFadeDuration } from '#lib/constants.ts';
+  import VideoFaceBox from '#lib/gallery/asset-viewer/VideoFaceBox.svelte';
+  import { galleryViewerVideo } from '#lib/gallery/asset-viewer/viewer-video.ts';
+  import { assetViewerManager } from '#lib/managers/asset-viewer-manager.svelte.ts';
+  import { authManager } from '#lib/managers/auth-manager.svelte.ts';
+  import { castManager } from '#lib/managers/cast-manager.svelte.ts';
+  import { mediaCapabilitiesManager } from '#lib/managers/media-capabilities-manager.svelte.ts';
+  import { createPreloadedQuery } from '#lib/queries/client.ts';
+  import { getPublicConfigQuery } from '#lib/queries/config-public.query.ts';
+  import { autoPlayVideo, lang, loopVideo as loopVideoPreference } from '#lib/stores/preferences.store.ts';
+  import { getAssetHlsSessionUrl, getAssetHlsUrl, getAssetMediaUrl, getAssetPlaybackUrl } from '#lib/utils.ts';
   import { AssetMediaSize, type AssetResponseDto } from '@immich/sdk';
-  import { Icon, shortcuts } from '@immich/ui';
+  import { Icon, LoadingSpinner, shortcuts } from '@immich/ui';
   import {
     mdiCheck,
     mdiChevronLeft,
@@ -51,7 +48,9 @@
   import { t } from 'svelte-i18n';
   import { fade } from 'svelte/transition';
   import './immich-time-range';
-  import LoadingSpinner from '$lib/components/shared-components/LoadingSpinner.svelte';
+
+  const query = createPreloadedQuery(getPublicConfigQuery);
+  const publicConfig = $derived(query.data);
 
   interface Props {
     asset: AssetResponseDto;
@@ -84,8 +83,10 @@
   let videoPlayer: HTMLVideoElement | undefined = $state();
   let isLoading = $state(true);
   let hasLoadedMetadata = $state(false);
+  // HLS transcodes the original, so a trimmed video (the only edited kind) plays the trimmed file instead.
+  let useHls = $derived(publicConfig.ffmpeg.realtime.enabled && !asset.isEdited);
   let assetFileUrl = $derived.by(() => {
-    if (featureFlagsManager.value.realtimeTranscoding) {
+    if (useHls) {
       return getAssetHlsUrl(assetId);
     }
 
@@ -339,21 +340,6 @@
     event.currentTarget?.dispatchEvent(new Event('timeupdate'));
   };
   const onSeeked = () => (isScrubbing = false);
-
-  const onVolumeChange = (event: Event) => {
-    const video = event.currentTarget as HTMLVideoElement;
-    $videoViewerMuted = video.muted;
-    $videoViewerVolume = video.volume;
-  };
-
-  $effect(() => {
-    if (!videoPlayer) {
-      return;
-    }
-
-    videoPlayer.muted = $videoViewerMuted;
-    videoPlayer.volume = $videoViewerVolume;
-  });
 </script>
 
 <svelte:body
@@ -403,7 +389,7 @@
         style:aspect-ratio={aspectRatio}
         defaultduration={asset.duration! / 1000}
       >
-        {#if featureFlagsManager.value.realtimeTranscoding}
+        {#if useHls}
           <hls-video
             bind:this={videoPlayer}
             slot="media"
@@ -416,7 +402,6 @@
             oncanplay={(e: Event) => handleCanPlay(e.currentTarget as HTMLVideoElement)}
             onloadedmetadata={() => (hasLoadedMetadata = true)}
             onended={onVideoEnded}
-            onvolumechange={onVolumeChange}
             onseeking={onSeeking}
             onseeked={onSeeked}
             onplaying={(e: Event) => {
@@ -428,7 +413,7 @@
               hasFocused = true;
             }}
             onclose={onClose}
-            muted={$videoViewerMuted}
+            {@attach galleryViewerVideo}
             poster={getAssetMediaUrl({ id: asset.id, size: AssetMediaSize.Preview, cacheKey })}
           ></hls-video>
         {:else}
@@ -445,7 +430,6 @@
             oncanplay={(e) => handleCanPlay(e.currentTarget)}
             onloadedmetadata={() => (hasLoadedMetadata = true)}
             onended={onVideoEnded}
-            onvolumechange={onVolumeChange}
             onseeking={onSeeking}
             onseeked={onSeeked}
             onplaying={(e) => {
@@ -457,7 +441,7 @@
               hasFocused = true;
             }}
             onclose={onClose}
-            muted={$videoViewerMuted}
+            {@attach galleryViewerVideo}
             poster={getAssetMediaUrl({ id: asset.id, size: AssetMediaSize.Preview, cacheKey })}
           ></video>
         {/if}
@@ -473,7 +457,7 @@
                 <span slot="title">{$t('media_chrome.playback_rate')}</span>
               </media-playback-rate-menu>
             </media-settings-menu-item>
-            {#if featureFlagsManager.value.realtimeTranscoding}
+            {#if useHls}
               <media-settings-menu-item class="mx-1 rounded-lg p-1 ps-2">
                 {$t('video_quality')}
                 <Icon slot="suffix" icon={mdiChevronRight} class="m-2" />
@@ -486,7 +470,10 @@
           </media-settings-menu>
         {/if}
 
-        <div class="flex h-32 w-full flex-col justify-end bg-linear-to-b to-black/80 px-4">
+        <div class="relative isolate flex h-32 w-full flex-col justify-end px-4">
+          <div
+            class="pointer-events-none absolute inset-x-0 bottom-0 -z-10 h-48 bg-black/80 mask-smoothstep-to-top"
+          ></div>
           <media-control-bar part="bottom" class="flex h-10 w-full gap-2">
             <media-play-button class="shrink-0 rounded-full p-2 outline-none">
               <Icon slot="play" icon={mdiPlay} />
@@ -527,8 +514,15 @@
       {/if}
 
       {#if assetViewerManager.isFaceEditMode && videoPlayer && hasLoadedMetadata}
-        <FaceEditor htmlElement={videoPlayer} {containerWidth} {containerHeight} {assetId} />
+        <FaceEditorPanel
+          htmlElement={isHlsElement(videoPlayer) ? videoPlayer.nativeEl : videoPlayer}
+          {containerWidth}
+          {containerHeight}
+          {assetId}
+          {asset}
+        />
       {/if}
+      <VideoFaceBox video={hasLoadedMetadata ? videoPlayer : undefined} {containerWidth} {containerHeight} />
     {/if}
   </div>
 {/if}

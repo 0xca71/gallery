@@ -1,7 +1,7 @@
 <script lang="ts">
-  import SearchHistorySection from './SearchHistorySection.svelte';
-  import { t } from 'svelte-i18n';
-  import { fly } from 'svelte/transition';
+  import { authManager } from '#lib/managers/auth-manager.svelte.ts';
+  import { searchManager } from '#lib/managers/search-manager.svelte.ts';
+  import { getAllTags, type PersonResponseDto, type TagResponseDto } from '@immich/sdk';
   import { Button, Text } from '@immich/ui';
   import {
     mdiAccount,
@@ -14,17 +14,20 @@
     mdiTagMultiple,
     mdiTune,
   } from '@mdi/js';
-  import SearchLocationSection from './SearchLocationSection.svelte';
-  import { getAllTags, type PersonResponseDto, type TagResponseDto } from '@immich/sdk';
-  import SearchMediaSection from './SearchMediaSection.svelte';
+  import { onMount } from 'svelte';
+  import { t } from 'svelte-i18n';
+  import { fly } from 'svelte/transition';
+  import SearchButton from './SearchButton.svelte';
   import SearchCameraSection from './SearchCameraSection.svelte';
   import SearchDateSection from './SearchDateSection.svelte';
+  import SearchDisplaySection from './SearchDisplaySection.svelte';
+  import SearchHistorySection from './SearchHistorySection.svelte';
+  import SearchLocationSection from './SearchLocationSection.svelte';
+  import SearchMediaSection from './SearchMediaSection.svelte';
   import SearchPeopleSection from './SearchPeopleSection.svelte';
+  import SearchRatingsSection from './SearchRatingsSection.svelte';
   import SearchTagsSection from './SearchTagsSection.svelte';
   import SearchTextSection from './SearchTextSection.svelte';
-  import SearchDisplaySection from './SearchDisplaySection.svelte';
-  import SearchRatingsSection from './SearchRatingsSection.svelte';
-  import { authManager } from '$lib/managers/auth-manager.svelte';
   import {
     getPeople,
     getSearchDatePreset,
@@ -35,9 +38,6 @@
     getSearchTagsTitle,
     getSearchTypeTitle,
   } from './search-bar-utils';
-  import { onMount } from 'svelte';
-  import { searchManager } from '$lib/managers/search-manager.svelte';
-  import SearchButton from './SearchButton.svelte';
 
   interface Props {
     id: string;
@@ -134,6 +134,9 @@
     searchManager.filter.display.isArchive ||
       searchManager.filter.display.isFavorite ||
       searchManager.filter.display.isNotInAlbum ||
+      searchManager.filter.camera.make !== undefined ||
+      searchManager.filter.camera.model !== undefined ||
+      searchManager.filter.camera.lensModel !== undefined ||
       searchManager.filter.rating,
   );
 
@@ -191,7 +194,7 @@
   {#if isOpen}
     <div
       transition:fly={{ y: 25, duration: 250 }}
-      class="absolute z-1 w-full rounded-b-3xl bg-white shadow-[0_8px_20px_rgba(0,0,0,0.12)] transition-all dark:bg-immich-dark-gray dark:text-gray-300"
+      class="absolute z-1 max-h-[80svh] w-full overflow-y-auto rounded-b-3xl bg-white shadow-[0_8px_20px_rgba(0,0,0,0.12)] transition-all dark:bg-immich-dark-gray dark:text-gray-300"
     >
       <SearchHistorySection
         bind:this={searchHistory}
@@ -250,7 +253,7 @@
         </div>
       </div>
       <div class="my-5 h-px w-full bg-light-200 dark:bg-dark-600"></div>
-      <div class="flex gap-2 px-5 pb-5">
+      <div class="flex flex-wrap gap-2 px-5 pb-5">
         <Button
           size="small"
           variant={advancedFiltersSet ? 'outline' : 'ghost'}

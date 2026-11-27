@@ -1,3 +1,4 @@
+import { vi } from 'vitest';
 import { PET_RECOGNITION_MODEL_NAMES } from 'src/constants.js';
 import { SystemConfig } from 'src/dtos/config.dto.js';
 import { JobName, JobStatus, QueueName, SystemMetadataKey, VectorIndex } from 'src/enum.js';
@@ -11,7 +12,6 @@ const petRecognitionCounts = (
     active: number;
     waiting: number;
     delayed: number;
-    paused: number;
     completed: number;
     failed: number;
   }> = {},
@@ -19,7 +19,6 @@ const petRecognitionCounts = (
   active: 1,
   waiting: 0,
   delayed: 0,
-  paused: 0,
   completed: 0,
   failed: 0,
   ...overrides,
@@ -117,7 +116,7 @@ describe(PetRecognitionService.name, () => {
   describe('model switch (onConfigInit / onConfigUpdate)', () => {
     it('R5.2 live switch with recognition and detection both on: empties both pet queues, scoped purge, stamps state, requeues detection force', async () => {
       mocks.systemMetadata.get.mockResolvedValue({ modelName: 'pet-recognition-base' });
-      mocks.person.purgePetRecognitionArtifacts.mockResolvedValue();
+      mocks.petFace.purgePetRecognitionArtifacts.mockResolvedValue();
 
       await sut.onConfigUpdate({
         oldConfig: makeConfig({ modelName: 'pet-recognition-base' }),
@@ -126,13 +125,32 @@ describe(PetRecognitionService.name, () => {
 
       expect(mocks.job.empty).toHaveBeenCalledWith(QueueName.PetRecognition, true);
       expect(mocks.job.empty).toHaveBeenCalledWith(QueueName.PetDetection, true);
-      expect(mocks.person.purgePetRecognitionArtifacts).toHaveBeenCalled();
-      expect(mocks.person.deleteAllPets).not.toHaveBeenCalled();
+      expect(mocks.petFace.purgePetRecognitionArtifacts).toHaveBeenCalled();
+      expect(mocks.petFace.deleteAllPets).not.toHaveBeenCalled();
       expect(mocks.systemMetadata.set).toHaveBeenCalledWith(SystemMetadataKey.PetRecognitionState, {
         lastRun: expect.any(String),
         modelName: 'pet-recognition-large',
       });
       expect(mocks.job.queue).toHaveBeenCalledWith({ name: JobName.PetDetectionQueueAll, data: { force: true } });
+    });
+
+    it('deletes the frame files of the sampled video pets a model switch purges, read before the purge', async () => {
+      mocks.systemMetadata.get.mockResolvedValue({ modelName: 'pet-recognition-base' });
+      mocks.petFace.purgePetRecognitionArtifacts.mockResolvedValue();
+      mocks.petFace.getPetFramePaths.mockResolvedValue(['thumbs/owner/as/se/asset_faces/rex.jpeg']);
+      const remove = vi.fn().mockResolvedValue(undefined);
+      vi.spyOn((sut as any).backendMedia, 'backendFor').mockResolvedValue({ delete: remove });
+
+      await sut.onConfigUpdate({
+        oldConfig: makeConfig({ modelName: 'pet-recognition-base' }),
+        newConfig: makeConfig({ modelName: 'pet-recognition-large' }),
+      });
+
+      expect(mocks.petFace.getPetFramePaths).toHaveBeenCalledWith({ embeddedOnly: true });
+      expect(mocks.petFace.getPetFramePaths.mock.invocationCallOrder[0]).toBeLessThan(
+        mocks.petFace.purgePetRecognitionArtifacts.mock.invocationCallOrder[0],
+      );
+      expect(remove).toHaveBeenCalledWith('thumbs/owner/as/se/asset_faces/rex.jpeg');
     });
 
     it('R5.3 config change without a model change: no purge, no requeue', async () => {
@@ -143,7 +161,7 @@ describe(PetRecognitionService.name, () => {
         newConfig: makeConfig({ minFaces: 2 }),
       });
 
-      expect(mocks.person.purgePetRecognitionArtifacts).not.toHaveBeenCalled();
+      expect(mocks.petFace.purgePetRecognitionArtifacts).not.toHaveBeenCalled();
       expect(mocks.job.empty).not.toHaveBeenCalled();
       expect(mocks.job.queue).not.toHaveBeenCalled();
       expect(mocks.systemMetadata.set).not.toHaveBeenCalled();
@@ -159,7 +177,7 @@ describe(PetRecognitionService.name, () => {
         newConfig: makeConfig({ modelName: 'pet-recognition-large' }),
       });
 
-      expect(mocks.person.purgePetRecognitionArtifacts).not.toHaveBeenCalled();
+      expect(mocks.petFace.purgePetRecognitionArtifacts).not.toHaveBeenCalled();
       expect(mocks.job.empty).not.toHaveBeenCalled();
       expect(mocks.job.queue).not.toHaveBeenCalled();
       expect(mocks.systemMetadata.set).not.toHaveBeenCalled();
@@ -167,14 +185,14 @@ describe(PetRecognitionService.name, () => {
 
     it('R5.5 switch with recognition on / detection off: scoped purge, pendingReprocess stamped, no requeue, warns about a force run', async () => {
       mocks.systemMetadata.get.mockResolvedValue(null);
-      mocks.person.purgePetRecognitionArtifacts.mockResolvedValue();
+      mocks.petFace.purgePetRecognitionArtifacts.mockResolvedValue();
 
       await sut.onConfigUpdate({
         oldConfig: makeConfig({ modelName: 'pet-recognition-base', detectionEnabled: false }),
         newConfig: makeConfig({ modelName: 'pet-recognition-large', detectionEnabled: false }),
       });
 
-      expect(mocks.person.purgePetRecognitionArtifacts).toHaveBeenCalled();
+      expect(mocks.petFace.purgePetRecognitionArtifacts).toHaveBeenCalled();
       expect(mocks.systemMetadata.set).toHaveBeenCalledWith(SystemMetadataKey.PetRecognitionState, {
         lastRun: expect.any(String),
         modelName: 'pet-recognition-large',
@@ -202,7 +220,7 @@ describe(PetRecognitionService.name, () => {
         pendingReprocess: false,
       });
       expect(mocks.job.queue).toHaveBeenCalledWith({ name: JobName.PetDetectionQueueAll, data: { force: true } });
-      expect(mocks.person.purgePetRecognitionArtifacts).not.toHaveBeenCalled();
+      expect(mocks.petFace.purgePetRecognitionArtifacts).not.toHaveBeenCalled();
     });
 
     // ConfigInit carries no oldConfig, so there is no "detection just turned on" edge to diff
@@ -255,7 +273,7 @@ describe(PetRecognitionService.name, () => {
 
     it('R5.7 switch with recognition off: scoped purge runs (not the full deleteAllPets purge), no requeue, no pendingReprocess flag', async () => {
       mocks.systemMetadata.get.mockResolvedValue(null);
-      mocks.person.purgePetRecognitionArtifacts.mockResolvedValue();
+      mocks.petFace.purgePetRecognitionArtifacts.mockResolvedValue();
 
       await sut.onConfigUpdate({
         oldConfig: makeConfig({ modelName: 'pet-recognition-base', recognitionEnabled: false }),
@@ -264,8 +282,8 @@ describe(PetRecognitionService.name, () => {
 
       // The scoped purge runs (species buckets are protected by its SQL — proven at the medium
       // layer, R5.13); the point at THIS layer is that it is the scoped purge, not the full one.
-      expect(mocks.person.purgePetRecognitionArtifacts).toHaveBeenCalled();
-      expect(mocks.person.deleteAllPets).not.toHaveBeenCalled();
+      expect(mocks.petFace.purgePetRecognitionArtifacts).toHaveBeenCalled();
+      expect(mocks.petFace.deleteAllPets).not.toHaveBeenCalled();
       expect(mocks.systemMetadata.set).toHaveBeenCalledWith(SystemMetadataKey.PetRecognitionState, {
         lastRun: expect.any(String),
         modelName: 'pet-recognition-large',
@@ -282,7 +300,7 @@ describe(PetRecognitionService.name, () => {
       expect(mocks.systemMetadata.set).toHaveBeenCalledWith(SystemMetadataKey.PetRecognitionState, {
         modelName: 'pet-recognition-base',
       });
-      expect(mocks.person.purgePetRecognitionArtifacts).not.toHaveBeenCalled();
+      expect(mocks.petFace.purgePetRecognitionArtifacts).not.toHaveBeenCalled();
       expect(mocks.job.queue).not.toHaveBeenCalled();
     });
 
@@ -294,17 +312,17 @@ describe(PetRecognitionService.name, () => {
       });
 
       expect(mocks.systemMetadata.set).not.toHaveBeenCalled();
-      expect(mocks.person.purgePetRecognitionArtifacts).not.toHaveBeenCalled();
+      expect(mocks.petFace.purgePetRecognitionArtifacts).not.toHaveBeenCalled();
       expect(mocks.job.queue).not.toHaveBeenCalled();
     });
 
     it('R5.9 ConfigInit detects an offline drift against stored state: scoped purge + gated requeue', async () => {
       mocks.systemMetadata.get.mockResolvedValue({ modelName: 'pet-recognition-base' });
-      mocks.person.purgePetRecognitionArtifacts.mockResolvedValue();
+      mocks.petFace.purgePetRecognitionArtifacts.mockResolvedValue();
 
       await sut.onConfigInit({ newConfig: makeConfig({ modelName: 'pet-recognition-large' }) });
 
-      expect(mocks.person.purgePetRecognitionArtifacts).toHaveBeenCalled();
+      expect(mocks.petFace.purgePetRecognitionArtifacts).toHaveBeenCalled();
       expect(mocks.systemMetadata.set).toHaveBeenCalledWith(SystemMetadataKey.PetRecognitionState, {
         lastRun: expect.any(String),
         modelName: 'pet-recognition-large',
@@ -317,8 +335,8 @@ describe(PetRecognitionService.name, () => {
     it('should skip when pet recognition is disabled (default)', async () => {
       expect(await sut.handleQueuePetRecognition({ force: false })).toEqual(JobStatus.Skipped);
 
-      expect(mocks.person.deleteAllPets).not.toHaveBeenCalled();
-      expect(mocks.person.getUnassignedPetFaces).not.toHaveBeenCalled();
+      expect(mocks.petFace.deleteAllPets).not.toHaveBeenCalled();
+      expect(mocks.petFace.getUnassignedPetFaces).not.toHaveBeenCalled();
       expect(mocks.systemMetadata.set).not.toHaveBeenCalled();
     });
 
@@ -338,9 +356,9 @@ describe(PetRecognitionService.name, () => {
 
       expect(await sut.handleQueuePetRecognition({ force: true })).toEqual(JobStatus.Success);
 
-      expect(mocks.person.deleteAllPets).toHaveBeenCalled();
+      expect(mocks.petFace.deleteAllPets).toHaveBeenCalled();
       expect(mocks.sharedSpace.deleteAllPets).toHaveBeenCalled();
-      expect(mocks.person.deleteAllPetSearch).toHaveBeenCalled();
+      expect(mocks.petFace.deleteAllPetSearch).toHaveBeenCalled();
       // The rebuild is requeued too, otherwise the reset would leave the library permanently
       // pet-less. PetDetectionQueueAll gates itself on detection being enabled.
       expect(mocks.job.queue).toHaveBeenCalledWith({ name: JobName.PetDetectionQueueAll, data: { force: true } });
@@ -354,7 +372,7 @@ describe(PetRecognitionService.name, () => {
 
       expect(await sut.handleQueuePetRecognition({ force: true })).toEqual(JobStatus.Success);
 
-      expect(mocks.person.deleteAllPets).toHaveBeenCalled();
+      expect(mocks.petFace.deleteAllPets).toHaveBeenCalled();
     });
 
     describe('when pet recognition is enabled', () => {
@@ -372,21 +390,21 @@ describe(PetRecognitionService.name, () => {
         // R5.11: the PetRecognition queue is drained before the (full, bucket-inclusive) purge —
         // otherwise a job queued before the reset could still run against faces about to be deleted.
         expect(mocks.job.empty).toHaveBeenCalledWith(QueueName.PetRecognition, true);
-        expect(mocks.person.deleteAllPets).toHaveBeenCalled();
+        expect(mocks.petFace.deleteAllPets).toHaveBeenCalled();
         expect(mocks.sharedSpace.deleteAllPets).toHaveBeenCalled();
-        expect(mocks.person.deleteAllPetSearch).toHaveBeenCalled();
+        expect(mocks.petFace.deleteAllPetSearch).toHaveBeenCalled();
         expect(mocks.job.queue).toHaveBeenCalledWith({ name: JobName.PetDetectionQueueAll, data: { force: true } });
-        expect(mocks.person.getUnassignedPetFaces).not.toHaveBeenCalled();
+        expect(mocks.petFace.getUnassignedPetFaces).not.toHaveBeenCalled();
 
         // The force purge is deliberately the FULL purge (buckets included, rebuilt by the
         // requeue) — distinct from a model-switch's scoped purge, which never touches deleteAllPets.
         expect(mocks.job.empty.mock.invocationCallOrder[0]).toBeLessThan(
-          mocks.person.deleteAllPets.mock.invocationCallOrder[0],
+          mocks.petFace.deleteAllPets.mock.invocationCallOrder[0],
         );
       });
 
       it('force: false queues PetRecognition only for embedded, unassigned pet faces (6.2)', async () => {
-        mocks.person.getUnassignedPetFaces.mockReturnValue(makeStream([{ id: 'face-1' }, { id: 'face-2' }]));
+        mocks.petFace.getUnassignedPetFaces.mockReturnValue(makeStream([{ id: 'face-1' }, { id: 'face-2' }]));
 
         expect(await sut.handleQueuePetRecognition({ force: false })).toEqual(JobStatus.Success);
 
@@ -394,8 +412,8 @@ describe(PetRecognitionService.name, () => {
           { name: JobName.PetRecognition, data: { id: 'face-1', deferred: false } },
           { name: JobName.PetRecognition, data: { id: 'face-2', deferred: false } },
         ]);
-        expect(mocks.person.deleteAllPets).not.toHaveBeenCalled();
-        expect(mocks.person.deleteAllPetSearch).not.toHaveBeenCalled();
+        expect(mocks.petFace.deleteAllPets).not.toHaveBeenCalled();
+        expect(mocks.petFace.deleteAllPetSearch).not.toHaveBeenCalled();
         expect(mocks.job.queue).not.toHaveBeenCalledWith(
           expect.objectContaining({ name: JobName.PetDetectionQueueAll }),
         );
@@ -414,11 +432,11 @@ describe(PetRecognitionService.name, () => {
           }
           return Promise.resolve(null);
         });
-        mocks.person.getLatestPetDate.mockResolvedValue(new Date(lastRun.getTime() - 1000));
+        mocks.petFace.getLatestPetDate.mockResolvedValue(new Date(lastRun.getTime() - 1000));
 
         expect(await sut.handleQueuePetRecognition({ force: false, nightly: true })).toEqual(JobStatus.Skipped);
 
-        expect(mocks.person.getUnassignedPetFaces).not.toHaveBeenCalled();
+        expect(mocks.petFace.getUnassignedPetFaces).not.toHaveBeenCalled();
         expect(mocks.job.queueAll).not.toHaveBeenCalled();
         expect(mocks.job.queue).not.toHaveBeenCalled();
         expect(mocks.systemMetadata.set).not.toHaveBeenCalled();
@@ -435,8 +453,8 @@ describe(PetRecognitionService.name, () => {
           }
           return Promise.resolve(null);
         });
-        mocks.person.getLatestPetDate.mockResolvedValue(new Date(lastRun.getTime() + 1000));
-        mocks.person.getUnassignedPetFaces.mockReturnValue(makeStream([{ id: 'face-1' }]));
+        mocks.petFace.getLatestPetDate.mockResolvedValue(new Date(lastRun.getTime() + 1000));
+        mocks.petFace.getUnassignedPetFaces.mockReturnValue(makeStream([{ id: 'face-1' }]));
 
         expect(await sut.handleQueuePetRecognition({ force: false, nightly: true })).toEqual(JobStatus.Success);
 
@@ -464,13 +482,13 @@ describe(PetRecognitionService.name, () => {
           return Promise.resolve(null);
         });
         // If the date-skip ran first it would fire here (no new pet since lastRun) and mask the drift.
-        mocks.person.getLatestPetDate.mockResolvedValue(new Date(lastRun.getTime() - 1000));
-        mocks.person.purgePetRecognitionArtifacts.mockResolvedValue();
+        mocks.petFace.getLatestPetDate.mockResolvedValue(new Date(lastRun.getTime() - 1000));
+        mocks.petFace.purgePetRecognitionArtifacts.mockResolvedValue();
 
         expect(await sut.handleQueuePetRecognition({ force: false, nightly: true })).toEqual(JobStatus.Success);
 
-        expect(mocks.person.purgePetRecognitionArtifacts).toHaveBeenCalled();
-        expect(mocks.person.getLatestPetDate).not.toHaveBeenCalled();
+        expect(mocks.petFace.purgePetRecognitionArtifacts).toHaveBeenCalled();
+        expect(mocks.petFace.getLatestPetDate).not.toHaveBeenCalled();
         expect(mocks.job.queue).toHaveBeenCalledWith({ name: JobName.PetDetectionQueueAll, data: { force: true } });
       });
 
@@ -481,8 +499,8 @@ describe(PetRecognitionService.name, () => {
           }
           return Promise.resolve(null);
         });
-        mocks.person.getLatestPetDate.mockResolvedValue(new Date('2026-07-20T00:00:00.000Z'));
-        mocks.person.getUnassignedPetFaces.mockReturnValue(makeStream([{ id: 'face-1' }]));
+        mocks.petFace.getLatestPetDate.mockResolvedValue(new Date('2026-07-20T00:00:00.000Z'));
+        mocks.petFace.getUnassignedPetFaces.mockReturnValue(makeStream([{ id: 'face-1' }]));
 
         expect(await sut.handleQueuePetRecognition({ force: false, nightly: true })).toEqual(JobStatus.Success);
 
@@ -492,7 +510,7 @@ describe(PetRecognitionService.name, () => {
       });
 
       it('records lastRun and modelName in system metadata after a run (6.5)', async () => {
-        mocks.person.getUnassignedPetFaces.mockReturnValue(makeStream([]));
+        mocks.petFace.getUnassignedPetFaces.mockReturnValue(makeStream([]));
 
         expect(await sut.handleQueuePetRecognition({ force: false })).toEqual(JobStatus.Success);
 
@@ -514,14 +532,13 @@ describe(PetRecognitionService.name, () => {
       it.each([
         ['waiting jobs', { waiting: 5 }],
         ['delayed jobs', { delayed: 3 }],
-        ['paused jobs', { paused: 2 }],
         ['another active job besides the coordinator', { active: 2 }],
       ] as const)('R6.16 skips non-force pet recognition queueing when the queue has %s', async (_label, counts) => {
         mocks.job.getJobCounts.mockResolvedValue(petRecognitionCounts(counts));
 
         expect(await sut.handleQueuePetRecognition({ force: false })).toEqual(JobStatus.Skipped);
 
-        expect(mocks.person.getUnassignedPetFaces).not.toHaveBeenCalled();
+        expect(mocks.petFace.getUnassignedPetFaces).not.toHaveBeenCalled();
         expect(mocks.job.queueAll).not.toHaveBeenCalled();
         expect(mocks.database.prewarm).not.toHaveBeenCalled();
         expect(mocks.systemMetadata.set).not.toHaveBeenCalled();
@@ -550,13 +567,13 @@ describe(PetRecognitionService.name, () => {
           return Promise.resolve(null);
         });
         mocks.job.getJobCounts.mockResolvedValue(petRecognitionCounts({ waiting: 5 }));
-        mocks.person.purgePetRecognitionArtifacts.mockResolvedValue();
+        mocks.petFace.purgePetRecognitionArtifacts.mockResolvedValue();
 
         expect(await sut.handleQueuePetRecognition({ force: false })).toEqual(JobStatus.Success);
 
-        expect(mocks.person.purgePetRecognitionArtifacts).toHaveBeenCalled();
+        expect(mocks.petFace.purgePetRecognitionArtifacts).toHaveBeenCalled();
         expect(mocks.job.queue).toHaveBeenCalledWith({ name: JobName.PetDetectionQueueAll, data: { force: true } });
-        expect(mocks.person.getUnassignedPetFaces).not.toHaveBeenCalled();
+        expect(mocks.petFace.getUnassignedPetFaces).not.toHaveBeenCalled();
       });
 
       // JOBS_ASSET_PAGINATION_SIZE is 1000: the fan-out flushes mid-stream at that boundary and
@@ -564,7 +581,7 @@ describe(PetRecognitionService.name, () => {
       // that the buffer is reset between them (a missing `jobs = []` would re-queue page 1).
       it('R6.20 flushes the fan-out in pages of 1000', async () => {
         const faces = Array.from({ length: 1001 }, (_, index) => ({ id: `face-${index}` }));
-        mocks.person.getUnassignedPetFaces.mockReturnValue(makeStream(faces));
+        mocks.petFace.getUnassignedPetFaces.mockReturnValue(makeStream(faces));
 
         expect(await sut.handleQueuePetRecognition({ force: false })).toEqual(JobStatus.Success);
 
@@ -578,7 +595,7 @@ describe(PetRecognitionService.name, () => {
       });
 
       it('R6.17 prewarms the pet vector index before fanning out (mirrors facial recognition)', async () => {
-        mocks.person.getUnassignedPetFaces.mockReturnValue(makeStream([{ id: 'face-1' }]));
+        mocks.petFace.getUnassignedPetFaces.mockReturnValue(makeStream([{ id: 'face-1' }]));
 
         expect(await sut.handleQueuePetRecognition({ force: false })).toEqual(JobStatus.Success);
 
@@ -594,8 +611,8 @@ describe(PetRecognitionService.name, () => {
     it('should skip when pet recognition is disabled (default) and not touch the repositories', async () => {
       expect(await sut.handlePetRecognition({ id: 'face-id' })).toEqual(JobStatus.Skipped);
 
-      expect(mocks.person.getPetFaceForRecognition).not.toHaveBeenCalled();
-      expect(mocks.search.searchPets).not.toHaveBeenCalled();
+      expect(mocks.petFace.getPetFaceForRecognition).not.toHaveBeenCalled();
+      expect(mocks.petFace.searchPets).not.toHaveBeenCalled();
     });
 
     it('should skip when machine learning is disabled even if pet recognition is enabled', async () => {
@@ -604,7 +621,7 @@ describe(PetRecognitionService.name, () => {
       });
 
       expect(await sut.handlePetRecognition({ id: 'face-id' })).toEqual(JobStatus.Skipped);
-      expect(mocks.search.searchPets).not.toHaveBeenCalled();
+      expect(mocks.petFace.searchPets).not.toHaveBeenCalled();
     });
 
     describe('when pet recognition is enabled', () => {
@@ -613,21 +630,21 @@ describe(PetRecognitionService.name, () => {
       });
 
       it('fails when the face is not found', async () => {
-        mocks.person.getPetFaceForRecognition.mockResolvedValue(void 0);
+        mocks.petFace.getPetFaceForRecognition.mockResolvedValue(void 0);
 
         expect(await sut.handlePetRecognition({ id: 'face-id' })).toEqual(JobStatus.Failed);
-        expect(mocks.search.searchPets).not.toHaveBeenCalled();
+        expect(mocks.petFace.searchPets).not.toHaveBeenCalled();
       });
 
       it('should skip and not throw when the face has no embedding row (5.8)', async () => {
-        mocks.person.getPetFaceForRecognition.mockResolvedValue(makePetFace({ petSearch: null }));
+        mocks.petFace.getPetFaceForRecognition.mockResolvedValue(makePetFace({ petSearch: null }));
 
         expect(await sut.handlePetRecognition({ id: 'face-id' })).toEqual(JobStatus.Skipped);
-        expect(mocks.search.searchPets).not.toHaveBeenCalled();
+        expect(mocks.petFace.searchPets).not.toHaveBeenCalled();
       });
 
       it('should skip and not search when the face already has a person assigned (5.7)', async () => {
-        mocks.person.getPetFaceForRecognition.mockResolvedValue(
+        mocks.petFace.getPetFaceForRecognition.mockResolvedValue(
           makePetFace({ personGroupId: 'existing-person', assetId: 'asset-1' }),
         );
         mocks.faceIdentity.ensurePersonIdentity.mockResolvedValue({ id: 'identity-id' } as any);
@@ -635,7 +652,7 @@ describe(PetRecognitionService.name, () => {
 
         expect(await sut.handlePetRecognition({ id: 'face-id' })).toEqual(JobStatus.Skipped);
 
-        expect(mocks.search.searchPets).not.toHaveBeenCalled();
+        expect(mocks.petFace.searchPets).not.toHaveBeenCalled();
         expect(mocks.faceIdentity.ensurePersonIdentity).toHaveBeenCalledWith('existing-person');
         expect(mocks.faceIdentity.replaceFaceIdentity).toHaveBeenCalledWith({
           assetFaceId: 'face-id',
@@ -649,7 +666,7 @@ describe(PetRecognitionService.name, () => {
         // The space may have been created or linked after the face was originally recognized, so
         // the already-assigned branch still runs the reconciliation pass — mirrors
         // handleRecognizeFaces's identical divergence guard (person.service.ts).
-        mocks.person.getPetFaceForRecognition.mockResolvedValue(
+        mocks.petFace.getPetFaceForRecognition.mockResolvedValue(
           makePetFace({ personGroupId: 'existing-person', assetId: 'asset-1' }),
         );
         mocks.faceIdentity.ensurePersonIdentity.mockResolvedValue({ id: 'identity-id' } as any);
@@ -669,8 +686,8 @@ describe(PetRecognitionService.name, () => {
       });
 
       it('creates a new pet person with the detected species when there is no match (5.5)', async () => {
-        mocks.person.getPetFaceForRecognition.mockResolvedValue(makePetFace());
-        mocks.search.searchPets
+        mocks.petFace.getPetFaceForRecognition.mockResolvedValue(makePetFace());
+        mocks.petFace.searchPets
           .mockResolvedValueOnce([{ id: 'face-id', personGroupId: null, distance: 0 }])
           .mockResolvedValueOnce([]);
         mocks.person.createWithGroup.mockResolvedValue(makePerson({ personGroupId: 'new-person' }));
@@ -695,10 +712,10 @@ describe(PetRecognitionService.name, () => {
       it('R4.3 falls back to the stored pet_search species when the job carries no label', async () => {
         // The queue-all and nightly fan-outs have no label in their job data (F8) — the species
         // persisted at embed time is the only thing that can stamp the new person.
-        mocks.person.getPetFaceForRecognition.mockResolvedValue(
+        mocks.petFace.getPetFaceForRecognition.mockResolvedValue(
           makePetFace({ petSearch: { faceId: 'face-id', embedding: '[1,2,3]', species: 'cat' } }),
         );
-        mocks.search.searchPets
+        mocks.petFace.searchPets
           .mockResolvedValueOnce([{ id: 'face-id', personGroupId: null, distance: 0 }])
           .mockResolvedValueOnce([]);
         mocks.person.createWithGroup.mockResolvedValue(makePerson({ personGroupId: 'new-person', species: 'cat' }));
@@ -712,10 +729,10 @@ describe(PetRecognitionService.name, () => {
       });
 
       it('R4.4 pin: an explicit job label still wins over the stored species', async () => {
-        mocks.person.getPetFaceForRecognition.mockResolvedValue(
+        mocks.petFace.getPetFaceForRecognition.mockResolvedValue(
           makePetFace({ petSearch: { faceId: 'face-id', embedding: '[1,2,3]', species: 'cat' } }),
         );
-        mocks.search.searchPets
+        mocks.petFace.searchPets
           .mockResolvedValueOnce([{ id: 'face-id', personGroupId: null, distance: 0 }])
           .mockResolvedValueOnce([]);
         mocks.person.createWithGroup.mockResolvedValue(makePerson({ personGroupId: 'new-person' }));
@@ -729,8 +746,8 @@ describe(PetRecognitionService.name, () => {
       });
 
       it('assigns to a person already matched by search without creating a new person (5.6)', async () => {
-        mocks.person.getPetFaceForRecognition.mockResolvedValue(makePetFace());
-        mocks.search.searchPets.mockResolvedValue([
+        mocks.petFace.getPetFaceForRecognition.mockResolvedValue(makePetFace());
+        mocks.petFace.searchPets.mockResolvedValue([
           { id: 'face-id', personGroupId: null, distance: 0 },
           { id: 'other-face', personGroupId: 'matched-person', distance: 0.1 },
         ]);
@@ -758,8 +775,8 @@ describe(PetRecognitionService.name, () => {
             petRecognition: { enabled: true, modelName: 'pet-recognition-base', maxDistance: 0.55, minFaces: 2 },
           },
         });
-        mocks.person.getPetFaceForRecognition.mockResolvedValue(makePetFace());
-        mocks.search.searchPets.mockResolvedValue([{ id: 'face-id', personGroupId: null, distance: 0 }]);
+        mocks.petFace.getPetFaceForRecognition.mockResolvedValue(makePetFace());
+        mocks.petFace.searchPets.mockResolvedValue([{ id: 'face-id', personGroupId: null, distance: 0 }]);
 
         expect(await sut.handlePetRecognition({ id: 'face-id', label: 'dog' })).toEqual(JobStatus.Skipped);
 
@@ -778,8 +795,8 @@ describe(PetRecognitionService.name, () => {
             petRecognition: { enabled: true, modelName: 'pet-recognition-base', maxDistance: 0.55, minFaces: 2 },
           },
         });
-        mocks.person.getPetFaceForRecognition.mockResolvedValue(makePetFace());
-        mocks.search.searchPets
+        mocks.petFace.getPetFaceForRecognition.mockResolvedValue(makePetFace());
+        mocks.petFace.searchPets
           .mockResolvedValueOnce([{ id: 'face-id', personGroupId: null, distance: 0 }])
           .mockResolvedValueOnce([]);
 
@@ -792,8 +809,8 @@ describe(PetRecognitionService.name, () => {
       });
 
       it('links face_identity with type pet (via ensurePersonIdentity) and source owner-person when assigning (5.11)', async () => {
-        mocks.person.getPetFaceForRecognition.mockResolvedValue(makePetFace());
-        mocks.search.searchPets
+        mocks.petFace.getPetFaceForRecognition.mockResolvedValue(makePetFace());
+        mocks.petFace.searchPets
           .mockResolvedValueOnce([{ id: 'face-id', personGroupId: null, distance: 0 }])
           .mockResolvedValueOnce([]);
         mocks.person.createWithGroup.mockResolvedValue(makePerson({ personGroupId: 'new-person' }));
@@ -819,8 +836,8 @@ describe(PetRecognitionService.name, () => {
       // representative-face update. getById returning nothing must be a quiet no-op, not a crash or
       // a thumbnail job for a person that no longer exists.
       it('R6.21 completes without a thumbnail job when the person disappears mid-recognition', async () => {
-        mocks.person.getPetFaceForRecognition.mockResolvedValue(makePetFace());
-        mocks.search.searchPets
+        mocks.petFace.getPetFaceForRecognition.mockResolvedValue(makePetFace());
+        mocks.petFace.searchPets
           .mockResolvedValueOnce([{ id: 'face-id', personGroupId: null, distance: 0 }])
           .mockResolvedValueOnce([]);
         mocks.person.createWithGroup.mockResolvedValue(makePerson({ personGroupId: 'new-person' }));
@@ -837,8 +854,8 @@ describe(PetRecognitionService.name, () => {
       });
 
       it('queues SharedSpaceFaceMatch for the asset after assignment (5.12)', async () => {
-        mocks.person.getPetFaceForRecognition.mockResolvedValue(makePetFace({ assetId: 'asset-1' }));
-        mocks.search.searchPets
+        mocks.petFace.getPetFaceForRecognition.mockResolvedValue(makePetFace({ assetId: 'asset-1' }));
+        mocks.petFace.searchPets
           .mockResolvedValueOnce([{ id: 'face-id', personGroupId: null, distance: 0 }])
           .mockResolvedValueOnce([]);
         mocks.person.createWithGroup.mockResolvedValue(makePerson({ personGroupId: 'new-person' }));
@@ -859,8 +876,8 @@ describe(PetRecognitionService.name, () => {
       });
 
       it('passes maxDistance through to searchPets (5.13)', async () => {
-        mocks.person.getPetFaceForRecognition.mockResolvedValue(makePetFace());
-        mocks.search.searchPets
+        mocks.petFace.getPetFaceForRecognition.mockResolvedValue(makePetFace());
+        mocks.petFace.searchPets
           .mockResolvedValueOnce([{ id: 'face-id', personGroupId: null, distance: 0 }])
           .mockResolvedValueOnce([]);
         mocks.person.createWithGroup.mockResolvedValue(makePerson({ personGroupId: 'new-person' }));
@@ -870,13 +887,13 @@ describe(PetRecognitionService.name, () => {
 
         expect(await sut.handlePetRecognition({ id: 'face-id', label: 'dog' })).toEqual(JobStatus.Success);
 
-        expect(mocks.search.searchPets).toHaveBeenCalledWith(expect.objectContaining({ maxDistance: 0.55 }));
+        expect(mocks.petFace.searchPets).toHaveBeenCalledWith(expect.objectContaining({ maxDistance: 0.55 }));
         expect(mocks.person.createWithGroup).toHaveBeenCalledWith(expect.objectContaining({ species: 'dog' }));
       });
 
       it('sets the representative face and queues PersonGenerateThumbnail when the resolved person has none', async () => {
-        mocks.person.getPetFaceForRecognition.mockResolvedValue(makePetFace());
-        mocks.search.searchPets
+        mocks.petFace.getPetFaceForRecognition.mockResolvedValue(makePetFace());
+        mocks.petFace.searchPets
           .mockResolvedValueOnce([{ id: 'face-id', personGroupId: null, distance: 0 }])
           .mockResolvedValueOnce([]);
         mocks.person.createWithGroup.mockResolvedValue(makePerson({ personGroupId: 'new-person' }));
@@ -898,16 +915,16 @@ describe(PetRecognitionService.name, () => {
       });
 
       it('pin: fails when the face has no owning asset', async () => {
-        mocks.person.getPetFaceForRecognition.mockResolvedValue(makePetFace({ asset: null }));
+        mocks.petFace.getPetFaceForRecognition.mockResolvedValue(makePetFace({ asset: null }));
 
         expect(await sut.handlePetRecognition({ id: 'face-id' })).toEqual(JobStatus.Failed);
 
-        expect(mocks.search.searchPets).not.toHaveBeenCalled();
+        expect(mocks.petFace.searchPets).not.toHaveBeenCalled();
       });
 
       it('pin: the hasPerson fallback search asks for exactly one already-matched face and uses its personId', async () => {
-        mocks.person.getPetFaceForRecognition.mockResolvedValue(makePetFace());
-        mocks.search.searchPets
+        mocks.petFace.getPetFaceForRecognition.mockResolvedValue(makePetFace());
+        mocks.petFace.searchPets
           .mockResolvedValueOnce([{ id: 'face-id', personGroupId: null, distance: 0 }])
           .mockResolvedValueOnce([{ id: 'other-face', personGroupId: 'fallback-person', distance: 0.2 }]);
         mocks.faceIdentity.ensurePersonIdentity.mockResolvedValue({ id: 'fallback-identity' } as any);
@@ -918,7 +935,7 @@ describe(PetRecognitionService.name, () => {
 
         expect(await sut.handlePetRecognition({ id: 'face-id', label: 'dog' })).toEqual(JobStatus.Success);
 
-        expect(mocks.search.searchPets).toHaveBeenNthCalledWith(
+        expect(mocks.petFace.searchPets).toHaveBeenNthCalledWith(
           2,
           expect.objectContaining({ hasPerson: true, numResults: 1 }),
         );
@@ -936,8 +953,8 @@ describe(PetRecognitionService.name, () => {
             petRecognition: { enabled: true, modelName: 'pet-recognition-base', maxDistance: 0.55, minFaces: 0 },
           },
         });
-        mocks.person.getPetFaceForRecognition.mockResolvedValue(makePetFace());
-        mocks.search.searchPets.mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+        mocks.petFace.getPetFaceForRecognition.mockResolvedValue(makePetFace());
+        mocks.petFace.searchPets.mockResolvedValueOnce([]).mockResolvedValueOnce([]);
         mocks.person.createWithGroup.mockResolvedValue(makePerson({ personGroupId: 'new-person' }));
         mocks.faceIdentity.ensurePersonIdentity.mockResolvedValue({ id: 'new-identity' } as any);
         mocks.person.getByGroupIdOnly.mockResolvedValue(makePerson({ personGroupId: 'new-person', faceAssetId: null }));
@@ -945,7 +962,7 @@ describe(PetRecognitionService.name, () => {
 
         expect(await sut.handlePetRecognition({ id: 'face-id', label: 'dog' })).toEqual(JobStatus.Success);
 
-        expect(mocks.search.searchPets).toHaveBeenNthCalledWith(1, expect.objectContaining({ numResults: 1 }));
+        expect(mocks.petFace.searchPets).toHaveBeenNthCalledWith(1, expect.objectContaining({ numResults: 1 }));
       });
 
       it('pin: treats matches.length === minFaces as core (inclusive boundary)', async () => {
@@ -955,8 +972,8 @@ describe(PetRecognitionService.name, () => {
             petRecognition: { enabled: true, modelName: 'pet-recognition-base', maxDistance: 0.55, minFaces: 2 },
           },
         });
-        mocks.person.getPetFaceForRecognition.mockResolvedValue(makePetFace());
-        mocks.search.searchPets
+        mocks.petFace.getPetFaceForRecognition.mockResolvedValue(makePetFace());
+        mocks.petFace.searchPets
           .mockResolvedValueOnce([
             { id: 'face-id', personGroupId: null, distance: 0 },
             { id: 'sibling-face', personGroupId: null, distance: 0.1 },
@@ -981,8 +998,8 @@ describe(PetRecognitionService.name, () => {
             petRecognition: { enabled: true, modelName: 'pet-recognition-base', maxDistance: 0.55, minFaces: 2 },
           },
         });
-        mocks.person.getPetFaceForRecognition.mockResolvedValue(makePetFace());
-        mocks.search.searchPets
+        mocks.petFace.getPetFaceForRecognition.mockResolvedValue(makePetFace());
+        mocks.petFace.searchPets
           .mockResolvedValueOnce([
             { id: 'face-id', personGroupId: null, distance: 0 },
             { id: 'sibling-face', personGroupId: null, distance: 0.1 },
@@ -1012,8 +1029,8 @@ describe(PetRecognitionService.name, () => {
             petRecognition: { enabled: true, modelName: 'pet-recognition-base', maxDistance: 0.55, minFaces: 2 },
           },
         });
-        mocks.person.getPetFaceForRecognition.mockResolvedValue(makePetFace());
-        mocks.search.searchPets
+        mocks.petFace.getPetFaceForRecognition.mockResolvedValue(makePetFace());
+        mocks.petFace.searchPets
           .mockResolvedValueOnce([{ id: 'face-id', personGroupId: null, distance: 0 }])
           .mockResolvedValueOnce([{ id: 'other-face', personGroupId: 'fallback-person', distance: 0.3 }]);
         mocks.faceIdentity.ensurePersonIdentity.mockResolvedValue({ id: 'fallback-identity' } as any);
@@ -1035,8 +1052,8 @@ describe(PetRecognitionService.name, () => {
       });
 
       it('pin: an already-deferred face with no matches at all resolves Skipped via the final no-person exit', async () => {
-        mocks.person.getPetFaceForRecognition.mockResolvedValue(makePetFace());
-        mocks.search.searchPets.mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+        mocks.petFace.getPetFaceForRecognition.mockResolvedValue(makePetFace());
+        mocks.petFace.searchPets.mockResolvedValueOnce([]).mockResolvedValueOnce([]);
 
         expect(await sut.handlePetRecognition({ id: 'face-id', deferred: true, label: 'dog' })).toEqual(
           JobStatus.Skipped,
@@ -1048,8 +1065,8 @@ describe(PetRecognitionService.name, () => {
       });
 
       it('pin: dedupes duplicate spaceId rows before queuing shared-space face matches (exactly one job per space)', async () => {
-        mocks.person.getPetFaceForRecognition.mockResolvedValue(makePetFace({ assetId: 'asset-1' }));
-        mocks.search.searchPets
+        mocks.petFace.getPetFaceForRecognition.mockResolvedValue(makePetFace({ assetId: 'asset-1' }));
+        mocks.petFace.searchPets
           .mockResolvedValueOnce([{ id: 'face-id', personGroupId: null, distance: 0 }])
           .mockResolvedValueOnce([]);
         mocks.person.createWithGroup.mockResolvedValue(makePerson({ personGroupId: 'new-person' }));

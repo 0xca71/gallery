@@ -2,17 +2,19 @@ import {
   Column,
   CreateDateColumn,
   ForeignKeyColumn,
-  type Generated,
   Index,
   PrimaryGeneratedColumn,
   Table,
+  type Generated,
 } from '@immich/sql-tools';
-import type { AssetEditSaveJournal } from 'src/repositories/asset-edit-save.repository.js';
 import { AssetEditActionItem, AssetEditSaveMode, AssetEditSaveStatus } from 'src/dtos/editing.dto.js';
+import type { ImageAdjust } from 'src/gallery/dtos/image-adjust.dto.js';
+import type { AssetEditSaveJournal } from 'src/gallery/repositories/asset-edit-save.repository.js';
 import { UserTable } from 'src/schema/tables/user.table.js';
 
 @Table('asset_edit_save')
 @Index({ columns: ['ownerId', 'idempotencyKey'], unique: true })
+@Index({ columns: ['resultAssetId'] })
 @Index({
   name: 'asset_edit_save_active_asset_idx',
   columns: ['assetId'],
@@ -44,6 +46,9 @@ export class AssetEditSaveTable {
 
   @Column({ type: 'jsonb' })
   edits!: AssetEditActionItem[];
+
+  @Column({ type: 'jsonb', nullable: true })
+  adjust!: ImageAdjust | null;
 
   @Column({ type: 'uuid', nullable: true })
   resultAssetId!: string | null;

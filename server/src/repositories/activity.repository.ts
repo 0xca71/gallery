@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { type Insertable, type Kysely, type NotNull, sql } from 'kysely';
+import { sql, type Insertable, type Kysely, type NotNull } from 'kysely';
 import { jsonObjectFrom } from 'kysely/helpers/postgres';
 import { InjectKysely } from 'nestjs-kysely';
 import { columns } from 'src/database.js';
@@ -34,7 +34,7 @@ export class ActivityRepository {
         join.onRef('user2.id', '=', 'activity.userId').on('user2.deletedAt', 'is', null),
       )
       .innerJoinLateral(
-        (eb) => eb.selectFrom(dummy).select(columns.userWithPrefix).as('user'),
+        (eb) => eb.selectFrom(dummy).select(columns.user2).as('user'),
         (join) => join.onTrue(),
       )
       .select((eb) => eb.fn.toJson('user').as('user'))
@@ -86,7 +86,7 @@ export class ActivityRepository {
     albumId: string;
     assetId?: string;
     /** I2: when true, drop album-level (assetId IS NULL) rows from the counts — for space-only
-     * readers, who must not learn album-level comment/like totals. */
+    readers, who must not learn album-level comment/like totals. */
     excludeAlbumLevel?: boolean;
   }): Promise<{ comments: number; likes: number }> {
     const result = await this.db

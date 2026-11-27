@@ -1,10 +1,10 @@
 <script lang="ts">
-  import SchemaAlbumPicker from '$lib/components/SchemaAlbumPicker.svelte';
-  import Self from '$lib/components/SchemaConfiguration.svelte';
-  import SchemaSpaceAlbumPicker from '$lib/components/SchemaSpaceAlbumPicker.svelte';
-  import SchemaSpacePicker from '$lib/components/SchemaSpacePicker.svelte';
-  import SchemaTagPicker from '$lib/components/SchemaTagPicker.svelte';
-  import type { JSONSchemaProperty, SchemaConfig } from '$lib/types';
+  import SchemaAlbumPicker from '#lib/components/SchemaAlbumPicker.svelte';
+  import Self from '#lib/components/SchemaConfiguration.svelte';
+  import SchemaSpaceAlbumPicker from '#lib/components/SchemaSpaceAlbumPicker.svelte';
+  import SchemaSpacePicker from '#lib/components/SchemaSpacePicker.svelte';
+  import SchemaTagPicker from '#lib/components/SchemaTagPicker.svelte';
+  import type { JSONSchemaProperty, SchemaConfig } from '#lib/types.ts';
   import {
     CodeBlock,
     Field,
@@ -105,7 +105,7 @@
     <Select options={schema.enum} bind:value={getString, setValue} />
   </Field>
 {:else if schema.array}
-  {@const values = getValue<string[]>([])}
+  {const values = $derived(getValue<string[]>([]))}
   <Field {label} {description}>
     <Input value={values.join(',')} disabled />
     <HelperText>{$t('unsupported_field_type')}</HelperText>

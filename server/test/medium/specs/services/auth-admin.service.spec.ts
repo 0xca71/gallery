@@ -9,6 +9,7 @@ import { getKyselyDB } from 'test/utils.js';
 
 let defaultDatabase: Kysely<DB>;
 
+// eslint-disable-next-line unicorn/no-unnecessary-parameters
 const setup = (db?: Kysely<DB>) => {
   return newMediumService(AuthAdminService, {
     database: db || defaultDatabase,
@@ -31,7 +32,7 @@ describe(AuthAdminService.name, () => {
 
       await expect(sut.unlinkAll(auth)).resolves.toBeUndefined();
       await expect(userRepo.get(user.id, { withDeleted: true })).resolves.toEqual(
-        expect.objectContaining({ oauthId: '' }),
+        expect.objectContaining({ oauthId: null }),
       );
     });
 
@@ -43,7 +44,7 @@ describe(AuthAdminService.name, () => {
 
       await expect(sut.unlinkAll(auth)).resolves.toBeUndefined();
       await expect(userRepo.get(user.id, { withDeleted: true })).resolves.toEqual(
-        expect.objectContaining({ oauthId: '' }),
+        expect.objectContaining({ oauthId: null }),
       );
     });
 
@@ -56,10 +57,10 @@ describe(AuthAdminService.name, () => {
 
       await expect(sut.unlinkAll(auth)).resolves.toBeUndefined();
       await expect(userRepo.get(user1.id, { withDeleted: true })).resolves.toEqual(
-        expect.objectContaining({ oauthId: '' }),
+        expect.objectContaining({ oauthId: null }),
       );
       await expect(userRepo.get(user2.id, { withDeleted: true })).resolves.toEqual(
-        expect.objectContaining({ oauthId: '' }),
+        expect.objectContaining({ oauthId: null }),
       );
     });
   });

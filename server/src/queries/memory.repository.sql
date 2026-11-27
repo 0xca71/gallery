@@ -38,7 +38,18 @@ select
     from
       (
         select
-          "asset".*
+          "asset".*,
+          coalesce(
+            (
+              select
+                "asset_video_trim"."duration"
+              from
+                "asset_video_trim"
+              where
+                "asset_video_trim"."assetId" = "asset"."id"
+            ),
+            "asset"."duration"
+          ) as "duration"
         from
           "asset"
           inner join "memory_asset" on "asset"."id" = "memory_asset"."assetId"
@@ -83,7 +94,18 @@ select
     from
       (
         select
-          "asset".*
+          "asset".*,
+          coalesce(
+            (
+              select
+                "asset_video_trim"."duration"
+              from
+                "asset_video_trim"
+              where
+                "asset_video_trim"."assetId" = "asset"."id"
+            ),
+            "asset"."duration"
+          ) as "duration"
         from
           "asset"
           inner join "memory_asset" on "asset"."id" = "memory_asset"."assetId"
@@ -132,7 +154,18 @@ select
     from
       (
         select
-          "asset".*
+          "asset".*,
+          coalesce(
+            (
+              select
+                "asset_video_trim"."duration"
+              from
+                "asset_video_trim"
+              where
+                "asset_video_trim"."assetId" = "asset"."id"
+            ),
+            "asset"."duration"
+          ) as "duration"
         from
           "asset"
           inner join "memory_asset" on "asset"."id" = "memory_asset"."assetId"
@@ -174,7 +207,18 @@ select
     from
       (
         select
-          "asset".*
+          "asset".*,
+          coalesce(
+            (
+              select
+                "asset_video_trim"."duration"
+              from
+                "asset_video_trim"
+              where
+                "asset_video_trim"."assetId" = "asset"."id"
+            ),
+            "asset"."duration"
+          ) as "duration"
         from
           "asset"
           inner join "memory_asset" on "asset"."id" = "memory_asset"."assetId"
@@ -211,66 +255,81 @@ order by
   "showAt" desc nulls last,
   "memoryAt" desc
 
--- MemoryRepository.getForOverlapReconcile
-select
-  "memory"."id",
-  "memory"."type",
-  "memory"."data",
-  "memory"."isSaved",
-  "memory"."showAt",
-  "memory"."hideAt",
-  (
+-- MemoryRepository.getPersonBirthdayYears
+select distinct
+  date_part(
+    'year',
+    (asset."localDateTime" at time zone 'UTC')::date
+  )::int as "year"
+from
+  "asset"
+where
+  "asset"."ownerId" = $1
+  and "asset"."visibility" = $2
+  and "asset"."deletedAt" is null
+  and exists (
     select
-      coalesce(json_agg(agg), '[]')
     from
-      (
-        select
-          "asset"."id"
-        from
-          "asset"
-          inner join "memory_asset" on "asset"."id" = "memory_asset"."assetId"
-        where
-          "memory_asset"."memoriesId" = "memory"."id"
-          and "asset"."visibility" = 'timeline'
-          and "asset"."deletedAt" is null
-          and not exists (
-            select
-              $1 as "one"
-            from
-              "asset_face"
-              inner join "person" on "person"."personGroupId" = "asset_face"."personGroupId"
-              and "person"."ownerId" = "asset"."ownerId"
-            where
-              "asset_face"."assetId" = "asset"."id"
-              and "person"."isHidden" = $2
-          )
-        order by
-          "asset"."localDateTime" asc
-      ) as agg
-  ) as "assets"
-from
-  "memory"
-where
-  "memory"."ownerId" = $3
-  and "memory"."deletedAt" is null
-  and (
-    "memory"."showAt" is null
-    or "memory"."showAt" <= $4
+      "asset_face"
+    where
+      "asset_face"."assetId" = "asset"."id"
+      and "asset_face"."personGroupId" = $3
+      and "asset_face"."deletedAt" is null
+      and "asset_face"."isVisible" is true
   )
-  and (
-    "memory"."hideAt" is null
-    or "memory"."hideAt" >= $5
+  and exists (
+    select
+    from
+      "asset_file"
+    where
+      "asset_file"."assetId" = "asset"."id"
+      and "asset_file"."type" = $4
   )
+  and date_part(
+    'month',
+    (asset."localDateTime" at time zone 'UTC')::date
+  )::int = $5
+  and date_part(
+    'day',
+    (asset."localDateTime" at time zone 'UTC')::date
+  )::int = $6
+  and (asset."localDateTime" at time zone 'UTC')::date >= make_date($7::int, $8::int, $9::int)
+  and (asset."localDateTime" at time zone 'UTC')::date < make_date($10::int, $11::int, $12::int)
 order by
-  "memory"."id"
+  year desc
 
--- MemoryRepository.getOldestMemoryDate
+-- MemoryRepository.getPersonAssetsByDate
 select
-  min(coalesce("showAt", "createdAt")) as "oldest"
+  "asset"."id"
 from
-  "memory"
+  "asset"
 where
-  "deletedAt" is null
+  "asset"."ownerId" = $1
+  and "asset"."visibility" = $2
+  and "asset"."deletedAt" is null
+  and exists (
+    select
+    from
+      "asset_face"
+    where
+      "asset_face"."assetId" = "asset"."id"
+      and "asset_face"."personGroupId" = $3
+      and "asset_face"."deletedAt" is null
+      and "asset_face"."isVisible" is true
+  )
+  and exists (
+    select
+    from
+      "asset_file"
+    where
+      "asset_file"."assetId" = "asset"."id"
+      and "asset_file"."type" = $4
+  )
+  and (asset."localDateTime" at time zone 'UTC')::date = make_date($5::int, $6::int, $7::int)
+order by
+  "asset"."localDateTime" desc
+limit
+  $8
 
 -- MemoryRepository.get
 select
@@ -281,7 +340,18 @@ select
     from
       (
         select
-          "asset".*
+          "asset".*,
+          coalesce(
+            (
+              select
+                "asset_video_trim"."duration"
+              from
+                "asset_video_trim"
+              where
+                "asset_video_trim"."assetId" = "asset"."id"
+            ),
+            "asset"."duration"
+          ) as "duration"
         from
           "asset"
           inner join "memory_asset" on "asset"."id" = "memory_asset"."assetId"
@@ -299,6 +369,53 @@ where
   "id" = $1
   and "deletedAt" is null
 
+-- MemoryRepository.get (with viewerId)
+select
+  "memory".*,
+  (
+    select
+      coalesce(json_agg(agg), '[]')
+    from
+      (
+        select
+          "asset".*,
+          coalesce(
+            (
+              select
+                "asset_video_trim"."duration"
+              from
+                "asset_video_trim"
+              where
+                "asset_video_trim"."assetId" = "asset"."id"
+            ),
+            "asset"."duration"
+          ) as "duration",
+          exists (
+            select
+              1 as "exists"
+            from
+              "asset_favorite"
+            where
+              "asset_favorite"."assetId" = "asset"."id"
+              and "asset_favorite"."userId" = $1::uuid
+          ) as "isFavoriteForUser"
+        from
+          "asset"
+          inner join "memory_asset" on "asset"."id" = "memory_asset"."assetId"
+        where
+          "memory_asset"."memoriesId" = "memory"."id"
+          and "asset"."visibility" = 'timeline'
+          and "asset"."deletedAt" is null
+        order by
+          "asset"."localDateTime" asc
+      ) as agg
+  ) as "assets"
+from
+  "memory"
+where
+  "id" = $2
+  and "deletedAt" is null
+
 -- MemoryRepository.update
 update "memory"
 set
@@ -314,7 +431,18 @@ select
     from
       (
         select
-          "asset".*
+          "asset".*,
+          coalesce(
+            (
+              select
+                "asset_video_trim"."duration"
+              from
+                "asset_video_trim"
+              where
+                "asset_video_trim"."assetId" = "asset"."id"
+            ),
+            "asset"."duration"
+          ) as "duration"
         from
           "asset"
           inner join "memory_asset" on "asset"."id" = "memory_asset"."assetId"
@@ -336,27 +464,6 @@ where
 delete from "memory"
 where
   "id" = $1
-
--- MemoryRepository.deleteOnThisDay
-delete from "memory"
-where
-  "ownerId" = $1
-  and "type" = $2
-  and "isSaved" = $3
-  and "showAt" = $4
-  and memory.data ->> 'year' = $5
-
--- MemoryRepository.hasRuleMemory
-select
-  "id"
-from
-  "memory"
-where
-  "ownerId" = $1
-  and "type" = $2
-  and memory.data ->> 'ruleId' = $3
-  and memory.data ->> 'dedupeKey' = $4
-  and "deletedAt" is null
 
 -- MemoryRepository.getAssetIds
 select

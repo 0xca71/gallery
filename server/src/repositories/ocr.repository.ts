@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { type Insertable, type Kysely, sql } from 'kysely';
+import { sql, type Insertable, type Kysely } from 'kysely';
 import { InjectKysely } from 'nestjs-kysely';
 import { DummyValue, GenerateSql } from 'src/decorators.js';
 import { AssetOcrResponseDto } from 'src/dtos/ocr.dto.js';
@@ -17,7 +17,7 @@ export class OcrRepository {
 
   @GenerateSql({ params: [DummyValue.UUID] })
   getByAssetId(id: string, options?: { isVisible?: boolean }) {
-    const isVisible = options === undefined ? true : options.isVisible;
+    const isVisible = options === undefined || options.isVisible;
 
     return this.db
       .selectFrom('asset_ocr')
@@ -58,7 +58,6 @@ export class OcrRepository {
   })
   upsert(assetId: string, ocrDataList: Insertable<AssetOcrTable>[], searchText: string) {
     let query = this.db.with('deleted_ocr', (db) => db.deleteFrom('asset_ocr').where('assetId', '=', assetId));
-    // eslint-disable-next-line unicorn/prefer-ternary
     if (ocrDataList.length > 0) {
       (query as any) = query
         .with('inserted_ocr', (db) => db.insertInto('asset_ocr').values(ocrDataList))
@@ -75,11 +74,12 @@ export class OcrRepository {
     return query.selectNoFrom(sql`1`.as('dummy')).execute();
   }
 
-  @GenerateSql({ params: [DummyValue.UUID, [], []] })
+  @GenerateSql({ params: [DummyValue.UUID, [], [], DummyValue.STRING] })
   async updateOcrVisibilities(
     assetId: string,
     visible: AssetOcrResponseDto[],
     hidden: AssetOcrResponseDto[],
+    searchText: string,
   ): Promise<void> {
     await this.db.transaction().execute(async (trx) => {
       if (visible.length > 0) {
@@ -106,7 +106,6 @@ export class OcrRepository {
           .execute();
       }
 
-      const searchText = visible.map((item) => item.text.trim()).join(' ');
       await trx.updateTable('ocr_search').set({ text: searchText }).where('assetId', '=', assetId).execute();
     });
   }

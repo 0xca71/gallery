@@ -1,9 +1,13 @@
 <script lang="ts">
-  import ActiveFiltersBar from '$lib/components/filter-panel/active-filters-bar.svelte';
-  import FilterToolbar from '$lib/components/filter-panel/filter-toolbar.svelte';
-  import SearchAddAllButton from '$lib/components/search/SearchAddAllButton.svelte';
-  import { buildFilterContext, createFilterState, type FilterState } from '$lib/components/filter-panel/filter-panel';
-  import type { TimelineGrouping } from '$lib/managers/timeline-manager/types';
+  import ActiveFiltersBar from '#lib/components/filter-panel/active-filters-bar.svelte';
+  import {
+    buildFilterContext,
+    createFilterState,
+    type FilterState,
+  } from '#lib/components/filter-panel/filter-panel.ts';
+  import FilterToolbar from '#lib/components/filter-panel/filter-toolbar.svelte';
+  import SearchAddAllButton from '#lib/components/search/SearchAddAllButton.svelte';
+  import type { TimelineGrouping } from '#lib/managers/timeline-manager/types.ts';
   import { twMerge } from 'tailwind-merge';
 
   interface Props {
@@ -15,9 +19,9 @@
     onGroupingChange: (grouping: TimelineGrouping) => void;
     onClearTemporalFilter?: () => void;
     /**
-     * These surfaces (favorites, archive, a person's photos) are themselves an implicit filter, so
-     * when a handler is supplied the "Add all N to…" action shows whenever there are results.
-     */
+    These surfaces (favorites, archive, a person's photos) are themselves an implicit filter, so
+    when a handler is supplied the "Add all N to…" action shows whenever there are results.
+    */
     onAddAllToCollection?: () => void;
   }
 

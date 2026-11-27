@@ -1,86 +1,87 @@
-import '@testing-library/jest-dom';
-import { cleanup, render, screen } from '@testing-library/svelte';
-import userEvent from '@testing-library/user-event';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import SharedLinkCreateModal from './SharedLinkCreateModal.svelte';
+import { sdkMock } from '#lib/gallery/__mocks__/sdk.mock.ts';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { render } from 'vitest-browser-svelte';
+import { page, userEvent } from 'vitest/browser';
 
-const handleCreateSharedLinkMock = vi.hoisted(() => vi.fn());
-vi.mock('$lib/services/shared-link.service', () => ({ handleCreateSharedLink: handleCreateSharedLinkMock }));
+// The browser links every static import before any module body runs, so a static import of the
+// component would load the real @immich/sdk before sdk.mock.ts registers its vi.mock. Loading it
+// after that registration gives it the mocked module.
+const { default: SharedLinkCreateModal } = await import('./SharedLinkCreateModal.svelte');
 
 beforeEach(() => {
-  // Not clearMocks: this project's vitest config leaves mock history to leak across a file.
-  handleCreateSharedLinkMock.mockReset();
-  handleCreateSharedLinkMock.mockResolvedValue(true);
-});
-
-// `FormModal` mounts a bits-ui dialog whose body scroll lock releases on a 24ms timer; if the
-// file ends inside that window happy-dom is already torn down and the timer throws an unhandled
-// error. Same drain as AlbumEditModal.spec.ts.
-afterEach(async () => {
-  cleanup();
-  await new Promise((resolve) => setTimeout(resolve, 30));
+  // The modal saves through upstream's createSharedLinkMutation (immich-32666), so assert on the SDK
+  // call it makes. Not clearMocks: this project's vitest config leaves mock history to leak.
+  sdkMock.createSharedLink.mockReset();
+  sdkMock.createSharedLink.mockResolvedValue({ id: 'link-1', key: 'key-1' } as never);
 });
 
 const submit = async () => {
-  const user = userEvent.setup();
-  await user.click(screen.getByRole('button', { name: 'create_link' }));
+  await userEvent.click(page.getByRole('button', { name: 'create_link', exact: true }));
 };
 
 describe('SharedLinkCreateModal', () => {
   describe('sharing from a space (#1018)', () => {
-    it('warns that other members’ photos will become public', () => {
-      render(SharedLinkCreateModal, {
+    it('warns that other members’ photos will become public', async () => {
+      await render(SharedLinkCreateModal, {
         props: { onClose: vi.fn(), assetIds: ['a1', 'a2'], spaceId: 'space-1', contributedCount: 2 },
       });
 
-      expect(screen.getByTestId('shared-link-contributed-warning')).toBeInTheDocument();
+      expect(page.getByTestId('shared-link-contributed-warning').element()).toBeInTheDocument();
     });
 
-    it('warns without a count on an album link, where the contributed share is not known client-side', () => {
-      render(SharedLinkCreateModal, { props: { onClose: vi.fn(), albumId: 'album-1', spaceId: 'space-1' } });
+    it('warns without a count on an album link, where the contributed share is not known client-side', async () => {
+      await render(SharedLinkCreateModal, { props: { onClose: vi.fn(), albumId: 'album-1', spaceId: 'space-1' } });
 
-      expect(screen.getByTestId('shared-link-contributed-warning')).toBeInTheDocument();
+      expect(page.getByTestId('shared-link-contributed-warning').element()).toBeInTheDocument();
     });
 
-    it('does not warn on an album link outside a space', () => {
-      render(SharedLinkCreateModal, { props: { onClose: vi.fn(), albumId: 'album-1' } });
+    it('does not warn on an album link outside a space', async () => {
+      await render(SharedLinkCreateModal, { props: { onClose: vi.fn(), albumId: 'album-1' } });
 
-      expect(screen.queryByTestId('shared-link-contributed-warning')).not.toBeInTheDocument();
+      expect(page.getByTestId('shared-link-contributed-warning').query()).not.toBeInTheDocument();
     });
 
-    it('does not warn when the caller owns every selected photo', () => {
-      render(SharedLinkCreateModal, {
+    it('does not warn when the caller owns every selected photo', async () => {
+      await render(SharedLinkCreateModal, {
         props: { onClose: vi.fn(), assetIds: ['a1'], spaceId: 'space-1', contributedCount: 0 },
       });
 
-      expect(screen.queryByTestId('shared-link-contributed-warning')).not.toBeInTheDocument();
+      expect(page.getByTestId('shared-link-contributed-warning').query()).not.toBeInTheDocument();
     });
 
     it('sends the space with the link so the server authorizes against it', async () => {
-      render(SharedLinkCreateModal, {
+      await render(SharedLinkCreateModal, {
         props: { onClose: vi.fn(), assetIds: ['a1', 'a2'], spaceId: 'space-1', contributedCount: 1 },
       });
 
       await submit();
 
-      expect(handleCreateSharedLinkMock).toHaveBeenCalledWith(expect.objectContaining({ spaceId: 'space-1' }));
+      await vi.waitFor(() =>
+        expect(sdkMock.createSharedLink).toHaveBeenCalledWith({
+          sharedLinkCreateDto: expect.objectContaining({ spaceId: 'space-1' }),
+        }),
+      );
     });
   });
 
   describe('sharing from outside a space', () => {
     it('sends no space', async () => {
-      render(SharedLinkCreateModal, { props: { onClose: vi.fn(), assetIds: ['a1'] } });
+      await render(SharedLinkCreateModal, { props: { onClose: vi.fn(), assetIds: ['a1'] } });
 
       await submit();
 
-      expect(handleCreateSharedLinkMock).toHaveBeenCalledWith(expect.objectContaining({ spaceId: undefined }));
+      await vi.waitFor(() =>
+        expect(sdkMock.createSharedLink).toHaveBeenCalledWith({
+          sharedLinkCreateDto: expect.objectContaining({ spaceId: undefined }),
+        }),
+      );
     });
 
-    it('keeps reporting assets narrowed out of the selection', () => {
-      render(SharedLinkCreateModal, { props: { onClose: vi.fn(), assetIds: ['a1'], excludedCount: 2 } });
+    it('keeps reporting assets narrowed out of the selection', async () => {
+      await render(SharedLinkCreateModal, { props: { onClose: vi.fn(), assetIds: ['a1'], excludedCount: 2 } });
 
-      expect(screen.getByTestId('shared-link-excluded-notice')).toBeInTheDocument();
-      expect(screen.queryByTestId('shared-link-contributed-warning')).not.toBeInTheDocument();
+      expect(page.getByTestId('shared-link-excluded-notice').element()).toBeInTheDocument();
+      expect(page.getByTestId('shared-link-contributed-warning').query()).not.toBeInTheDocument();
     });
   });
 });

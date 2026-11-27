@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:immich_mobile/data/server/person.dart';
@@ -6,7 +8,6 @@ import 'package:immich_mobile/domain/models/person.model.dart';
 import 'package:immich_mobile/domain/models/user.model.dart';
 import 'package:immich_mobile/domain/services/user.service.dart';
 import 'package:immich_mobile/providers/infrastructure/db.provider.dart';
-import 'package:immich_mobile/providers/infrastructure/user_metadata.provider.dart';
 import 'package:immich_mobile/providers/user.provider.dart';
 import 'package:mocktail/mocktail.dart';
 
@@ -40,7 +41,7 @@ void main() {
         driftProvider.overrideWithValue(ctx.db),
         personApiRepositoryProvider.overrideWithValue(api),
         // No stored preferences: the default minimum face count applies
-        userMetadataPreferencesProvider.overrideWith((ref) => Future.value(null)),
+        Store.userMetadata.preferences().overrideWith((ref) => Stream.value(null)),
         currentUserProvider.overrideWith((ref) => _StubCurrentUserNotifier(userService)),
       ],
     );
@@ -92,6 +93,11 @@ void main() {
 
     expect(people.map((p) => p.id), [named.id]);
   });
+
+  // immich-31661's two forAsset reactivity tests are intentionally absent: Gallery's
+  // forAsset is a FutureProvider, not a Drift stream, because for an asset the viewer
+  // does not own it resolves people from the SERVER (issue #727) and that arm cannot be
+  // a local stream. Renames refresh via the explicit ref.invalidate in people_details.
 
   test('updateName pushes to the server, then saves locally', () async {
     final user = await ctx.newUser();

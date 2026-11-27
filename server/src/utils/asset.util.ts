@@ -1,17 +1,19 @@
 import { BadRequestException } from '@nestjs/common';
-import type { IBulkAsset, ImmichFile, UploadFile, UploadRequest } from 'src/types.js';
 import { StorageCore } from 'src/cores/storage.core.js';
 import { AssetFile } from 'src/database.js';
 import { BulkIdErrorReason, BulkIdResponseDto } from 'src/dtos/asset-ids.response.dto.js';
 import { UploadFieldName } from 'src/dtos/asset-media.dto.js';
 import { AuthDto } from 'src/dtos/auth.dto.js';
+import { AssetEditActionItem } from 'src/dtos/editing.dto.js';
 import { AssetFileType, AssetType, AssetVisibility, Permission } from 'src/enum.js';
 import { AuthRequest } from 'src/middleware/auth.guard.js';
 import { AccessRepository } from 'src/repositories/access.repository.js';
 import { AssetRepository } from 'src/repositories/asset.repository.js';
 import { EventRepository } from 'src/repositories/event.repository.js';
 import { PartnerRepository } from 'src/repositories/partner.repository.js';
+import type { IBulkAsset, ImmichFile, UploadFile, UploadRequest } from 'src/types.js';
 import { checkAccess } from 'src/utils/access.js';
+import { Point, transformPoints } from 'src/utils/transform.js';
 
 export const getAssetFile = (files: AssetFile[], type: AssetFileType, { isEdited }: { isEdited: boolean }) => {
   return files.find((file) => file.type === type && file.isEdited === isEdited);
@@ -30,37 +32,19 @@ export const getAssetFiles = (files: AssetFile[]) => ({
   encodedVideoFile: getAssetFile(files, AssetFileType.EncodedVideo, { isEdited: false }),
 });
 
-/**
- * How the caller wants the assets gated.
- *
- * `ownerOnly` exists because upstream expresses "only the asset's owner may do this" as
- * `Permission.AssetUpdate`, and in this fork that permission ALSO admits space editors — see
- * `utils/access.ts`. Adopting upstream's constant verbatim therefore widens the rule instead of
- * applying it. Rather than mint a public `Permission` value for the narrow case (permissions are
- * API-key scopes, so a new one is public surface), callers that mean owner-only say so directly.
- */
-type AddAssetsAccess = { permission: Permission } | { ownerOnly: true };
-
 export const addAssets = async (
   auth: AuthDto,
   repositories: { access: AccessRepository; bulk: IBulkAsset },
-  dto: { parentId: string; assetIds: string[] } & AddAssetsAccess,
+  dto: { parentId: string; assetIds: string[]; permission: Permission },
 ) => {
   const { access, bulk } = repositories;
   const existingAssetIds = await bulk.getAssetIds(dto.parentId, dto.assetIds);
   const notPresentAssetIds = dto.assetIds.filter((id) => !existingAssetIds.has(id));
-  const allowedAssetIds =
-    'ownerOnly' in dto
-      ? await access.asset.checkOwnerAccess(
-          auth.user.id,
-          new Set(notPresentAssetIds),
-          auth.session?.hasElevatedPermission,
-        )
-      : await checkAccess(access, {
-          auth,
-          permission: dto.permission,
-          ids: notPresentAssetIds,
-        });
+  const allowedAssetIds = await checkAccess(access, {
+    auth,
+    permission: dto.permission,
+    ids: notPresentAssetIds,
+  });
 
   const results: BulkIdResponseDto[] = [];
   for (const assetId of dto.assetIds) {
@@ -171,14 +155,13 @@ export const onBeforeLink = async (
   if (motionAsset.type !== AssetType.Video) {
     throw new BadRequestException('Live photo video must be a video');
   }
-  if (motionAsset.ownerId !== userId) {
-    throw new BadRequestException('Live photo video does not belong to the user');
+
+  if (motionAsset.visibility !== AssetVisibility.Timeline) {
+    return;
   }
 
-  if (motionAsset && motionAsset.visibility === AssetVisibility.Timeline) {
-    await assetRepository.update({ id: livePhotoVideoId, visibility: AssetVisibility.Hidden });
-    await eventRepository.emit('AssetHide', { assetId: motionAsset.id, userId });
-  }
+  await assetRepository.update({ id: livePhotoVideoId, visibility: AssetVisibility.Hidden });
+  await eventRepository.emit('AssetHide', { assetId: motionAsset.id, userId });
 };
 
 export const onBeforeUnlink = async (
@@ -251,4 +234,83 @@ export const getDimensions = ({
 
 export const isPanorama = (asset: { projectionType: string | null; originalFileName: string }) => {
   return asset.projectionType === 'EQUIRECTANGULAR' || asset.originalFileName.toLowerCase().endsWith('.insp');
+};
+
+export interface FaceBoxDraft {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  imageWidth: number;
+  imageHeight: number;
+}
+
+export interface FaceBoxDraftAsset {
+  width: number | null;
+  height: number | null;
+  edits?: AssetEditActionItem[] | null;
+  exifInfo?: { exifImageWidth: number | null; exifImageHeight: number | null; orientation: string | null } | null;
+}
+
+export interface FaceBoxInOriginalSpace {
+  topLeft: Point;
+  bottomRight: Point;
+  imageWidth: number;
+  imageHeight: number;
+}
+
+/**
+Converts a face box drawn on a (possibly edited) preview image into the coordinate space of the
+ORIGINAL, unedited asset. Coordinates a client sends always describe the edited preview it
+rendered, never the original bytes on disk, so this must run before a box is persisted.
+
+Single implementation shared by the owner's `PersonService.createFace` and the space
+face-assign endpoint (`SharedSpaceService.createSpaceAssetFace`, design doc §6.5) so the two
+can never drift on this geometry -- a drift here silently misplaces boxes.
+
+Throws `BadRequestException`, matching the owner path's message, when the asset carries edits
+but its dimensions are unavailable to compute the inverse transform.
+*/
+export const convertFaceBoxToOriginalImageSpace = (
+  box: FaceBoxDraft,
+  asset: FaceBoxDraftAsset,
+): FaceBoxInOriginalSpace => {
+  const edits = asset.edits || [];
+
+  let topLeft: Point = { x: box.x, y: box.y };
+  let bottomRight: Point = { x: box.x + box.width, y: box.y + box.height };
+
+  if (edits.length === 0) {
+    return { topLeft, bottomRight, imageWidth: box.imageWidth, imageHeight: box.imageHeight };
+  }
+
+  if (!asset.width || !asset.height || !asset.exifInfo?.exifImageWidth || !asset.exifInfo?.exifImageHeight) {
+    throw new BadRequestException('Asset does not have valid dimensions');
+  }
+
+  // convert from preview to full dimensions
+  const scaleFactor = asset.width / box.imageWidth;
+  topLeft = { x: topLeft.x * scaleFactor, y: topLeft.y * scaleFactor };
+  bottomRight = { x: bottomRight.x * scaleFactor, y: bottomRight.y * scaleFactor };
+
+  const [invertedTopLeft, invertedBottomRight] = transformPoints(
+    [topLeft, bottomRight],
+    edits,
+    { width: asset.width, height: asset.height },
+    { inverse: true },
+  ).points;
+
+  // make sure topLeft is top-left and bottomRight is bottom-right
+  topLeft = {
+    x: Math.min(invertedTopLeft.x, invertedBottomRight.x),
+    y: Math.min(invertedTopLeft.y, invertedBottomRight.y),
+  };
+  bottomRight = {
+    x: Math.max(invertedTopLeft.x, invertedBottomRight.x),
+    y: Math.max(invertedTopLeft.y, invertedBottomRight.y),
+  };
+
+  // now coordinates are in original image space
+  const originalDimensions = getDimensions(asset.exifInfo);
+  return { topLeft, bottomRight, imageWidth: originalDimensions.width, imageHeight: originalDimensions.height };
 };

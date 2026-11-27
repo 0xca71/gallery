@@ -1,40 +1,42 @@
 <script lang="ts">
-  import { Icon, IconButton, Modal, modalManager, ModalBody } from '@immich/ui';
-  import { mdiClose, mdiMagnify } from '@mdi/js';
-  import { Command } from 'bits-ui';
-  import { t } from 'svelte-i18n';
-  import { clickOutside } from '$lib/actions/click-outside';
-  import type { GlobalSearchManager, SearchMode } from '$lib/managers/global-search-manager.svelte';
-  import GlobalSearchSection from './global-search-section.svelte';
-  import LiveTypedFilterSection from './live-typed-filter-section.svelte';
-  import GlobalSearchNavigationSections from './global-search-navigation-sections.svelte';
-  import GlobalSearchCommandsSection from './global-search-commands-section.svelte';
-  import PhotoRow from './rows/photo-row.svelte';
-  import PersonRow from './rows/person-row.svelte';
-  import PlaceRow from './rows/place-row.svelte';
-  import TagRow from './rows/tag-row.svelte';
-  import AlbumRow from './rows/album-row.svelte';
-  import SpaceRow from './rows/space-row.svelte';
-  import RecentRow from './rows/recent-row.svelte';
-  import NavigationRow from './rows/navigation-row.svelte';
-  import CommandRow from './rows/command-row.svelte';
-  import GlobalSearchFooter from './global-search-footer.svelte';
-  import GlobalSearchPreview from './global-search-preview.svelte';
-  import SearchModeControl from '$lib/components/global-search/search-mode-control.svelte';
-  import ShortcutsModal from '$lib/modals/ShortcutsModal.svelte';
-  import { mediaQueryManager } from '$lib/stores/media-query-manager.svelte';
-  import { getEntries, type RecentEntry } from '$lib/stores/cmdk-recent';
-  import { authManager } from '$lib/managers/auth-manager.svelte';
-  import { NAVIGATION_ITEMS, type NavigationItem } from '$lib/managers/navigation-items';
-  import { featureFlagsManager } from '$lib/managers/feature-flags-manager.svelte';
-  import { page } from '$app/state';
-  import { getSearchablePageState } from '$lib/utils/searchable-page-search';
-  import { getTypedSearchDisplayText } from '$lib/utils/typed-search/typed-search-name-cache';
-  import TypedSearchTokenRail from './typed-search-token-rail.svelte';
+  import { clickOutside } from '#lib/actions/click-outside.ts';
+  import SearchModeControl from '#lib/components/global-search/search-mode-control.svelte';
+  import { nextSearchMode } from '#lib/gallery/search/full-path-search.ts';
+  import { isApplePlatform as isApplePlatformFor, searchHotkeyLabel } from '#lib/gallery/search/search-hotkey.ts';
+  import { authManager } from '#lib/managers/auth-manager.svelte.ts';
+  import { featureFlagsManager } from '#lib/managers/feature-flags-manager.svelte.ts';
+  import type { GlobalSearchManager } from '#lib/managers/global-search-manager.svelte.ts';
+  import { NAVIGATION_ITEMS, type NavigationItem } from '#lib/managers/navigation-items.ts';
+  import ShortcutsModal from '#lib/modals/ShortcutsModal.svelte';
+  import { getEntries, type RecentEntry } from '#lib/stores/cmdk-recent.ts';
+  import { mediaQueryManager } from '#lib/stores/media-query-manager.svelte.ts';
+  import { getSearchablePageState } from '#lib/utils/searchable-page-search.ts';
   import {
     liveTypedSearchChoiceValue,
     type LiveTypedSearchChoice,
-  } from '$lib/utils/typed-search/typed-search-live-suggestions';
+  } from '#lib/utils/typed-search/typed-search-live-suggestions.ts';
+  import { getTypedSearchDisplayText } from '#lib/utils/typed-search/typed-search-name-cache.ts';
+  import { Icon, IconButton, Modal, ModalBody, modalManager } from '@immich/ui';
+  import { mdiClose, mdiMagnify } from '@mdi/js';
+  import { Command } from 'bits-ui';
+  import { t } from 'svelte-i18n';
+  import { page } from '$app/state';
+  import GlobalSearchCommandsSection from './global-search-commands-section.svelte';
+  import GlobalSearchFooter from './global-search-footer.svelte';
+  import GlobalSearchNavigationSections from './global-search-navigation-sections.svelte';
+  import GlobalSearchPreview from './global-search-preview.svelte';
+  import GlobalSearchSection from './global-search-section.svelte';
+  import LiveTypedFilterSection from './live-typed-filter-section.svelte';
+  import AlbumRow from './rows/album-row.svelte';
+  import CommandRow from './rows/command-row.svelte';
+  import NavigationRow from './rows/navigation-row.svelte';
+  import PersonRow from './rows/person-row.svelte';
+  import PhotoRow from './rows/photo-row.svelte';
+  import PlaceRow from './rows/place-row.svelte';
+  import RecentRow from './rows/recent-row.svelte';
+  import SpaceRow from './rows/space-row.svelte';
+  import TagRow from './rows/tag-row.svelte';
+  import TypedSearchTokenRail from './typed-search-token-rail.svelte';
 
   interface Props {
     manager: GlobalSearchManager;
@@ -42,8 +44,8 @@
   }
   let { manager, variant = 'modal' }: Props = $props();
 
-  const isApplePlatform = typeof navigator !== 'undefined' && /Mac|iPhone|iPod|iPad/.test(navigator.platform);
-  const hotkeyLabel = isApplePlatform ? '⌘K' : 'Ctrl+K';
+  const isApplePlatform = isApplePlatformFor();
+  const hotkeyLabel = searchHotkeyLabel();
   let modalInput = $state<HTMLInputElement | null>(null);
 
   // Two-way sync with manager.query: the user types into the Command.Input (writes to
@@ -56,7 +58,7 @@
   let inputValue = $state('');
   const showDropdownPanel = $derived(manager.isOpen && manager.presentation === 'dropdown');
   const closedDropdownSearchState = $derived.by(() =>
-    variant === 'dropdown' ? getSearchablePageState(page.url) : null,
+    variant === 'dropdown' ? getSearchablePageState(new URL(page.url.href)) : null,
   );
   $effect(() => {
     if (variant === 'dropdown' && !showDropdownPanel) {
@@ -266,7 +268,7 @@
         if (live.adminOnly && !isAdmin) {
           return false;
         }
-        const liveFlagEnabled = live.featureFlag ? flags?.[live.featureFlag] : true;
+        const liveFlagEnabled = !live.featureFlag || flags?.[live.featureFlag];
         return Boolean(liveFlagEnabled);
       });
     })(),
@@ -290,7 +292,7 @@
         if (item.category !== 'userPages') {
           return false;
         }
-        const itemFlagEnabled = item.featureFlag ? flags?.[item.featureFlag] : true;
+        const itemFlagEnabled = !item.featureFlag || flags?.[item.featureFlag];
         return Boolean(itemFlagEnabled);
       });
     })(),
@@ -541,9 +543,7 @@
       // by default (the @immich/ui shortcut action skips events whose target is an
       // input), so it won't fire while the palette's Command.Input is focused. Handle
       // the cycle here instead — same behavior, different listener.
-      const order: SearchMode[] = ['smart', 'metadata', 'description', 'ocr'];
-      const next = order[(order.indexOf(manager.mode) + 1) % order.length];
-      manager.setMode(next);
+      manager.setMode(nextSearchMode(manager.mode));
       e.preventDefault();
       return;
     }
@@ -558,7 +558,7 @@
       e.preventDefault();
       return;
     }
-    if (e.key === 'Enter' && inputValue.trim() === '' && getSearchablePageState(page.url).query !== '') {
+    if (e.key === 'Enter' && inputValue.trim() === '' && getSearchablePageState(new URL(page.url.href)).query !== '') {
       void manager.activateSearch('');
       e.preventDefault();
       return;
@@ -611,6 +611,28 @@
     }
   }
 </script>
+
+{#snippet searchBelowTopRow()}
+  {#if manager.searchBelowTopMatch}
+    <Command.Item
+      value={manager.searchBelowTopMatch.id}
+      onSelect={() => manager.searchBelowTopMatch && void manager.activateSearch(manager.searchBelowTopMatch.rawQuery)}
+      class="group"
+      data-testid="cmdk-search-below-top"
+    >
+      <div
+        class="flex h-[52px] items-center gap-3 rounded-lg px-3 py-2 transition-colors duration-80 ease-out group-data-selected:bg-primary/10"
+      >
+        <div class="flex size-8 items-center justify-center rounded-md bg-subtle/40">
+          <Icon icon={mdiMagnify} size="1.125em" class="text-gray-500 dark:text-gray-400" />
+        </div>
+        <span class="min-w-0 flex-1 truncate text-sm font-medium">
+          {$t('cmdk_top_search_label', { values: { query: manager.searchBelowTopMatch.query } })}
+        </span>
+      </div>
+    </Command.Item>
+  {/if}
+{/snippet}
 
 {#if variant === 'dropdown'}
   <div
@@ -836,6 +858,7 @@
                         pending={manager.topCommandMatch.id === manager.pendingConfirmId}
                       />
                     </Command.Item>
+                    {@render searchBelowTopRow()}
                   </Command.GroupItems>
                 </Command.Group>
               {:else if manager.topNavigationMatch}
@@ -853,6 +876,7 @@
                     >
                       <NavigationRow item={manager.topNavigationMatch} />
                     </Command.Item>
+                    {@render searchBelowTopRow()}
                   </Command.GroupItems>
                 </Command.Group>
               {/if}

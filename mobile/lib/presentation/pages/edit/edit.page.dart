@@ -55,7 +55,7 @@ class _EditImagePageState extends ConsumerState<EditImagePage> with TickerProvid
 
     final normalizedRotation = (editorState.rotationAngle % 360 + 360) % 360;
     if (normalizedRotation != 0) {
-      edits.add(RotateEdit(RotateParameters(angle: normalizedRotation)));
+      edits.add(RotateEdit(RotateParameters(angle: normalizedRotation.toDouble())));
     }
 
     try {

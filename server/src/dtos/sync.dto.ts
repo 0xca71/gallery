@@ -15,6 +15,7 @@ import {
   UserAvatarColorSchema,
   UserMetadataKeySchema,
 } from 'src/enum.js';
+import { GallerySyncItem, GallerySyncStreamExtension } from 'src/gallery/dtos/sync.dto.js';
 import { isoDatetimeToDate } from 'src/validation.js';
 
 const SyncUserV1Schema = z
@@ -39,6 +40,10 @@ const SyncAuthUserV1Schema = SyncUserV1Schema.merge(
     quotaUsageInBytes: z.int().describe('Quota usage in bytes'),
   }),
 ).meta({ id: 'SyncAuthUserV1' });
+
+const SyncAuthUserV2Schema = SyncAuthUserV1Schema.extend({
+  oauthId: z.string().nullable().describe('User OAuth ID'),
+}).meta({ id: 'SyncAuthUserV2' });
 
 const SyncUserDeleteV1Schema = z.object({ userId: z.uuidv4().describe('User ID') }).meta({ id: 'SyncUserDeleteV1' });
 
@@ -111,6 +116,8 @@ const SyncAssetV2Schema = z
 class SyncUserV1 extends createZodDto(SyncUserV1Schema) {}
 @ExtraModel()
 class SyncAuthUserV1 extends createZodDto(SyncAuthUserV1Schema) {}
+@ExtraModel()
+class SyncAuthUserV2 extends createZodDto(SyncAuthUserV2Schema) {}
 @ExtraModel()
 class SyncUserDeleteV1 extends createZodDto(SyncUserDeleteV1Schema) {}
 @ExtraModel()
@@ -289,7 +296,8 @@ const SyncMemoryV1Schema = z
     updatedAt: isoDatetimeToDate.describe('Updated at'),
     deletedAt: isoDatetimeToDate.nullable().describe('Deleted at'),
     ownerId: z.uuidv4().describe('Owner ID'),
-    type: MemoryTypeSchema,
+    // Gallery: V1 also carries rule memories to fork-aware clients (#1013); birthday stays withheld.
+    type: MemoryTypeSchema.extract(['OnThisDay', 'Rule']).meta({ id: 'MemoryTypeV1' }),
     data: z.record(z.string(), z.unknown()).describe('Data'),
     isSaved: z.boolean().describe('Is saved'),
     memoryAt: isoDatetimeToDate.describe('Memory at'),
@@ -298,6 +306,10 @@ const SyncMemoryV1Schema = z
     hideAt: isoDatetimeToDate.nullable().describe('Hide at'),
   })
   .meta({ id: 'SyncMemoryV1' });
+
+const SyncMemoryV2Schema = SyncMemoryV1Schema.extend({
+  type: MemoryTypeSchema,
+}).meta({ id: 'SyncMemoryV2' });
 
 const SyncMemoryDeleteV1Schema = z
   .object({ memoryId: z.uuidv4().describe('Memory ID') })
@@ -365,10 +377,11 @@ const SyncAssetFaceV1Schema = z
   })
   .meta({ id: 'SyncAssetFaceV1' });
 
-const SyncAssetFaceV2Schema = SyncAssetFaceV1Schema.extend({
+// same shape as V2, but scoped to the whole cluster group instead of the user's own assets
+const SyncAssetFaceV3Schema = SyncAssetFaceV1Schema.extend({
   deletedAt: isoDatetimeToDate.nullable().describe('Face deleted at'),
   isVisible: z.boolean().describe('Is the face visible in the asset'),
-}).meta({ id: 'SyncAssetFaceV2' });
+}).meta({ id: 'SyncAssetFaceV3' });
 
 const SyncAssetFaceDeleteV1Schema = z
   .object({ assetFaceId: z.uuidv4().describe('Asset face ID') })
@@ -395,6 +408,8 @@ const SyncCompleteV1Schema = z.object({}).meta({ id: 'SyncCompleteV1' });
 
 @ExtraModel()
 class SyncMemoryV1 extends createZodDto(SyncMemoryV1Schema) {}
+@ExtraModel()
+class SyncMemoryV2 extends createZodDto(SyncMemoryV2Schema) {}
 @ExtraModel()
 class SyncMemoryDeleteV1 extends createZodDto(SyncMemoryDeleteV1Schema) {}
 @ExtraModel()
@@ -447,7 +462,7 @@ class SyncPersonDeleteV1 extends createZodDto(SyncPersonDeleteV1Schema) {}
 @ExtraModel()
 class SyncAssetFaceV1 extends createZodDto(SyncAssetFaceV1Schema) {}
 @ExtraModel()
-class SyncAssetFaceV2 extends createZodDto(SyncAssetFaceV2Schema) {}
+class SyncAssetFaceV3 extends createZodDto(SyncAssetFaceV3Schema) {}
 @ExtraModel()
 class SyncAssetFaceDeleteV1 extends createZodDto(SyncAssetFaceDeleteV1Schema) {}
 @ExtraModel()
@@ -461,213 +476,9 @@ class SyncResetV1 extends createZodDto(SyncResetV1Schema) {}
 @ExtraModel()
 class SyncCompleteV1 extends createZodDto(SyncCompleteV1Schema) {}
 
-// --- gallery-fork: shared-space sync DTOs ---
-
-const SyncSharedSpaceDeleteV1Schema = z
-  .object({
-    spaceId: z.string().describe('Shared space ID'),
-  })
-  .meta({ id: 'SyncSharedSpaceDeleteV1' });
-
-const SyncSharedSpaceToAssetV1Schema = z
-  .object({
-    spaceId: z.string().describe('Shared space ID'),
-    assetId: z.string().describe('Asset ID'),
-  })
-  .meta({ id: 'SyncSharedSpaceToAssetV1' });
-
-const SyncSharedSpaceToAssetDeleteV1Schema = z
-  .object({
-    spaceId: z.string().describe('Shared space ID'),
-    assetId: z.string().describe('Asset ID'),
-  })
-  .meta({ id: 'SyncSharedSpaceToAssetDeleteV1' });
-
-const SyncSharedSpaceV1Schema = z
-  .object({
-    id: z.string().describe('Shared space ID'),
-    name: z.string().describe('Space name'),
-    description: z.string().nullable().describe('Space description'),
-    color: z.string().nullable().describe('Color'),
-    createdById: z.string().describe('Created by user ID'),
-    thumbnailAssetId: z.string().nullable().describe('Thumbnail asset ID'),
-    thumbnailCropY: z.int().nullable().describe('Thumbnail crop Y offset'),
-    faceRecognitionEnabled: z.boolean().describe('Face recognition enabled'),
-    petsEnabled: z.boolean().describe('Pets enabled'),
-    lastActivityAt: isoDatetimeToDate.nullable().describe('Last activity timestamp'),
-    createdAt: isoDatetimeToDate.describe('Created at'),
-    updatedAt: isoDatetimeToDate.describe('Updated at'),
-  })
-  .meta({ id: 'SyncSharedSpaceV1' });
-
-const SyncSharedSpaceMemberDeleteV1Schema = z
-  .object({
-    spaceId: z.string().describe('Shared space ID'),
-    userId: z.string().describe('User ID'),
-  })
-  .meta({ id: 'SyncSharedSpaceMemberDeleteV1' });
-
-const SyncSharedSpaceMemberV1Schema = z
-  .object({
-    spaceId: z.string().describe('Shared space ID'),
-    userId: z.string().describe('User ID'),
-    role: z.string().describe('Member role'),
-    joinedAt: isoDatetimeToDate.describe('When the user joined the space'),
-    showInTimeline: z.boolean().describe('Whether the space contributes to the user timeline'),
-  })
-  .meta({ id: 'SyncSharedSpaceMemberV1' });
-
-const SyncLibraryV1Schema = z
-  .object({
-    id: z.string().describe('Library ID'),
-    name: z.string().describe('Library name'),
-    ownerId: z.string().describe('Owner user ID'),
-    createdAt: isoDatetimeToDate.describe('Created at'),
-    updatedAt: isoDatetimeToDate.describe('Updated at'),
-  })
-  .meta({ id: 'SyncLibraryV1' });
-
-const SyncLibraryDeleteV1Schema = z
-  .object({
-    libraryId: z.string().describe('Library ID'),
-  })
-  .meta({ id: 'SyncLibraryDeleteV1' });
-
-const SyncLibraryAssetDeleteV1Schema = z
-  .object({
-    assetId: z.string().describe('Asset ID'),
-  })
-  .meta({ id: 'SyncLibraryAssetDeleteV1' });
-
-const SyncSharedSpaceLibraryV1Schema = z
-  .object({
-    spaceId: z.string().describe('Shared space ID'),
-    libraryId: z.string().describe('Library ID'),
-    addedById: z.string().nullable().describe('User who added the library to the space'),
-    createdAt: isoDatetimeToDate.describe('Created at'),
-    updatedAt: isoDatetimeToDate.describe('Updated at'),
-  })
-  .meta({ id: 'SyncSharedSpaceLibraryV1' });
-
-const SyncSharedSpaceLibraryDeleteV1Schema = z
-  .object({
-    spaceId: z.string().describe('Shared space ID'),
-    libraryId: z.string().describe('Library ID'),
-  })
-  .meta({ id: 'SyncSharedSpaceLibraryDeleteV1' });
-
-// --- gallery-fork: shared-space album link DTOs ---
-
-const SyncSharedSpaceAlbumLinkV1Schema = z
-  .object({
-    spaceId: z.string().describe('Shared space ID'),
-    albumId: z.string().describe('Album ID'),
-    showInTimeline: z.boolean().describe('Whether this album appears in the space timeline'),
-    folderId: z.string().nullable().describe('Album folder ID within the space, or null if at the space root'),
-    addedById: z.string().nullable().describe('User who linked the album to the space'),
-    createdAt: isoDatetimeToDate.describe('Created at'),
-    updatedAt: isoDatetimeToDate.describe('Updated at'),
-  })
-  .meta({ id: 'SyncSharedSpaceAlbumLinkV1' });
-
-const SyncSharedSpaceAlbumLinkDeleteV1Schema = z
-  .object({
-    spaceId: z.string().describe('Shared space ID'),
-    albumId: z.string().describe('Album ID'),
-  })
-  .meta({ id: 'SyncSharedSpaceAlbumLinkDeleteV1' });
-
-// #1041: per-member "album hidden from MY timeline" rows. The row's existence IS the flag, so the
-// payload is just the composite key. Unlike SyncSharedSpaceAlbumLinkDeleteV1 above, the delete
-// schema also carries userId: shared_space_album_hidden's primary key is (spaceId, albumId, userId)
-// — userId is part of what identifies the row, not an incidental field.
-const SyncSharedSpaceAlbumHiddenV1Schema = z
-  .object({
-    spaceId: z.string().describe('Shared space ID'),
-    albumId: z.string().describe('Album ID'),
-    userId: z.string().describe('User ID'),
-  })
-  .meta({ id: 'SyncSharedSpaceAlbumHiddenV1' });
-
-const SyncSharedSpaceAlbumHiddenDeleteV1Schema = z
-  .object({
-    spaceId: z.string().describe('Shared space ID'),
-    albumId: z.string().describe('Album ID'),
-    userId: z.string().describe('User ID'),
-  })
-  .meta({ id: 'SyncSharedSpaceAlbumHiddenDeleteV1' });
-// --- gallery-fork: shared-space album folder DTOs ---
-
-const SyncSharedSpaceAlbumFolderV1Schema = z
-  .object({
-    id: z.string().describe('Folder ID'),
-    spaceId: z.string().describe('Shared space ID'),
-    parentId: z.string().nullable().describe('Parent folder ID'),
-    name: z.string().describe('Folder name'),
-    createdAt: isoDatetimeToDate.describe('Created at'),
-    updatedAt: isoDatetimeToDate.describe('Updated at'),
-  })
-  .meta({ id: 'SyncSharedSpaceAlbumFolderV1' });
-
-const SyncSharedSpaceAlbumFolderDeleteV1Schema = z
-  .object({
-    folderId: z.string().describe('Folder ID'),
-  })
-  .meta({ id: 'SyncSharedSpaceAlbumFolderDeleteV1' });
-
-@ExtraModel()
-export class SyncSharedSpaceDeleteV1 extends createZodDto(SyncSharedSpaceDeleteV1Schema) {}
-
-@ExtraModel()
-export class SyncSharedSpaceToAssetV1 extends createZodDto(SyncSharedSpaceToAssetV1Schema) {}
-
-@ExtraModel()
-export class SyncSharedSpaceToAssetDeleteV1 extends createZodDto(SyncSharedSpaceToAssetDeleteV1Schema) {}
-
-@ExtraModel()
-export class SyncSharedSpaceV1 extends createZodDto(SyncSharedSpaceV1Schema) {}
-
-@ExtraModel()
-export class SyncSharedSpaceMemberDeleteV1 extends createZodDto(SyncSharedSpaceMemberDeleteV1Schema) {}
-
-@ExtraModel()
-export class SyncSharedSpaceMemberV1 extends createZodDto(SyncSharedSpaceMemberV1Schema) {}
-
-@ExtraModel()
-export class SyncLibraryV1 extends createZodDto(SyncLibraryV1Schema) {}
-
-@ExtraModel()
-export class SyncLibraryDeleteV1 extends createZodDto(SyncLibraryDeleteV1Schema) {}
-
-@ExtraModel()
-export class SyncLibraryAssetDeleteV1 extends createZodDto(SyncLibraryAssetDeleteV1Schema) {}
-
-@ExtraModel()
-export class SyncSharedSpaceLibraryV1 extends createZodDto(SyncSharedSpaceLibraryV1Schema) {}
-
-@ExtraModel()
-export class SyncSharedSpaceLibraryDeleteV1 extends createZodDto(SyncSharedSpaceLibraryDeleteV1Schema) {}
-
-@ExtraModel()
-export class SyncSharedSpaceAlbumLinkV1 extends createZodDto(SyncSharedSpaceAlbumLinkV1Schema) {}
-
-@ExtraModel()
-export class SyncSharedSpaceAlbumLinkDeleteV1 extends createZodDto(SyncSharedSpaceAlbumLinkDeleteV1Schema) {}
-
-@ExtraModel()
-export class SyncSharedSpaceAlbumHiddenV1 extends createZodDto(SyncSharedSpaceAlbumHiddenV1Schema) {}
-
-@ExtraModel()
-export class SyncSharedSpaceAlbumHiddenDeleteV1 extends createZodDto(SyncSharedSpaceAlbumHiddenDeleteV1Schema) {}
-
-@ExtraModel()
-export class SyncSharedSpaceAlbumFolderV1 extends createZodDto(SyncSharedSpaceAlbumFolderV1Schema) {}
-
-@ExtraModel()
-export class SyncSharedSpaceAlbumFolderDeleteV1 extends createZodDto(SyncSharedSpaceAlbumFolderDeleteV1Schema) {}
-
 export type SyncItem = {
   [SyncEntityType.AuthUserV1]: SyncAuthUserV1;
+  [SyncEntityType.AuthUserV2]: SyncAuthUserV2;
   [SyncEntityType.UserV1]: SyncUserV1;
   [SyncEntityType.UserDeleteV1]: SyncUserDeleteV1;
   [SyncEntityType.PartnerV1]: SyncPartnerV1;
@@ -702,8 +513,10 @@ export type SyncItem = {
   [SyncEntityType.AlbumToAssetBackfillV1]: SyncAlbumToAssetV1;
   [SyncEntityType.AlbumToAssetDeleteV1]: SyncAlbumToAssetDeleteV1;
   [SyncEntityType.MemoryV1]: SyncMemoryV1;
+  [SyncEntityType.MemoryV2]: SyncMemoryV2;
   [SyncEntityType.MemoryDeleteV1]: SyncMemoryDeleteV1;
   [SyncEntityType.MemoryToAssetV1]: SyncMemoryAssetV1;
+  [SyncEntityType.MemoryToAssetV2]: SyncMemoryAssetV1;
   [SyncEntityType.MemoryToAssetDeleteV1]: SyncMemoryAssetDeleteV1;
   [SyncEntityType.StackV1]: SyncStackV1;
   [SyncEntityType.StackDeleteV1]: SyncStackDeleteV1;
@@ -713,73 +526,24 @@ export type SyncItem = {
   [SyncEntityType.PersonV1]: SyncPersonV1;
   [SyncEntityType.PersonDeleteV1]: SyncPersonDeleteV1;
   [SyncEntityType.AssetFaceV1]: SyncAssetFaceV1;
-  [SyncEntityType.AssetFaceV2]: SyncAssetFaceV2;
+  [SyncEntityType.AssetFaceV2]: SyncAssetFaceV3;
+  [SyncEntityType.AssetFaceV3]: SyncAssetFaceV3;
   [SyncEntityType.AssetFaceDeleteV1]: SyncAssetFaceDeleteV1;
   [SyncEntityType.UserMetadataV1]: SyncUserMetadataV1;
   [SyncEntityType.UserMetadataDeleteV1]: SyncUserMetadataDeleteV1;
   [SyncEntityType.SyncAckV1]: SyncAckV1;
   [SyncEntityType.SyncCompleteV1]: SyncCompleteV1;
   [SyncEntityType.SyncResetV1]: SyncResetV1;
-  // gallery-fork shared-space sync types
-  [SyncEntityType.SharedSpaceV1]: SyncSharedSpaceV1;
-  [SyncEntityType.SharedSpaceDeleteV1]: SyncSharedSpaceDeleteV1;
-  [SyncEntityType.SharedSpaceMemberV1]: SyncSharedSpaceMemberV1;
-  [SyncEntityType.SharedSpaceMemberBackfillV1]: SyncSharedSpaceMemberV1;
-  [SyncEntityType.SharedSpaceMemberDeleteV1]: SyncSharedSpaceMemberDeleteV1;
-  [SyncEntityType.SharedSpaceAssetCreateV1]: SyncAssetV1;
-  [SyncEntityType.SharedSpaceAssetUpdateV1]: SyncAssetV1;
-  [SyncEntityType.SharedSpaceAssetBackfillV1]: SyncAssetV1;
-  [SyncEntityType.SharedSpaceAssetExifCreateV1]: SyncAssetExifV1;
-  [SyncEntityType.SharedSpaceAssetExifUpdateV1]: SyncAssetExifV1;
-  [SyncEntityType.SharedSpaceAssetExifBackfillV1]: SyncAssetExifV1;
-  [SyncEntityType.SharedSpaceToAssetV1]: SyncSharedSpaceToAssetV1;
-  [SyncEntityType.SharedSpaceToAssetBackfillV1]: SyncSharedSpaceToAssetV1;
-  [SyncEntityType.SharedSpaceToAssetDeleteV1]: SyncSharedSpaceToAssetDeleteV1;
-  // Library sync — wired in Task 27 (DTOs added alongside the dispatch change).
-  [SyncEntityType.LibraryV1]: SyncLibraryV1;
-  [SyncEntityType.LibraryDeleteV1]: SyncLibraryDeleteV1;
-  [SyncEntityType.LibraryAssetCreateV1]: SyncAssetV1;
-  [SyncEntityType.LibraryAssetDeleteV1]: SyncLibraryAssetDeleteV1;
-  [SyncEntityType.LibraryAssetBackfillV1]: SyncAssetV1;
-  [SyncEntityType.LibraryAssetExifCreateV1]: SyncAssetExifV1;
-  [SyncEntityType.LibraryAssetExifBackfillV1]: SyncAssetExifV1;
-  [SyncEntityType.SharedSpaceLibraryV1]: SyncSharedSpaceLibraryV1;
-  [SyncEntityType.SharedSpaceLibraryBackfillV1]: SyncSharedSpaceLibraryV1;
-  [SyncEntityType.SharedSpaceLibraryDeleteV1]: SyncSharedSpaceLibraryDeleteV1;
-  // gallery-fork: shared-space album sync types (V2 shape: no ownerId, access is
-  // via space grant so ownership info is not needed by the mobile client)
-  [SyncEntityType.SharedSpaceAlbumV1]: SyncAlbumV2;
-  [SyncEntityType.SharedSpaceAlbumBackfillV1]: SyncAlbumV2;
-  [SyncEntityType.SharedSpaceAlbumDeleteV1]: SyncAlbumDeleteV1;
-  [SyncEntityType.SharedSpaceAlbumLinkV1]: SyncSharedSpaceAlbumLinkV1;
-  [SyncEntityType.SharedSpaceAlbumLinkBackfillV1]: SyncSharedSpaceAlbumLinkV1;
-  [SyncEntityType.SharedSpaceAlbumLinkDeleteV1]: SyncSharedSpaceAlbumLinkDeleteV1;
-  [SyncEntityType.SharedSpaceAlbumHiddenV1]: SyncSharedSpaceAlbumHiddenV1;
-  [SyncEntityType.SharedSpaceAlbumHiddenBackfillV1]: SyncSharedSpaceAlbumHiddenV1;
-  [SyncEntityType.SharedSpaceAlbumHiddenDeleteV1]: SyncSharedSpaceAlbumHiddenDeleteV1;
-  [SyncEntityType.SharedSpaceAlbumFolderV1]: SyncSharedSpaceAlbumFolderV1;
-  [SyncEntityType.SharedSpaceAlbumFolderBackfillV1]: SyncSharedSpaceAlbumFolderV1;
-  [SyncEntityType.SharedSpaceAlbumFolderDeleteV1]: SyncSharedSpaceAlbumFolderDeleteV1;
-  [SyncEntityType.SharedSpaceAlbumToAssetV1]: SyncAlbumToAssetV1;
-  [SyncEntityType.SharedSpaceAlbumToAssetBackfillV1]: SyncAlbumToAssetV1;
-  [SyncEntityType.SharedSpaceAlbumToAssetDeleteV1]: SyncAlbumToAssetDeleteV1;
-  [SyncEntityType.SharedSpaceAlbumAssetCreateV1]: SyncAssetV2;
-  [SyncEntityType.SharedSpaceAlbumAssetUpdateV1]: SyncAssetV2;
-  [SyncEntityType.SharedSpaceAlbumAssetBackfillV1]: SyncAssetV2;
-  [SyncEntityType.SharedSpaceAlbumAssetExifCreateV1]: SyncAssetExifV1;
-  [SyncEntityType.SharedSpaceAlbumAssetExifUpdateV1]: SyncAssetExifV1;
-  [SyncEntityType.SharedSpaceAlbumAssetExifBackfillV1]: SyncAssetExifV1;
-};
+} & GallerySyncItem;
 
-// mobile-1: the client version-gates the fork-only SharedSpaceAlbum* request types
-// (sync_api.repository.dart) so it never sends them to a server that predates them — that is the
-// fix for the app-ahead-of-server outage. The server keeps strict enum validation (unknown request
-// types are rejected), preserving the established API contract.
+export * from 'src/gallery/dtos/sync.dto.js';
+
 const SyncStreamSchema = z
   .object({
     types: z.array(SyncRequestTypeSchema).describe('Sync request types'),
     reset: z.boolean().optional().describe('Reset sync state'),
   })
+  .extend(GallerySyncStreamExtension)
   .meta({ id: 'SyncStreamDto' });
 
 const SyncAckSchema = z

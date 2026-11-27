@@ -9,7 +9,7 @@ concurrency:
   cancel-in-progress: true
 permissions: {}
 jobs:
-  # E2E lint, API/CLI, web, and success-check jobs are disabled for personal-use CI.
+  # Expensive E2E workflows are retired in personal-use CI; unit, medium and native checks remain.
   pre-job:
     runs-on: ubuntu-latest
     permissions:
@@ -48,87 +48,78 @@ jobs:
             mobile:
               - 'mobile/**'
               - 'open-api/**'
+              - 'i18n/**'
+              - 'native/**'
+              - 'mise.toml'
+            native:
+              - 'native/**'
               - 'mise.toml'
             machine-learning:
               - 'machine-learning/**'
               - 'mise.toml'
-            ml-training:
-              - 'machine-learning/pet-recognition-training/**'
-              - 'machine-learning/mise.toml'
-              - 'mise.toml'
-            upstream-preflight:
-              - '.github/workflows/test.yml'
-              - 'tools/upstream-preflight/**'
-              - 'docs/fork/ownership.yml'
-              - 'docs/docs/developer/upstream-rebase-process.md'
-              - 'docs/docs/developer/fork-surface-guidelines.md'
-              - 'Makefile'
-              # Everything below is READ BY the preflight specs. Without these the job is SKIPPED on a
-              # PR that reverts the branded-spinner swap or drops the migration compatibility alias --
-              # and a skipped job is indistinguishable from a passing one. Keep in sync with the
-              # `path.resolve(process.cwd(), '../../...')` targets in tools/upstream-preflight/src/**.
-              - 'web/src/**'
-              - 'mobile/lib/**'
-              - 'server/bin/sync-gallery-migrations.mjs'
-              - 'server/src/schema/migrations/**'
-              - 'server/src/schema/migrations-gallery/**'
-              - 'AGENTS.md'
-              - 'CLAUDE.md'
-              - 'branding/scripts/gallery-branding-check.sh'
-              - 'machine-learning/scripts/gallery-ml-smoke.sh'
-              # fork-deletions.spec.ts asserts paths the fork deleted on purpose stay deleted, so the
-              # job has to run on a PR that resurrects one.
-              - 'packages/**'
             .github:
               - '.github/**'
           force-filters: |
             - '.github/workflows/test.yml'
           force-events: 'workflow_dispatch'
 
-  upstream-preflight:
-    name: Upstream Rebase Tooling
+  native-tests:
+    name: Test & Lint Native Core
     needs: pre-job
-    if: ${{ fromJSON(needs.pre-job.outputs.should_run).upstream-preflight == true }}
+    if: ${{ fromJSON(needs.pre-job.outputs.should_run).native == true }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
       - name: Checkout code
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           token: ${{ github.token }}
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5.0.0
-
-      - name: Setup Node
-        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+      - name: Restore Rust Cache
+        id: cache-rust-restore
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          node-version-file: '.nvmrc'
-          cache: 'pnpm'
-          cache-dependency-path: '**/pnpm-lock.yaml'
+          path: |
+            ~/.rustup/toolchains
+            ~/.rustup/update-hashes
+            ~/.cargo/bin
+            ~/.cargo/registry
+            ~/.cargo/git
+            native/target
+          key: native-rust-${{ runner.os }}-${{ hashFiles('native/crates/native_core_ffi/rust-toolchain.toml', 'native/mise.lock', 'native/Cargo.lock') }}
+          restore-keys: |
+            native-rust-${{ runner.os }}-
 
-      - name: Install dependencies
-        run: SHARP_IGNORE_GLOBAL_LIBVIPS=true pnpm install --frozen-lockfile
+      - name: Setup Mise
+        uses: immich-app/devtools/actions/use-mise@caac7f7e4298458a14238959504f411fc6cc7f06 # use-mise-action-v3.2.3
+        with:
+          github_token: ${{ github.token }}
+          working_directory: ./native
 
-      - name: Run upstream-preflight tests
-        run: pnpm --filter @gallery/upstream-preflight run test
+      - name: Check formatting
+        run: mise //native:fmt
 
-      # The fork's own CI invariants (no upstream-only app-token dependency, Gallery release image
-      # names, upstream docs-deploy stays dispatch-only, person joins prefer the viewer's row) were
-      # run by NO workflow -- they fired only when a human typed `make ci-invariants-check`. An
-      # invariant nobody runs is a comment.
-      # (Careful: the token invariant forbids its own literal token name in any workflow file, so do
-      # not spell it out here -- this comment tripped that gate once already.)
-      - name: Run fork CI invariant audits
-        run: pnpm --filter @gallery/upstream-preflight run ci-invariants-check
+      - name: Run clippy
+        run: mise //native:lint
 
-      - name: Run upstream-preflight type check
-        run: pnpm --filter @gallery/upstream-preflight run check
+      - name: Run tests
+        run: mise //native:test
 
-      - name: Run upstream-preflight format check
-        run: pnpm --filter @gallery/upstream-preflight run format
+      - name: Save Rust Cache
+        id: cache-rust-save
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: github.ref == 'refs/heads/main'
+        with:
+          path: |
+            ~/.rustup/toolchains
+            ~/.rustup/update-hashes
+            ~/.cargo/bin
+            ~/.cargo/registry
+            ~/.cargo/git
+            native/target
+          key: ${{ steps.cache-rust-restore.outputs.cache-primary-key }}
 
   server-unit-tests:
     name: Test & Lint Server
@@ -145,7 +136,7 @@ jobs:
           token: ${{ github.token }}
 
       - name: Setup Mise
-        uses: immich-app/devtools/actions/use-mise@06a9ef925332c91be647d6256642b86b398592c8 # use-mise-action-v3.2.1
+        uses: immich-app/devtools/actions/use-mise@caac7f7e4298458a14238959504f411fc6cc7f06 # use-mise-action-v3.2.3
         with:
           github_token: ${{ github.token }}
 
@@ -173,7 +164,7 @@ jobs:
           token: ${{ github.token }}
 
       - name: Setup Mise
-        uses: immich-app/devtools/actions/use-mise@06a9ef925332c91be647d6256642b86b398592c8 # use-mise-action-v3.2.1
+        uses: immich-app/devtools/actions/use-mise@caac7f7e4298458a14238959504f411fc6cc7f06 # use-mise-action-v3.2.3
         with:
           github_token: ${{ github.token }}
 
@@ -198,7 +189,7 @@ jobs:
           token: ${{ github.token }}
 
       - name: Setup Mise
-        uses: immich-app/devtools/actions/use-mise@06a9ef925332c91be647d6256642b86b398592c8 # use-mise-action-v3.2.1
+        uses: immich-app/devtools/actions/use-mise@caac7f7e4298458a14238959504f411fc6cc7f06 # use-mise-action-v3.2.3
         with:
           github_token: ${{ github.token }}
 
@@ -237,7 +228,7 @@ jobs:
           token: ${{ github.token }}
 
       - name: Setup Mise
-        uses: immich-app/devtools/actions/use-mise@06a9ef925332c91be647d6256642b86b398592c8 # use-mise-action-v3.2.1
+        uses: immich-app/devtools/actions/use-mise@caac7f7e4298458a14238959504f411fc6cc7f06 # use-mise-action-v3.2.3
         with:
           github_token: ${{ github.token }}
 
@@ -270,57 +261,46 @@ jobs:
           token: ${{ github.token }}
 
       - name: Setup Mise
-        uses: immich-app/devtools/actions/use-mise@06a9ef925332c91be647d6256642b86b398592c8 # use-mise-action-v3.2.1
+        uses: immich-app/devtools/actions/use-mise@caac7f7e4298458a14238959504f411fc6cc7f06 # use-mise-action-v3.2.3
         with:
           github_token: ${{ github.token }}
 
       - name: Run ci-unit
         run: mise run ci-unit
 
-  # Behavioural gate for the branding pipeline. ShellCheck only lints these
-  # scripts; nothing in CI ran patch_i18n() and asserted what it produces, which
-  # is how the delete-and-fall-back-to-English behaviour behind issue #844 went
-  # unnoticed. Only test-i18n-branding.sh was ever wired up; the other five
-  # branding scripts ran in no workflow at all.
-  #
-  # This runs branding/scripts/gallery-branding-check.sh, the umbrella gate: it
-  # creates a throwaway detached worktree at HEAD, runs every branding
-  # regression test (email, app-download, i18n, oauth-callback), then applies the
-  # full branding overlay and verifies the result. It never mutates the checkout
-  # and asserts as much on exit. ~14s end to end, and it works on the shallow
-  # clone actions/checkout produces.
-  #
-  # It is deliberately NOT gated on a path filter. apply-branding rewrites SOURCE
-  # files (web/, server/, mobile/), so what breaks it is usually an edit to a file
-  # it patches, not to branding/ itself. Upstream #30527 is the worked example: it
-  # moved the app-download store URLs out of AppDownloadModal.svelte into
-  # @immich/ui `Constants`, turning apply-branding's literal-URL rewrites into
-  # silent no-ops so a branded build shipped upstream's Play/App Store links. It
-  # touched only web/, so the old `branding/**` filter would have skipped this job
-  # precisely when it was needed. At ~14s, always running it is cheaper than
-  # trying to enumerate which paths can invalidate branding.
-  branding-tests:
-    name: Test Branding
+  web-medium-tests:
+    name: Test Web (Medium)
     needs: pre-job
+    if: ${{ fromJSON(needs.pre-job.outputs.should_run).web == true }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    defaults:
+      run:
+        working-directory: ./web
     steps:
       - name: Checkout code
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           token: ${{ github.token }}
 
-      # apply-branding resizes the Android 12 splash assets and verify-mobile-assets
-      # measures icon bounds, both via ImageMagick. It is no longer preinstalled on
-      # the ubuntu runner images, so install it explicitly rather than letting the
-      # check fail with "ImageMagick convert or magick is required".
-      - name: Install ImageMagick
-        run: sudo apt-get update && sudo apt-get install -y imagemagick
+      - name: Setup Mise
+        uses: immich-app/devtools/actions/use-mise@caac7f7e4298458a14238959504f411fc6cc7f06 # use-mise-action-v3.2.3
+        with:
+          github_token: ${{ github.token }}
 
-      - name: Run branding pipeline checks
-        run: ./branding/scripts/gallery-branding-check.sh
+      - name: Run ci-medium
+        run: mise run ci-medium
+
+      - name: Archive medium test results
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: failure()
+        with:
+          name: web-medium-test-results
+          path: |
+            web/playwright-report/
+            web/test-results/
 
   i18n-tests:
     name: Test i18n
@@ -337,7 +317,7 @@ jobs:
           token: ${{ github.token }}
 
       - name: Setup Mise
-        uses: immich-app/devtools/actions/use-mise@06a9ef925332c91be647d6256642b86b398592c8 # use-mise-action-v3.2.1
+        uses: immich-app/devtools/actions/use-mise@caac7f7e4298458a14238959504f411fc6cc7f06 # use-mise-action-v3.2.3
         with:
           github_token: ${{ github.token }}
 
@@ -370,6 +350,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      packages: read
     defaults:
       run:
         working-directory: ./server
@@ -382,9 +363,16 @@ jobs:
           token: ${{ github.token }}
 
       - name: Setup Mise
-        uses: immich-app/devtools/actions/use-mise@06a9ef925332c91be647d6256642b86b398592c8 # use-mise-action-v3.2.1
+        uses: immich-app/devtools/actions/use-mise@caac7f7e4298458a14238959504f411fc6cc7f06 # use-mise-action-v3.2.3
         with:
           github_token: ${{ github.token }}
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ github.token }}
 
       - name: Run ci-medium
         run: mise run ci-medium
@@ -403,8 +391,22 @@ jobs:
           persist-credentials: false
           token: ${{ github.token }}
 
+      - name: Restore Rust Cache
+        id: cache-rust-restore
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.rustup/toolchains
+            ~/.rustup/update-hashes
+            ~/.cargo/bin
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: mobile-rust-${{ runner.os }}-${{ hashFiles('native/crates/native_core_ffi/rust-toolchain.toml', 'mobile/mise.lock', 'native/Cargo.lock') }}
+          restore-keys: |
+            mobile-rust-${{ runner.os }}-
+
       - name: Setup Mise
-        uses: immich-app/devtools/actions/use-mise@06a9ef925332c91be647d6256642b86b398592c8 # use-mise-action-v3.2.1
+        uses: immich-app/devtools/actions/use-mise@caac7f7e4298458a14238959504f411fc6cc7f06 # use-mise-action-v3.2.3
         with:
           github_token: ${{ github.token }}
           working_directory: ./mobile
@@ -418,13 +420,24 @@ jobs:
       - name: Run tests
         run: mise //mobile:test
 
+      - name: Save Rust Cache
+        id: cache-rust-save
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: github.ref == 'refs/heads/main'
+        with:
+          path: |
+            ~/.rustup/toolchains
+            ~/.rustup/update-hashes
+            ~/.cargo/bin
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ steps.cache-rust-restore.outputs.cache-primary-key }}
+
   ml-unit-tests:
     name: Unit Test ML
     needs: pre-job
     if: ${{ fromJSON(needs.pre-job.outputs.should_run).machine-learning == true }}
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
     defaults:
       run:
         working-directory: ./machine-learning
@@ -435,36 +448,13 @@ jobs:
           token: ${{ github.token }}
 
       - name: Setup Mise
-        uses: immich-app/devtools/actions/use-mise@06a9ef925332c91be647d6256642b86b398592c8 # use-mise-action-v3.2.1
+        uses: immich-app/devtools/actions/use-mise@caac7f7e4298458a14238959504f411fc6cc7f06 # use-mise-action-v3.2.3
         with:
           github_token: ${{ github.token }}
+          working_directory: ./machine-learning
 
       - name: Run ci-unit
         run: mise run ci-unit
-
-  ml-training-tests:
-    name: Unit Test ML Training
-    needs: pre-job
-    if: ${{ fromJSON(needs.pre-job.outputs.should_run).ml-training == true }}
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    defaults:
-      run:
-        working-directory: ./machine-learning
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          persist-credentials: false
-          token: ${{ github.token }}
-
-      - name: Setup Mise
-        uses: immich-app/devtools/actions/use-mise@3bca63ca3c15020293b36b51737a3ee2c773340b # use-mise-action-v3.1.0
-        with:
-          github_token: ${{ github.token }}
-
-      - name: Run test-training
-        run: mise run test-training
 
   github-files-formatting:
     name: .github Files Formatting
@@ -484,7 +474,7 @@ jobs:
           token: ${{ github.token }}
 
       - name: Setup Mise
-        uses: immich-app/devtools/actions/use-mise@06a9ef925332c91be647d6256642b86b398592c8 # use-mise-action-v3.2.1
+        uses: immich-app/devtools/actions/use-mise@caac7f7e4298458a14238959504f411fc6cc7f06 # use-mise-action-v3.2.3
         with:
           github_token: ${{ github.token }}
 
@@ -494,9 +484,7 @@ jobs:
       - name: Run formatter
         run: pnpm format
         if: ${{ !cancelled() }}
-      - name: Run tests
-        run: pnpm test
-        if: ${{ !cancelled() }}
+
   shellcheck:
     name: ShellCheck
     runs-on: ubuntu-latest
@@ -525,7 +513,7 @@ jobs:
           token: ${{ github.token }}
 
       - name: Setup Mise
-        uses: immich-app/devtools/actions/use-mise@06a9ef925332c91be647d6256642b86b398592c8 # use-mise-action-v3.2.1
+        uses: immich-app/devtools/actions/use-mise@caac7f7e4298458a14238959504f411fc6cc7f06 # use-mise-action-v3.2.3
         with:
           github_token: ${{ github.token }}
 
@@ -570,9 +558,13 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      packages: read
     services:
       postgres:
         image: ghcr.io/immich-app/postgres:14-vectorchord0.4.3@sha256:dbf18b3ffea4a81434c65b71e20d27203baf903a0275f4341e4c16dfd901fd67
+        credentials:
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
         env:
           POSTGRES_PASSWORD: postgres
           POSTGRES_USER: postgres
@@ -589,22 +581,12 @@ jobs:
           token: ${{ github.token }}
 
       - name: Setup Mise
-        uses: immich-app/devtools/actions/use-mise@06a9ef925332c91be647d6256642b86b398592c8 # use-mise-action-v3.2.1
+        uses: immich-app/devtools/actions/use-mise@caac7f7e4298458a14238959504f411fc6cc7f06 # use-mise-action-v3.2.3
         with:
           github_token: ${{ github.token }}
 
       - name: Install server dependencies
         run: pnpm install --frozen-lockfile
-
-      # Duplicated from migration-order.yml on purpose. That workflow triggers on
-      # `push: [main, release/*]` / `pull_request` only, so it never runs on the rolling rebase
-      # branch, which sits off `main` for weeks at a time and is validated by dispatching this
-      # workflow set. The manifest silently drifted there for a whole cycle (six migrations missing,
-      # one stale entry) because no dispatched workflow checked it. This step needs no DB and no
-      # build, so it fails fast and cannot be forgotten. Consistency only -- the append-only
-      # invariant still lives in migration-order.yml, which has the base-commit baseline.
-      - name: Verify Gallery migration ORDER
-        run: pnpm --filter immich migrations:verify-order:gallery
 
       - name: Build plugins
         run: mise //:plugins

@@ -1,31 +1,24 @@
 <script lang="ts">
-  import UserPageLayout from '$lib/components/layouts/UserPageLayout.svelte';
-  import ButtonContextMenu from '$lib/components/shared-components/context-menu/ButtonContextMenu.svelte';
-  import EmptyPlaceholder from '$lib/components/shared-components/EmptyPlaceholder.svelte';
-  import ArchiveAction from '$lib/components/timeline/actions/ArchiveAction.svelte';
-  import CreateSharedLink from '$lib/components/timeline/actions/CreateSharedLinkAction.svelte';
-  import DeleteAssets from '$lib/components/timeline/actions/DeleteAssetsAction.svelte';
-  import DownloadAction from '$lib/components/timeline/actions/DownloadAction.svelte';
-  import FavoriteAction from '$lib/components/timeline/actions/FavoriteAction.svelte';
-  import RotateAction from '$lib/components/timeline/actions/RotateAction.svelte';
-  import SelectAllAssets from '$lib/components/timeline/actions/SelectAllAction.svelte';
-  import AssetSelectControlBar from '$lib/components/timeline/AssetSelectControlBar.svelte';
-  import Timeline from '$lib/components/timeline/Timeline.svelte';
-  import TimelineRouteGroupingBar from '$lib/components/timeline/TimelineRouteGroupingBar.svelte';
-  import SearchAddAllToCollectionModal from '$lib/modals/SearchAddAllToCollectionModal.svelte';
-  import { lang } from '$lib/stores/preferences.store';
-  import { AssetAction } from '$lib/constants';
-
-  import SetVisibilityAction from '$lib/components/timeline/actions/SetVisibilityAction.svelte';
-  import { assetMultiSelectManager } from '$lib/managers/asset-multi-select-manager.svelte';
-  import { registerSelectionContext } from '$lib/managers/command-context-manager.svelte';
-  import { TimelineManager } from '$lib/managers/timeline-manager/timeline-manager.svelte';
-  import type { TimelineGrouping, TimelineTemporalAnchor } from '$lib/managers/timeline-manager/types';
-  import { getAssetBulkActions } from '$lib/services/asset.service';
-  import { getTimelineBucketZoomTarget, type ActivatableTimelineBucket } from '$lib/utils/timeline-zoom-navigation';
-  import { getTimelineTopVisibleAnchor } from '$lib/managers/timeline-manager/timeline-anchor';
+  import UserPageLayout from '#lib/components/layouts/UserPageLayout.svelte';
+  import EmptyPlaceholder from '#lib/components/shared-components/EmptyPlaceholder.svelte';
+  import ButtonContextMenu from '#lib/components/shared-components/context-menu/ButtonContextMenu.svelte';
+  import AssetSelectControlBar from '#lib/components/timeline/AssetSelectControlBar.svelte';
+  import Timeline from '#lib/components/timeline/Timeline.svelte';
+  import TimelineRouteGroupingBar from '#lib/components/timeline/TimelineRouteGroupingBar.svelte';
+  import DeleteAssets from '#lib/components/timeline/actions/DeleteAssetsAction.svelte';
+  import DownloadAction from '#lib/components/timeline/actions/DownloadAction.svelte';
+  import FavoriteAction from '#lib/components/timeline/actions/FavoriteAction.svelte';
+  import RotateAction from '#lib/components/timeline/actions/RotateAction.svelte';
+  import SelectAllAssets from '#lib/components/timeline/actions/SelectAllAction.svelte';
+  import SetVisibilityAction from '#lib/components/timeline/actions/SetVisibilityAction.svelte';
+  import { AssetAction } from '#lib/constants.ts';
+  import { timelineGroupingProps } from '#lib/gallery/filtered-timeline/timeline-grouping.svelte.ts';
+  import { assetMultiSelectManager } from '#lib/managers/asset-multi-select-manager.svelte.ts';
+  import { registerSelectionContext } from '#lib/managers/command-context-manager.svelte.ts';
+  import { TimelineManager } from '#lib/managers/timeline-manager/timeline-manager.svelte.ts';
+  import { getAssetBulkActions } from '#lib/services/asset.service.ts';
   import { AssetVisibility } from '@immich/sdk';
-  import { ActionButton, CommandPaletteDefaultProvider, modalManager } from '@immich/ui';
+  import { ActionButton, CommandPaletteDefaultProvider } from '@immich/ui';
   import { mdiDotsVertical } from '@mdi/js';
   import { t } from 'svelte-i18n';
   import type { PageData } from './$types';
@@ -36,25 +29,10 @@
 
   let { data }: Props = $props();
   let timelineManager = $state<TimelineManager>() as TimelineManager;
-
-  const handleAddAllToCollection = () => {
-    void modalManager.show(SearchAddAllToCollectionModal, {
-      terms: { visibility: AssetVisibility.Archive },
-      total: timelineManager?.assetCount ?? 0,
-      smartSearchEnabled: false,
-      language: $lang,
-    });
-  };
-  let timelineGrouping = $state<TimelineGrouping>('day');
-  let temporalAnchor = $state<TimelineTemporalAnchor | undefined>();
-  const baseTimelineOptions = { visibility: AssetVisibility.Archive };
-  const options = $derived({
-    ...baseTimelineOptions,
-    grouping: timelineGrouping,
+  const timelineGrouping = timelineGroupingProps(() => timelineManager, {
+    addAllTerms: { visibility: AssetVisibility.Archive },
   });
-  const hideGroupingControls = $derived(
-    assetMultiSelectManager.selectionActive || (timelineManager?.isInitialized && timelineManager.assetCount === 0),
-  );
+  const options = $derived({ visibility: AssetVisibility.Archive, grouping: timelineGrouping.grouping });
 
   const handleEscape = () => {
     if (!assetMultiSelectManager.selectionActive) {
@@ -70,26 +48,6 @@
     assetMultiSelectManager.clear();
   };
 
-  function handleTimelineGroupingChange(grouping: TimelineGrouping) {
-    const anchor = getTimelineTopVisibleAnchor(timelineManager);
-    timelineGrouping = grouping;
-    temporalAnchor = anchor;
-  }
-
-  function handleTimelineBucketActivate(bucket: ActivatableTimelineBucket) {
-    if (assetMultiSelectManager.selectionActive) {
-      return;
-    }
-
-    const result = getTimelineBucketZoomTarget(bucket);
-    if (!result) {
-      return;
-    }
-
-    timelineGrouping = result.grouping;
-    temporalAnchor = result.anchor;
-  }
-
   registerSelectionContext({
     getAssets: () => assetMultiSelectManager.assets,
     clearSelection: () => assetMultiSelectManager.clear(),
@@ -103,13 +61,7 @@
 </script>
 
 <UserPageLayout hideNavbar={assetMultiSelectManager.selectionActive} title={data.meta.title} scrollbar={false}>
-  <TimelineRouteGroupingBar
-    grouping={timelineGrouping}
-    hidden={hideGroupingControls}
-    resultCount={timelineManager?.assetCount ?? 0}
-    onGroupingChange={handleTimelineGroupingChange}
-    onAddAllToCollection={handleAddAllToCollection}
-  />
+  <TimelineRouteGroupingBar {...timelineGrouping.barProps} />
   <Timeline
     enableRouting={true}
     bind:timelineManager
@@ -117,11 +69,7 @@
     assetInteraction={assetMultiSelectManager}
     removeAction={AssetAction.UNARCHIVE}
     onEscape={handleEscape}
-    {temporalAnchor}
-    onTimelineBucketActivate={handleTimelineBucketActivate}
-    onTemporalAnchorResolved={() => (temporalAnchor = undefined)}
-    grouping={timelineGrouping}
-    onGroupingChange={handleTimelineGroupingChange}
+    {...timelineGrouping.timelineProps}
   >
     {#snippet empty()}
       <EmptyPlaceholder text={$t('no_archived_assets_message')} class="mx-auto mt-10" />
@@ -131,13 +79,10 @@
 
 {#if assetMultiSelectManager.selectionActive}
   <AssetSelectControlBar>
-    {@const Actions = getAssetBulkActions($t)}
+    {const Actions = $derived(getAssetBulkActions($t))}
     <CommandPaletteDefaultProvider name={$t('assets')} actions={Object.values(Actions)} />
-    <ArchiveAction
-      unarchive
-      onArchive={(ids, visibility) => timelineManager.update(ids, (asset) => (asset.visibility = visibility))}
-    />
-    <CreateSharedLink />
+    <ActionButton action={Actions.Unarchive} />
+    <ActionButton action={Actions.CreateSharedLink} />
     <SelectAllAssets {timelineManager} assetInteraction={assetMultiSelectManager} />
     <ActionButton action={Actions.AddToAlbum} />
     <FavoriteAction

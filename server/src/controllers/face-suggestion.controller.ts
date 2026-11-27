@@ -1,7 +1,7 @@
 import { Controller, Get, HttpCode, HttpStatus, Param, Post, Query } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
-import type { AuthDto } from 'src/dtos/auth.dto.js';
 import { Endpoint, HistoryBuilder } from 'src/decorators.js';
+import type { AuthDto } from 'src/dtos/auth.dto.js';
 import {
   FaceSuggestionActionResponseDto,
   PersonFaceSuggestionPageQueryDto,
@@ -14,18 +14,18 @@ import { FaceSuggestionService } from 'src/services/face-suggestion.service.js';
 import { UUIDParamDto } from 'src/validation.js';
 
 /**
- * Slice 13 (fork isolation): the five `/people/:id/face-suggestions...` routes, extracted out of
- * `person.controller.ts` alongside their service (`face-suggestion.service.ts`). Every route path,
- * `@Authenticated` decorator and `HistoryBuilder` lifecycle is unchanged from before the move — the
- * OpenAPI output is byte-identical (verified by the zero-diff gate in the slice 13 commit).
- */
+Slice 13 (fork isolation): the five `/people/:id/face-suggestions...` routes, extracted out of
+`person.controller.ts` alongside their service (`face-suggestion.service.ts`). Every route path,
+`@Authenticated` decorator and `HistoryBuilder` lifecycle is unchanged from before the move — the
+OpenAPI output is byte-identical (verified by the zero-diff gate in the slice 13 commit).
+*/
 @ApiTags(ApiTag.People)
 @Controller('people')
 export class FaceSuggestionController {
   constructor(private service: FaceSuggestionService) {}
 
   // F21: publishes the permission getFaceSuggestions actually enforces. Deliberately PersonUpdate, not
-  // PersonRead — PersonRead also resolves via access.person.checkSharedSpaceAccess (see
+  // PersonRead — PersonRead also resolves via access.galleryPerson.checkSharedSpaceAccess (see
   // src/utils/access.ts), which would let a space member read the owner's whole-library pending review
   // queue (D6, see the comment on getFaceSuggestions in face-suggestion.service.ts). Do not relax this
   // back to PersonRead to "match" a shared-space caller; the service enforcement is the source of truth

@@ -1,38 +1,60 @@
+import { websocketMock } from '#lib/gallery/__mocks__/websocket.mock.ts';
+import { imageAdjustManager } from '#lib/gallery/edit/image-adjust-manager.svelte.ts';
+import { authManager } from '#lib/managers/auth-manager.svelte.ts';
+import { EditManager, EditToolType, generateIdempotencyKey } from '#lib/managers/edit/edit-manager.svelte.ts';
+import { eventManager } from '#lib/managers/event-manager.svelte.ts';
+import { getFormatter } from '#lib/utils/i18n.ts';
+import { factory } from '#test/unit/factories.ts';
 import {
   AssetEditAction,
+  AssetEditSaveFormat,
   AssetEditSaveMode,
   AssetEditSaveStatus,
   AssetTypeEnum,
   editAsset,
+  getAssetAdjust,
+  getAssetEditSave,
+  getAssetEditSaveCapabilities,
+  getAssetEdits,
   getAssetInfo,
   removeAssetEdits,
-  getAssetEditSaveCapabilities,
-  getAssetEditSave,
   saveAssetEdits,
 } from '@immich/sdk';
 import { toastManager } from '@immich/ui';
 import type { MessageFormatter } from 'svelte-i18n';
-import { EditManager, generateIdempotencyKey } from '$lib/managers/edit/edit-manager.svelte';
-import { eventManager } from '$lib/managers/event-manager.svelte';
-import { getFormatter } from '$lib/utils/i18n';
-import { assetFactory } from '@test-data/factories/asset-factory';
-import { websocketMock } from '@test-data/mocks/websocket.mock';
 
-vi.mock('@immich/sdk');
-vi.mock('$lib/stores/websocket');
-vi.mock('$lib/utils/i18n', () => ({
+// Browser mode cannot automock `@immich/sdk` (its build uses `export *`): replace each function with a mock.
+vi.mock('@immich/sdk', async (importOriginal) => {
+  const module = await importOriginal<typeof import('@immich/sdk')>();
+  const mocks = Object.fromEntries(
+    Object.entries(module)
+      .filter(([, value]) => typeof value === 'function')
+      .map(([key]) => [key, vi.fn()]),
+  );
+  return { ...module, ...mocks };
+});
+vi.mock(import('#lib/stores/websocket.ts'), async (importOriginal) => {
+  const module = await importOriginal();
+  return Object.fromEntries(
+    Object.entries(module).map(([key, value]) => [key, typeof value === 'function' ? vi.fn() : value]),
+  ) as unknown as typeof module;
+});
+vi.mock('#lib/utils/i18n.ts', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('#lib/utils/i18n.ts')>()),
   getFormatter: vi.fn(),
   getPreferredLocale: vi.fn(),
 }));
-vi.mock('@immich/ui', () => ({
+// Browser mode rejects an import of a name the mock does not export, so keep the module's other exports.
+vi.mock('@immich/ui', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@immich/ui')>()),
   toastManager: { success: vi.fn(), danger: vi.fn(), primary: vi.fn() },
   modalManager: { show: vi.fn() },
   ConfirmModal: {},
 }));
-vi.mock('$lib/managers/event-manager.svelte', () => ({
+vi.mock('#lib/managers/event-manager.svelte.ts', () => ({
   eventManager: { emit: vi.fn(), on: vi.fn() },
 }));
-vi.mock('$lib/managers/edit/transform-manager.svelte', () => ({
+vi.mock('#lib/managers/edit/transform-manager.svelte.ts', () => ({
   transformManager: {
     onActivate: vi.fn(),
     onDeactivate: vi.fn(),
@@ -42,10 +64,10 @@ vi.mock('$lib/managers/edit/transform-manager.svelte', () => ({
     edits: [],
   },
 }));
-vi.mock('$lib/components/asset-viewer/editor/transform-tool/transform-tool.svelte', () => ({
+vi.mock('#lib/components/asset-viewer/editor/transform-tool/TransformTool.svelte', () => ({
   default: {},
 }));
-vi.mock('$lib/managers/edit/trim-manager.svelte', () => ({
+vi.mock('#lib/managers/edit/trim-manager.svelte.ts', () => ({
   trimManager: {
     onActivate: vi.fn(),
     onDeactivate: vi.fn(),
@@ -55,7 +77,7 @@ vi.mock('$lib/managers/edit/trim-manager.svelte', () => ({
     edits: [],
   },
 }));
-vi.mock('$lib/components/asset-viewer/editor/trim-tool/trim-tool.svelte', () => ({
+vi.mock('#lib/components/asset-viewer/editor/trim-tool/trim-tool.svelte', () => ({
   default: {},
 }));
 
@@ -66,9 +88,128 @@ describe('EditManager', () => {
     vi.resetAllMocks();
     vi.mocked(getFormatter).mockResolvedValue(((key: string) => key) as MessageFormatter);
     websocketMock.waitForWebsocketEvent.mockResolvedValue(undefined as never);
+    imageAdjustManager.reset();
+    vi.mocked(getAssetAdjust).mockResolvedValue({ exposure: 0, contrast: 0, saturation: 0, invert: false });
+    vi.mocked(getAssetEdits).mockResolvedValue({ assetId: 'source-id', edits: [] });
+    authManager.setUser(factory.user());
     editManager = new EditManager();
   });
 
+  describe('applyEdits', () => {
+    it('should return false if no current asset', async () => {
+      const result = await editManager.applyEdits();
+      expect(result).toBe(false);
+    });
+
+    it('should call editAsset and emit AssetUpdate on success', async () => {
+      const asset = factory.asset({ type: AssetTypeEnum.Video });
+      const refreshedAsset = factory.asset({ id: asset.id, thumbhash: 'new-thumbhash' });
+      vi.mocked(editAsset).mockResolvedValue(undefined as never);
+      vi.mocked(getAssetInfo).mockResolvedValue(refreshedAsset);
+
+      editManager.currentAsset = asset;
+      const result = await editManager.applyEdits();
+
+      expect(result).toBe(true);
+      expect(getAssetInfo).toHaveBeenCalledWith({ id: asset.id, spaceId: undefined });
+      expect(eventManager.emit).toHaveBeenCalledWith('AssetUpdate', refreshedAsset);
+      expect(eventManager.emit).toHaveBeenCalledWith('AssetEditsApplied', asset.id);
+      expect(toastManager.primary).toHaveBeenCalled();
+    });
+
+    it('should emit AssetUpdate before AssetEditsApplied', async () => {
+      const asset = factory.asset({ type: AssetTypeEnum.Video });
+      const refreshedAsset = factory.asset({ id: asset.id });
+      vi.mocked(editAsset).mockResolvedValue(undefined as never);
+      vi.mocked(getAssetInfo).mockResolvedValue(refreshedAsset);
+
+      const emitCalls: string[] = [];
+      vi.mocked(eventManager.emit).mockImplementation(((event: string) => {
+        emitCalls.push(event);
+      }) as typeof eventManager.emit);
+
+      editManager.currentAsset = asset;
+      await editManager.applyEdits();
+
+      expect(emitCalls).toEqual(['AssetUpdate', 'AssetEditsApplied']);
+    });
+
+    it('should call removeAssetEdits when edits are empty', async () => {
+      const asset = factory.asset({ type: AssetTypeEnum.Video });
+      const refreshedAsset = factory.asset({ id: asset.id });
+      vi.mocked(removeAssetEdits).mockResolvedValue(undefined as never);
+      vi.mocked(getAssetInfo).mockResolvedValue(refreshedAsset);
+
+      editManager.currentAsset = asset;
+      // tools have empty edits by default from the mock
+      const result = await editManager.applyEdits();
+
+      expect(result).toBe(true);
+      expect(removeAssetEdits).toHaveBeenCalledWith({ id: asset.id });
+      expect(editAsset).not.toHaveBeenCalled();
+    });
+
+    it('should save through the selected tool when it saves itself, and skip the edits endpoints', async () => {
+      const asset = factory.asset({ type: AssetTypeEnum.Video });
+      vi.mocked(getAssetInfo).mockResolvedValue(factory.asset({ id: asset.id }));
+      const save = vi.fn().mockResolvedValue(undefined);
+      editManager.selectedTool = {
+        type: EditToolType.Trim,
+        icon: '',
+        component: {} as never,
+        manager: { ...editManager.tools[1].manager, edits: [], save },
+      };
+
+      editManager.currentAsset = asset;
+      const result = await editManager.applyEdits();
+
+      expect(result).toBe(true);
+      expect(save).toHaveBeenCalledWith(asset.id);
+      expect(editAsset).not.toHaveBeenCalled();
+      expect(removeAssetEdits).not.toHaveBeenCalled();
+    });
+
+    it('should return false and show error toast on failure', async () => {
+      const asset = factory.asset({ type: AssetTypeEnum.Video });
+      vi.mocked(removeAssetEdits).mockRejectedValue(new Error('fail'));
+
+      editManager.currentAsset = asset;
+      const result = await editManager.applyEdits();
+
+      expect(result).toBe(false);
+      expect(toastManager.danger).toHaveBeenCalled();
+      expect(eventManager.emit).not.toHaveBeenCalled();
+    });
+
+    it('should set hasAppliedEdits to true on success', async () => {
+      const asset = factory.asset({ type: AssetTypeEnum.Video });
+      const refreshedAsset = factory.asset({ id: asset.id });
+      vi.mocked(editAsset).mockResolvedValue(undefined as never);
+      vi.mocked(getAssetInfo).mockResolvedValue(refreshedAsset);
+
+      editManager.currentAsset = asset;
+      expect(editManager.hasAppliedEdits).toBe(false);
+
+      await editManager.applyEdits();
+      expect(editManager.hasAppliedEdits).toBe(true);
+    });
+
+    it('should set isApplyingEdits during the operation', async () => {
+      const asset = factory.asset({ type: AssetTypeEnum.Video });
+      const refreshedAsset = factory.asset({ id: asset.id });
+      vi.mocked(editAsset).mockResolvedValue(undefined as never);
+      vi.mocked(getAssetInfo).mockResolvedValue(refreshedAsset);
+
+      editManager.currentAsset = asset;
+      expect(editManager.isApplyingEdits).toBe(false);
+
+      const promise = editManager.applyEdits();
+      expect(editManager.isApplyingEdits).toBe(true);
+
+      await promise;
+      expect(editManager.isApplyingEdits).toBe(false);
+    });
+  });
   afterEach(() => {
     vi.unstubAllGlobals();
   });
@@ -95,102 +236,6 @@ describe('EditManager', () => {
     });
   });
 
-  describe('applyEdits', () => {
-    it('should return false if no current asset', async () => {
-      const result = await editManager.applyEdits();
-      expect(result).toBe(false);
-    });
-
-    it('should call editAsset and emit AssetUpdate on success', async () => {
-      const asset = assetFactory.build();
-      const refreshedAsset = assetFactory.build({ id: asset.id, thumbhash: 'new-thumbhash' });
-      vi.mocked(editAsset).mockResolvedValue(undefined as never);
-      vi.mocked(getAssetInfo).mockResolvedValue(refreshedAsset);
-
-      editManager.currentAsset = asset;
-      const result = await editManager.applyEdits();
-
-      expect(result).toBe(true);
-      expect(getAssetInfo).toHaveBeenCalledWith({ id: asset.id });
-      expect(eventManager.emit).toHaveBeenCalledWith('AssetUpdate', refreshedAsset);
-      expect(eventManager.emit).toHaveBeenCalledWith('AssetEditsApplied', asset.id);
-      expect(toastManager.primary).toHaveBeenCalled();
-    });
-
-    it('should emit AssetUpdate before AssetEditsApplied', async () => {
-      const asset = assetFactory.build();
-      const refreshedAsset = assetFactory.build({ id: asset.id });
-      vi.mocked(editAsset).mockResolvedValue(undefined as never);
-      vi.mocked(getAssetInfo).mockResolvedValue(refreshedAsset);
-
-      const emitCalls: string[] = [];
-      vi.mocked(eventManager.emit).mockImplementation(((event: string) => {
-        emitCalls.push(event);
-      }) as typeof eventManager.emit);
-
-      editManager.currentAsset = asset;
-      await editManager.applyEdits();
-
-      expect(emitCalls).toEqual(['AssetUpdate', 'AssetEditsApplied']);
-    });
-
-    it('should call removeAssetEdits when edits are empty', async () => {
-      const asset = assetFactory.build();
-      const refreshedAsset = assetFactory.build({ id: asset.id });
-      vi.mocked(removeAssetEdits).mockResolvedValue(undefined as never);
-      vi.mocked(getAssetInfo).mockResolvedValue(refreshedAsset);
-
-      editManager.currentAsset = asset;
-      // tools have empty edits by default from the mock
-      const result = await editManager.applyEdits();
-
-      expect(result).toBe(true);
-      expect(removeAssetEdits).toHaveBeenCalledWith({ id: asset.id });
-      expect(editAsset).not.toHaveBeenCalled();
-    });
-
-    it('should return false and show error toast on failure', async () => {
-      const asset = assetFactory.build();
-      vi.mocked(removeAssetEdits).mockRejectedValue(new Error('fail'));
-
-      editManager.currentAsset = asset;
-      const result = await editManager.applyEdits();
-
-      expect(result).toBe(false);
-      expect(toastManager.danger).toHaveBeenCalled();
-      expect(eventManager.emit).not.toHaveBeenCalled();
-    });
-
-    it('should set hasAppliedEdits to true on success', async () => {
-      const asset = assetFactory.build();
-      const refreshedAsset = assetFactory.build({ id: asset.id });
-      vi.mocked(editAsset).mockResolvedValue(undefined as never);
-      vi.mocked(getAssetInfo).mockResolvedValue(refreshedAsset);
-
-      editManager.currentAsset = asset;
-      expect(editManager.hasAppliedEdits).toBe(false);
-
-      await editManager.applyEdits();
-      expect(editManager.hasAppliedEdits).toBe(true);
-    });
-
-    it('should set isApplyingEdits during the operation', async () => {
-      const asset = assetFactory.build();
-      const refreshedAsset = assetFactory.build({ id: asset.id });
-      vi.mocked(editAsset).mockResolvedValue(undefined as never);
-      vi.mocked(getAssetInfo).mockResolvedValue(refreshedAsset);
-
-      editManager.currentAsset = asset;
-      expect(editManager.isApplyingEdits).toBe(false);
-
-      const promise = editManager.applyEdits();
-      expect(editManager.isApplyingEdits).toBe(true);
-
-      await promise;
-      expect(editManager.isApplyingEdits).toBe(false);
-    });
-  });
-
   describe('saveImageEdits', () => {
     const operation = (
       status: AssetEditSaveStatus,
@@ -205,12 +250,13 @@ describe('EditManager', () => {
       error,
     });
     beforeEach(() => {
-      editManager.currentAsset = assetFactory.build({ id: 'source-id' });
+      editManager.currentAsset = factory.asset({ id: 'source-id', canEdit: true });
+      editManager.selectedTool = editManager.tools[0];
       vi.mocked(getAssetEditSaveCapabilities).mockResolvedValue({
         canCopy: true,
         canOverwrite: true,
         overwriteUnavailableReason: null,
-        outputFormat: 'png',
+        outputFormat: AssetEditSaveFormat.Png,
       });
       vi.mocked(saveAssetEdits).mockResolvedValue(operation(AssetEditSaveStatus.Queued));
     });
@@ -220,7 +266,7 @@ describe('EditManager', () => {
         canCopy: true,
         canOverwrite: false,
         overwriteUnavailableReason: 'not_writable',
-        outputFormat: 'jpeg',
+        outputFormat: AssetEditSaveFormat.Jpeg,
       });
       expect(await editManager.saveImageEdits(AssetEditSaveMode.Overwrite)).toBe(false);
       expect(saveAssetEdits).not.toHaveBeenCalled();
@@ -229,7 +275,7 @@ describe('EditManager', () => {
     });
 
     it('opens the independent result and publishes its update after a copy completes', async () => {
-      const result = assetFactory.build({ id: 'copy-id' });
+      const result = factory.asset({ id: 'copy-id' });
       vi.mocked(getAssetEditSave).mockResolvedValue(operation(AssetEditSaveStatus.Completed, result.id));
       vi.mocked(getAssetInfo).mockResolvedValue(result);
       expect(await editManager.saveImageEdits(AssetEditSaveMode.Copy)).toBe(true);
@@ -263,9 +309,9 @@ describe('EditManager', () => {
         canCopy: true,
         canOverwrite: false,
         overwriteUnavailableReason: 'not_writable',
-        outputFormat: 'jpeg',
+        outputFormat: AssetEditSaveFormat.Jpeg,
       });
-      const result = assetFactory.build({ id: 'copy-id' });
+      const result = factory.asset({ id: 'copy-id' });
       vi.mocked(getAssetEditSave).mockResolvedValue(operation(AssetEditSaveStatus.Completed, result.id));
       vi.mocked(getAssetInfo).mockResolvedValue(result);
       expect(await editManager.saveImageEdits()).toBe(true);
@@ -284,8 +330,8 @@ describe('EditManager', () => {
       expect(await editManager.saveImageEdits()).toBe(false);
       const first = vi.mocked(saveAssetEdits).mock.calls[0][0];
       vi.mocked(getAssetEditSave).mockResolvedValue(operation(AssetEditSaveStatus.Completed, 'source-id'));
-      vi.mocked(getAssetInfo).mockResolvedValue(assetFactory.build({ id: 'source-id' }));
-      expect(await editManager.saveImageEdits()).toBe(true);
+      vi.mocked(getAssetInfo).mockResolvedValue(factory.asset({ id: 'source-id' }));
+      expect(await editManager.saveImageEdits(AssetEditSaveMode.Copy)).toBe(true);
       expect(vi.mocked(saveAssetEdits).mock.calls[1][0]).toEqual(first);
     });
 
@@ -293,7 +339,7 @@ describe('EditManager', () => {
       vi.mocked(getAssetEditSave)
         .mockRejectedValueOnce(new Error('connection lost'))
         .mockResolvedValueOnce(operation(AssetEditSaveStatus.Completed, 'source-id'));
-      vi.mocked(getAssetInfo).mockResolvedValue(assetFactory.build({ id: 'source-id' }));
+      vi.mocked(getAssetInfo).mockResolvedValue(factory.asset({ id: 'source-id' }));
       expect(await editManager.saveImageEdits()).toBe(false);
       expect(editManager.pendingSave?.operationId).toBe('operation-id');
       expect(await editManager.saveImageEdits()).toBe(true);
@@ -303,6 +349,7 @@ describe('EditManager', () => {
     it.each([AssetEditSaveStatus.Failed, AssetEditSaveStatus.Conflict])(
       'keeps edits after a %s save',
       async (status) => {
+        vi.mocked(getAssetInfo).mockResolvedValue(factory.asset({ id: 'source-id' }));
         vi.mocked(getAssetEditSave).mockResolvedValue(operation(status, null, 'source_changed'));
         expect(await editManager.saveImageEdits()).toBe(false);
         expect(editManager.hasAppliedEdits).toBe(false);
@@ -321,8 +368,8 @@ describe('EditManager', () => {
     });
 
     it('saves a mobile viewer crop directly as an overwrite', async () => {
-      const asset = assetFactory.build({ id: 'source-id', type: AssetTypeEnum.Image });
-      const refreshed = assetFactory.build({ id: 'source-id', type: AssetTypeEnum.Image });
+      const asset = factory.asset({ id: 'source-id', type: AssetTypeEnum.Image, canEdit: true });
+      const refreshed = factory.asset({ id: 'source-id', type: AssetTypeEnum.Image, canEdit: true });
       const crop = { x: 120, y: 80, width: 640, height: 480 };
       vi.mocked(getAssetEditSave).mockResolvedValue(operation(AssetEditSaveStatus.Completed, asset.id));
       vi.mocked(getAssetInfo).mockResolvedValue(refreshed);
@@ -336,6 +383,43 @@ describe('EditManager', () => {
         }),
       });
       expect(editManager.currentAsset).toBeNull();
+    });
+    it('saves the full Adjust with crop/rotation via the official selected tool hook', async () => {
+      const edits = [
+        { action: AssetEditAction.Rotate, parameters: { angle: 90 } },
+        { action: AssetEditAction.Crop, parameters: { x: 20, y: 30, width: 400, height: 300 } },
+      ] as never;
+      imageAdjustManager.exposure = 20;
+      imageAdjustManager.contrast = -5;
+      imageAdjustManager.saturation = 30;
+      imageAdjustManager.invert = true;
+      vi.mocked(getAssetEditSave).mockResolvedValue(operation(AssetEditSaveStatus.Completed, 'source-id'));
+      vi.mocked(getAssetInfo).mockResolvedValue(editManager.currentAsset!);
+      expect(await editManager.saveImageEdits(AssetEditSaveMode.Overwrite, edits)).toBe(true);
+      expect(saveAssetEdits).toHaveBeenCalledWith(
+        expect.objectContaining({
+          assetEditSaveCreateDto: expect.objectContaining({
+            edits,
+            adjust: { exposure: 20, contrast: -5, saturation: 30, invert: true },
+          }),
+        }),
+      );
+      expect(imageAdjustManager.current).toEqual({ exposure: 0, contrast: 0, saturation: 0, invert: false });
+      expect(editAsset).not.toHaveBeenCalled();
+    });
+
+    it('never guesses writable capability when the capability read fails', async () => {
+      vi.mocked(getAssetEditSaveCapabilities).mockRejectedValue(new Error('offline'));
+      expect(await editManager.saveImageEdits()).toBe(false);
+      expect(saveAssetEdits).not.toHaveBeenCalled();
+      expect(editManager.pendingRequest).toBeNull();
+    });
+
+    it('does not reset changes while an operation still needs recovery', async () => {
+      const reset = vi.spyOn(editManager.tools[0].manager, 'resetAllChanges');
+      editManager.pendingSave = { assetId: 'source-id', operationId: 'operation-id' };
+      await editManager.resetAllChanges();
+      expect(reset).not.toHaveBeenCalled();
     });
   });
 });

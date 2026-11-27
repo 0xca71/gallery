@@ -1,7 +1,7 @@
 import { Matrix, applyToPoint, compose, flipX, flipY, identity, rotate, scale, translate } from 'transformation-matrix';
-import type { ImageDimensions } from 'src/types.js';
 import { AssetEditAction, AssetEditActionItem } from 'src/dtos/editing.dto.js';
 import { AssetOcrResponseDto } from 'src/dtos/ocr.dto.js';
+import type { ImageDimensions } from 'src/types.js';
 
 export const isOrthogonalRotation = (angleDegrees: number): boolean => {
   const remainder = ((angleDegrees % 90) + 90) % 90;
@@ -118,9 +118,9 @@ type TransformState = {
 };
 
 /**
- * Transforms an array of points through a series of edit operations (crop, rotate, mirror).
- * Points should be in absolute pixel coordinates relative to the starting dimensions.
- */
+Transforms an array of points through a series of edit operations (crop, rotate, mirror).
+Points should be in absolute pixel coordinates relative to the starting dimensions.
+*/
 export const transformPoints = (
   points: Point[],
   edits: AssetEditActionItem[],

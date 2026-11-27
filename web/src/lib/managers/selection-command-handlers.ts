@@ -1,17 +1,23 @@
-import { AssetVisibility, deleteAssets as deleteBulk, restoreAssets, updateAssets } from '@immich/sdk';
+import { MAX_SPACE_ASSETS_PER_REQUEST } from '#lib/constants.ts';
+import { animateRemoval } from '#lib/gallery/motion/index.ts';
+import type { CommandContext, SelectionCommandContext } from '#lib/managers/command-context-manager.svelte.ts';
+import { featureFlagsManager } from '#lib/managers/feature-flags-manager.svelte.ts';
+import type { TimelineAsset } from '#lib/managers/timeline-manager/types.ts';
+import AssetAddToCollectionModal from '#lib/modals/AssetAddToCollectionModal.svelte';
+import AssetDeleteConfirmModal from '#lib/modals/AssetDeleteConfirmModal.svelte';
+import { showDeleteModal } from '#lib/stores/preferences.store.ts';
+import type { OnUndoDelete } from '#lib/utils/actions.ts';
+import { handleError } from '#lib/utils/handle-error.ts';
+import {
+  AssetVisibility,
+  deleteAssets as deleteBulk,
+  restoreAssets,
+  updateAssetFavorites,
+  updateAssets,
+} from '@immich/sdk';
 import { modalManager, toastManager } from '@immich/ui';
 import { t } from 'svelte-i18n';
 import { get } from 'svelte/store';
-import { MAX_SPACE_ASSETS_PER_REQUEST } from '$lib/constants';
-import type { CommandContext, SelectionCommandContext } from '$lib/managers/command-context-manager.svelte';
-import { featureFlagsManager } from '$lib/managers/feature-flags-manager.svelte';
-import type { TimelineAsset } from '$lib/managers/timeline-manager/types';
-import AssetAddToCollectionModal from '$lib/modals/AssetAddToCollectionModal.svelte';
-import AssetDeleteConfirmModal from '$lib/modals/AssetDeleteConfirmModal.svelte';
-import { showDeleteModal } from '$lib/stores/preferences.store';
-import type { OnUndoDelete } from '$lib/utils/actions';
-import { getDeleteToastOptions, getDeleteToastThreshold } from '$lib/utils/delete-toast';
-import { handleError } from '$lib/utils/handle-error';
 
 const getSelection = (ctx?: CommandContext): SelectionCommandContext | null => ctx?.selection ?? null;
 
@@ -38,9 +44,7 @@ export const canAddSelectedToSpace = (ctx: CommandContext) => {
 
 export const canFavoriteSelected = (ctx: CommandContext) => {
   const selection = getSelection(ctx);
-  return (
-    selection !== null && selection.isAllUserOwned && selection.onFavorite !== undefined && !selection.isAllFavorite
-  );
+  return selection !== null && selection.onFavorite !== undefined && !selection.isAllFavorite;
 };
 
 export const canArchiveSelected = (ctx: CommandContext) => {
@@ -60,15 +64,9 @@ export function handleAddSelectedToAlbum(ctx?: CommandContext) {
   if (!selection?.canAddToAlbum) {
     return;
   }
-  // #889: mirrors SelectionToolbar's `addToAlbumRestrictedToSpace`. Assets the caller does not own
-  // only reach an album as #764 contributions, which the server accepts solely for albums linked
-  // to a space where the caller is Owner/Editor — so the picker must offer nothing else.
-  const space = ctx?.space;
-  const restrictToSpaceId = !selection.isAllUserOwned && space?.canWrite ? space.id : undefined;
-  return modalManager.show(AssetAddToCollectionModal, {
-    assetIds: selection.selectedAssetIds,
-    restrictToSpaceId,
-  });
+  // #1119: the same picker as the timeline. It asks the server which albums accept the selection, so
+  // assets the caller does not own still only reach the space-linked albums that can take them (#764).
+  return modalManager.show(AssetAddToCollectionModal, { assetIds: selection.selectedAssetIds });
 }
 
 export function handleAddSelectedToSpace(ctx?: CommandContext) {
@@ -88,11 +86,12 @@ export async function handleAddSelectedToCurrentSpace(ctx?: CommandContext) {
 
 export async function handleFavoriteSelected(ctx?: CommandContext) {
   const selection = getSelection(ctx);
-  if (!selection || !selection.isAllUserOwned || !selection.onFavorite) {
+  if (!selection || !selection.onFavorite) {
     return;
   }
 
-  const assets = selection.ownedAssets.filter((asset) => !asset.isFavorite);
+  // #763: favorites are per-user — the whole selection is favoritable, not just owned assets.
+  const assets = selection.assets.filter((asset) => !asset.isFavorite);
   const ids = assets.map((asset) => asset.id);
   if (ids.length === 0) {
     return;
@@ -100,7 +99,7 @@ export async function handleFavoriteSelected(ctx?: CommandContext) {
 
   const $t = get(t);
   try {
-    await updateAssets({ assetBulkUpdateDto: { ids, isFavorite: true } });
+    await updateAssetFavorites({ assetFavoriteUpdateDto: { ids, isFavorite: true } });
     for (const asset of assets) {
       asset.isFavorite = true;
     }
@@ -128,6 +127,7 @@ export async function handleArchiveSelected(ctx?: CommandContext) {
   const $t = get(t);
   try {
     await updateAssets({ assetBulkUpdateDto: { ids, visibility } });
+    animateRemoval(ids, 'archive');
     selection.onArchive(ids, visibility);
     toastManager.primary($t('archived_count', { values: { count: ids.length } }));
     selection.clearSelection();
@@ -160,6 +160,7 @@ export async function handleDeleteSelected(ctx?: CommandContext) {
   const $t = get(t);
   try {
     await deleteBulk({ assetBulkDeleteDto: { ids, force } });
+    animateRemoval(ids, force ? 'delete' : 'trash');
     selection.onDelete(ids);
     toastManager.primary(
       {
@@ -174,7 +175,7 @@ export async function handleDeleteSelected(ctx?: CommandContext) {
             }
           : undefined,
       },
-      getDeleteToastOptions(ids.length, getDeleteToastThreshold()),
+      { timeout: 5000 },
     );
     selection.clearSelection();
     return true;

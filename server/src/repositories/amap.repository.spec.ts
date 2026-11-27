@@ -1,8 +1,8 @@
 import type { Kysely } from 'kysely';
+import { AmapRepository } from 'src/repositories/amap.repository.js';
 import type { ConfigRepository } from 'src/repositories/config.repository.js';
 import type { LoggingRepository } from 'src/repositories/logging.repository.js';
 import type { DB } from 'src/schema/index.js';
-import { AmapRepository } from 'src/repositories/amap.repository.js';
 
 const { redis } = vi.hoisted(() => ({
   redis: { get: vi.fn(), set: vi.fn(), exists: vi.fn(), eval: vi.fn(), on: vi.fn(), disconnect: vi.fn() },
@@ -90,6 +90,38 @@ describe('AmapRepository', () => {
     expect(await sut.ensureAddress('asset-1', 'detail')).toBeNull();
     expect(db.selectFrom).not.toHaveBeenCalled();
     expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['GALLERY_AMAP_ON_DEMAND_ENABLED', 'detail'],
+    ['GALLERY_AMAP_METADATA_ENABLED', 'metadata'],
+  ] as const)('honors %s independently', async (flag, source) => {
+    vi.stubEnv(flag, 'false');
+    const { sut, db } = setup();
+    expect(await sut.ensureAddress('asset-1', source)).toBeNull();
+    expect(db.selectFrom).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { latitude: null },
+    { longitude: null },
+    { latitude: NaN },
+    { latitude: 0, longitude: 0 },
+    { latitude: 22.3, longitude: 114.2 },
+  ])('does not resolve invalid or uncertain GPS %j', async (point) => {
+    expect(await setup({ ...stored, ...point }).sut.ensureAddress('asset-1', 'detail')).toBeNull();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('uses cached coordinates without spending another request', async () => {
+    redis.get.mockResolvedValue('cached address');
+    const { sut } = setup();
+    expect(await sut.ensureAddress('asset-1', 'detail')).toBe('中国湖北省武汉市硚口区长丰街道');
+    expect(fetch).not.toHaveBeenCalled();
+    expect(redis.eval).not.toHaveBeenCalled();
+    sut.onModuleDestroy();
+    expect(redis.disconnect).toHaveBeenCalled();
   });
 
   it('reuses stored addresses and excludes overseas coordinates', async () => {

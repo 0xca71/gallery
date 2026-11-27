@@ -7,9 +7,9 @@ import {
   PostgresQueryCompiler,
 } from 'kysely';
 import { DateTime } from 'luxon';
-import type { DB } from 'src/schema/index.js';
 import { AssetOrderWithRandom } from 'src/enum.js';
 import { MemoryRepository } from 'src/repositories/memory.repository.js';
+import type { DB } from 'src/schema/index.js';
 
 const offlineDialect = () => ({
   createAdapter: () => new PostgresAdapter(),
@@ -21,11 +21,11 @@ const offlineDialect = () => ({
 const offlineKysely = () => new Kysely<DB>({ dialect: offlineDialect() });
 
 /**
- * `searchAccessible` ends in `.execute()`, so its SQL cannot be reached through `.compile()`
- * the way the builders can. The DummyDriver still runs the query (returning no rows) and Kysely
- * still emits the compiled statement to `log`, so recording it there is the only way to assert
- * on the query the fork's served path actually sends.
- */
+`searchAccessible` ends in `.execute()`, so its SQL cannot be reached through `.compile()`
+the way the builders can. The DummyDriver still runs the query (returning no rows) and Kysely
+still emits the compiled statement to `log`, so recording it there is the only way to assert
+on the query the fork's served path actually sends.
+*/
 const recordingRepository = () => {
   const queries: CompiledQuery[] = [];
   const db = new Kysely<DB>({
@@ -69,6 +69,22 @@ describe(MemoryRepository.name, () => {
           new Date('2026-04-30T12:00:00.000Z'),
           '00000000-0000-0000-0000-000000000000',
         ]);
+      } finally {
+        now.mockRestore();
+      }
+    });
+
+    it('bounds the implicit showAt filter by the wall clock read as UTC, like isUpcoming', () => {
+      // immich-32166: showAt stores a calendar date as UTC midnight, so comparing it against the
+      // real instant hides a day's memories for the server's UTC offset after local midnight.
+      const now = vi
+        .spyOn(DateTime, 'now')
+        .mockReturnValue(DateTime.fromISO('2026-04-30T08:00:00', { zone: 'America/New_York' }) as DateTime<true>);
+
+      try {
+        const query = sut.searchBuilder(userId, {}).selectAll('memory').compile();
+
+        expect(query.parameters[0]).toEqual(new Date('2026-04-30T08:00:00.000Z'));
       } finally {
         now.mockRestore();
       }

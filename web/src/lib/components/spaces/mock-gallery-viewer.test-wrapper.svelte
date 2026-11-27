@@ -1,13 +1,12 @@
 <script lang="ts">
-  import type { AssetMultiSelectManager } from '$lib/managers/asset-multi-select-manager.svelte';
+  import type { AssetMultiSelectManager } from '#lib/managers/asset-multi-select-manager.svelte.ts';
   import type { AssetResponseDto } from '@immich/sdk';
 
   /**
-   * Stands in for GalleryViewer in space-search-results tests. The real component measures a
-   * justified layout against a scroll container, which happy-dom reports as 0x0 — so it would
-   * render no thumbnails at all. This records the props under test as data attributes and
-   * renders one clickable stub per asset.
-   */
+  Stands in for GalleryViewer in space-search-results tests. The real component measures a
+  justified layout against a scroll container and renders only the thumbnails in view. This
+  records the props under test as data attributes and renders one clickable stub per asset.
+  */
   interface Props {
     assets?: AssetResponseDto[];
     assetInteraction?: AssetMultiSelectManager;

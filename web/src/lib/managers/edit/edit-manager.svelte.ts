@@ -1,31 +1,38 @@
+import TransformTool from '#lib/components/asset-viewer/editor/transform-tool/TransformTool.svelte';
+import TrimTool from '#lib/components/asset-viewer/editor/trim-tool/trim-tool.svelte';
+import { imageAdjustManager, withImageAdjust } from '#lib/gallery/edit/image-adjust-manager.svelte.ts';
+import type { ImageAdjust } from '#lib/gallery/edit/image-adjust.ts';
+import { authManager } from '#lib/managers/auth-manager.svelte.ts';
+import { transformManager } from '#lib/managers/edit/transform-manager.svelte.ts';
+import { trimManager } from '#lib/managers/edit/trim-manager.svelte.ts';
+import { eventManager } from '#lib/managers/event-manager.svelte.ts';
+import AssetEditSaveModal from '#lib/modals/AssetEditSaveModal.svelte';
+import { waitForWebsocketEvent } from '#lib/stores/websocket.ts';
+import { sleep } from '#lib/utils.ts';
+import { canEditAsset } from '#lib/utils/asset-editability.ts';
+import { getDimensions } from '#lib/utils/asset-utils.ts';
+import { getFormatter } from '#lib/utils/i18n.ts';
+import { composeViewerCrop, type CropRegion } from '#lib/utils/zoom-geometry.ts';
 import {
-  AssetEditAction,
-  AssetTypeEnum,
   AssetEditSaveMode,
   AssetEditSaveStatus,
+  AssetTypeEnum,
+  editAsset,
   getAssetEditSave,
   getAssetEditSaveCapabilities,
-  saveAssetEdits,
-  editAsset,
+  getAssetEdits,
   getAssetInfo,
   isHttpError,
   removeAssetEdits,
-  type AssetEditsCreateDto,
+  saveAssetEdits,
   type AssetEditSaveCapabilitiesDto,
   type AssetEditSaveCreateDto,
+  type AssetEditsCreateDto,
   type AssetResponseDto,
 } from '@immich/sdk';
 import { ConfirmModal, modalManager, toastManager } from '@immich/ui';
 import { mdiContentCut, mdiCropRotate } from '@mdi/js';
 import type { Component } from 'svelte';
-import TransformTool from '$lib/components/asset-viewer/editor/transform-tool/TransformTool.svelte';
-import TrimTool from '$lib/components/asset-viewer/editor/trim-tool/trim-tool.svelte';
-import { transformManager } from '$lib/managers/edit/transform-manager.svelte';
-import { trimManager } from '$lib/managers/edit/trim-manager.svelte';
-import { eventManager } from '$lib/managers/event-manager.svelte';
-import { waitForWebsocketEvent } from '$lib/stores/websocket';
-import { getFormatter } from '$lib/utils/i18n';
-import type { CropRegion } from '$lib/utils/zoom-geometry';
 
 export type EditAction = AssetEditsCreateDto['edits'][number];
 export type EditActions = EditAction[];
@@ -43,6 +50,8 @@ export const generateIdempotencyKey = (): string => {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 };
 
+export type ImageEditSaveOptions = { mode?: AssetEditSaveMode; edits?: EditActions };
+
 export interface EditToolManager {
   onActivate: (asset: AssetResponseDto, edits: EditActions) => Promise<void>;
   onDeactivate: () => void;
@@ -50,6 +59,8 @@ export interface EditToolManager {
   hasChanges: boolean;
   canReset: boolean;
   edits: EditAction[];
+  /** Saves the tool's changes itself instead of through the asset edits endpoint. */
+  save?: (assetId: string, options?: ImageEditSaveOptions) => Promise<unknown>;
 }
 
 export enum EditToolType {
@@ -70,7 +81,10 @@ export class EditManager {
       type: EditToolType.Transform,
       icon: mdiCropRotate,
       component: TransformTool,
-      manager: transformManager,
+      // Gallery: the Adjust panel's colour adjustment saves with the transform tool.
+      manager: withImageAdjust(transformManager, (assetId, edits, adjust, options) =>
+        this.persistImageEdits(assetId, edits, adjust, options?.mode),
+      ),
     },
     {
       type: EditToolType.Trim,
@@ -81,6 +95,7 @@ export class EditManager {
   ];
 
   currentAsset = $state<AssetResponseDto | null>(null);
+  spaceId: string | undefined;
   selectedTool = $state<EditTool | null>(null);
 
   // used to disable multiple confirm dialogs and mouse events while one is open
@@ -97,7 +112,7 @@ export class EditManager {
 
   async closeConfirm(): Promise<boolean> {
     // Prevent multiple dialogs (usually happens with rapid escape key presses)
-    if (this.isShowingConfirmDialog) {
+    if (this.isShowingConfirmDialog || this.isApplyingEdits) {
       return false;
     }
 
@@ -127,24 +142,25 @@ export class EditManager {
     this.selectedTool = this.tools[0];
   }
 
-  async activateTool(toolType: EditToolType, asset: AssetResponseDto, edits: AssetEditsCreateDto) {
+  async activateTool(toolType: EditToolType, asset: AssetResponseDto, edits: AssetEditsCreateDto, spaceId?: string) {
     this.hasAppliedEdits = false;
     this.resultAssetId = null;
-    if (this.selectedTool?.type === toolType) {
+    if (this.selectedTool?.type === toolType && this.currentAsset?.id === asset.id) {
       return;
     }
 
+    this.spaceId = spaceId;
     this.currentAsset = asset;
     this.saveCapabilities = null;
-    if (asset.type === AssetTypeEnum.Image) {
-      void this.loadSaveCapabilities(asset.id);
-    }
 
     this.selectedTool?.manager.onDeactivate?.();
     const newTool = this.tools.find((t) => t.type === toolType);
     if (newTool) {
       this.selectedTool = newTool;
-      await newTool.manager.onActivate?.(asset, edits.edits);
+      await Promise.all([
+        newTool.manager.onActivate(asset, edits.edits),
+        asset.type === AssetTypeEnum.Image ? this.loadSaveCapabilities(asset.id) : undefined,
+      ]);
     }
   }
 
@@ -173,18 +189,17 @@ export class EditManager {
   }
 
   async resetAllChanges() {
+    if (this.isApplyingEdits || this.pendingSave || this.pendingRequest) return;
     for (const tool of this.tools) {
       await tool.manager.resetAllChanges();
     }
   }
 
   async applyEdits(): Promise<boolean> {
+    if (!this.currentAsset || this.isApplyingEdits) return false;
+    if (this.currentAsset.type === AssetTypeEnum.Image) return this.saveImageEdits();
     this.isApplyingEdits = true;
-
-    const edits = this.selectedTool ? this.selectedTool.manager.edits : [];
-    if (!this.currentAsset) {
-      return false;
-    }
+    const edits = this.selectedTool?.manager.edits ?? [];
 
     const assetId = this.currentAsset.id;
     const t = await getFormatter();
@@ -193,19 +208,23 @@ export class EditManager {
       // Setup the websocket listener before sending the edit request
       const timeout = this.currentAsset?.type === AssetTypeEnum.Video ? 30_000 : 10_000;
       const editCompleted = waitForWebsocketEvent('AssetEditReadyV2', (event) => event.asset.id === assetId, timeout);
+      editCompleted.catch(() => {});
 
-      await (edits.length === 0
-        ? removeAssetEdits({ id: assetId })
-        : editAsset({
-            id: assetId,
-            assetEditsCreateDto: {
-              edits,
-            },
-          }));
+      const tool = this.selectedTool?.manager;
+      await (tool?.save
+        ? tool.save(assetId)
+        : edits.length === 0
+          ? removeAssetEdits({ id: assetId })
+          : editAsset({
+              id: assetId,
+              assetEditsCreateDto: {
+                edits,
+              },
+            }));
 
       await editCompleted;
 
-      const refreshedAsset = await getAssetInfo({ id: assetId });
+      const refreshedAsset = await getAssetInfo({ id: assetId, spaceId: this.spaceId });
       eventManager.emit('AssetUpdate', refreshedAsset);
       eventManager.emit('AssetEditsApplied', assetId);
 
@@ -220,35 +239,56 @@ export class EditManager {
       this.isApplyingEdits = false;
     }
   }
+  async saveImageEdits(mode?: AssetEditSaveMode, edits?: EditActions): Promise<boolean> {
+    if (
+      !this.currentAsset ||
+      this.currentAsset.type !== AssetTypeEnum.Image ||
+      this.isApplyingEdits ||
+      this.hasAppliedEdits
+    )
+      return false;
+    const tool = this.selectedTool?.manager;
+    if (!tool?.save) return false;
+    return (await tool.save(this.currentAsset.id, { mode, edits })) === true;
+  }
 
-  async saveImageEdits(requestedMode?: AssetEditSaveMode, editsOverride?: EditActions): Promise<boolean> {
+  async persistImageEdits(
+    assetId: string,
+    edits: EditActions,
+    adjust: ImageAdjust,
+    requestedMode?: AssetEditSaveMode,
+  ): Promise<boolean> {
     if (!this.currentAsset || this.isApplyingEdits || this.isShowingConfirmDialog) {
       return false;
     }
-    const assetId = this.currentAsset.id;
-    const t = await getFormatter();
+    if (this.currentAsset.id !== assetId) return false;
     this.isApplyingEdits = true;
+    const t = await getFormatter();
     try {
       if (!this.pendingSave || this.pendingSave.assetId !== assetId) {
-        if (
-          !this.pendingRequest ||
-          this.pendingRequest.assetId !== assetId ||
-          (requestedMode && this.pendingRequest.dto.mode !== requestedMode)
-        ) {
+        if (!this.pendingRequest || this.pendingRequest.assetId !== assetId) {
           const capabilities = this.saveCapabilities ?? (await this.loadSaveCapabilities(assetId));
           if (this.currentAsset?.id !== assetId) {
             return false;
           }
+          if (!capabilities) {
+            toastManager.danger(t('editor_save_status_unavailable'));
+            return false;
+          }
           const mode =
-            requestedMode ??
-            (capabilities?.canOverwrite === false ? AssetEditSaveMode.Copy : AssetEditSaveMode.Overwrite);
-          if (mode === AssetEditSaveMode.Overwrite && capabilities && !capabilities.canOverwrite) {
+            requestedMode ?? (capabilities.canOverwrite ? AssetEditSaveMode.Overwrite : AssetEditSaveMode.Copy);
+          if (
+            (mode === AssetEditSaveMode.Overwrite && !capabilities.canOverwrite) ||
+            (mode === AssetEditSaveMode.Copy && !capabilities.canCopy)
+          ) {
             const reason = capabilities.overwriteUnavailableReason;
             toastManager.danger(
               t(
-                reason === 'save_in_progress'
-                  ? 'editor_save_unavailable_save_in_progress'
-                  : 'editor_save_unavailable_not_writable',
+                reason === 'unsupported_format'
+                  ? 'editor_save_unavailable_unsupported_format'
+                  : reason === 'save_in_progress'
+                    ? 'editor_save_unavailable_save_in_progress'
+                    : 'editor_save_unavailable_not_writable',
               ),
             );
             return false;
@@ -259,7 +299,8 @@ export class EditManager {
               mode,
               expectedVersion: this.currentAsset.updatedAt,
               idempotencyKey: generateIdempotencyKey(),
-              edits: structuredClone($state.snapshot(editsOverride ?? this.selectedTool?.manager.edits ?? [])),
+              edits: structuredClone($state.snapshot(edits)),
+              adjust: { ...adjust },
             },
           };
         }
@@ -270,11 +311,15 @@ export class EditManager {
       while (Date.now() < deadline) {
         const operation = await getAssetEditSave({ id: assetId, operationId: this.pendingSave.operationId });
         if (operation.status === AssetEditSaveStatus.Completed && operation.resultAssetId) {
-          const refreshed = await getAssetInfo({ id: operation.resultAssetId });
+          const refreshed = await getAssetInfo({
+            id: operation.resultAssetId,
+            spaceId: operation.resultAssetId === assetId ? this.spaceId : undefined,
+          });
           if (this.currentAsset?.id !== assetId) {
             return false;
           }
           this.resultAssetId = refreshed.id;
+          imageAdjustManager.reset();
           eventManager.emit('AssetUpdate', refreshed);
           eventManager.emit('AssetEditsApplied', refreshed.id);
           this.pendingSave = null;
@@ -297,19 +342,25 @@ export class EditManager {
             save_failed: 'editor_save_failed_save_failed',
           } as const;
           toastManager.danger(t(failures[operation.error as keyof typeof failures] ?? failures.save_failed));
+          this.currentAsset = await getAssetInfo({ id: assetId, spaceId: this.spaceId });
+          await this.loadSaveCapabilities(assetId);
           return false;
         }
         if (operation.error === 'recovery_required') {
           toastManager.danger(t('editor_save_recovery_required'));
           return false;
         }
-        await new Promise<void>((resolve) => setTimeout(resolve, 750));
+        await sleep(750);
       }
       toastManager.primary(t('editor_save_pending'));
       return false;
     } catch (error) {
       if (!this.pendingSave && isHttpError(error) && error.status >= 400 && error.status < 500) {
         this.pendingRequest = null;
+        if (error.status === 409) {
+          this.currentAsset = await getAssetInfo({ id: assetId, spaceId: this.spaceId });
+        }
+        await this.loadSaveCapabilities(assetId);
         toastManager.danger(
           t(error.status === 409 ? 'editor_save_failed_source_changed' : 'editor_edits_applied_error'),
         );
@@ -325,23 +376,43 @@ export class EditManager {
     }
   }
 
-  async saveImageCropFromViewer(asset: AssetResponseDto, crop: CropRegion): Promise<boolean> {
+  async saveImageCropFromViewer(asset: AssetResponseDto, crop: CropRegion, spaceId?: string): Promise<boolean> {
     if (asset.type !== AssetTypeEnum.Image || this.isApplyingEdits || this.isShowingConfirmDialog) {
       return false;
     }
 
+    if (!canEditAsset(asset, { userId: authManager.authenticated ? authManager.user.id : undefined })) return false;
+    this.hasAppliedEdits = false;
+    this.resultAssetId = null;
+    this.spaceId = spaceId;
     this.currentAsset = asset;
     this.saveCapabilities = null;
     this.selectedTool = this.tools.find((tool) => tool.type === EditToolType.Transform) ?? null;
+    this.isShowingConfirmDialog = true;
 
     try {
-      return await this.saveImageEdits(AssetEditSaveMode.Overwrite, [
-        {
-          action: AssetEditAction.Crop,
-          parameters: crop,
-        },
-      ]);
+      const [storedEdits] = await Promise.all([getAssetEdits({ id: asset.id }), imageAdjustManager.load(asset.id)]);
+      const capabilities = await this.loadSaveCapabilities(asset.id);
+      if (!capabilities) {
+        const t = await getFormatter();
+        toastManager.danger(t('editor_save_status_unavailable'));
+        return false;
+      }
+      const mode = capabilities.canOverwrite
+        ? AssetEditSaveMode.Overwrite
+        : await modalManager.show(AssetEditSaveModal, { capabilities });
+      if (!mode) return false;
+      this.isShowingConfirmDialog = false;
+      const dimensions = asset.exifInfo ? getDimensions(asset.exifInfo) : { width: asset.width, height: asset.height };
+      const source = { width: dimensions.width || asset.width || 1, height: dimensions.height || asset.height || 1 };
+      const displayed = { width: asset.width || source.width, height: asset.height || source.height };
+      return await this.saveImageEdits(mode, composeViewerCrop(storedEdits.edits, crop, source, displayed));
+    } catch {
+      const t = await getFormatter();
+      toastManager.danger(t('editor_edits_applied_error'));
+      return false;
     } finally {
+      this.isShowingConfirmDialog = false;
       this.cleanup();
     }
   }

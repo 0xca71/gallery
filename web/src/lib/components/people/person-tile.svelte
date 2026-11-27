@@ -1,10 +1,10 @@
 <script lang="ts">
-  import { focusOutside } from '$lib/actions/focus-outside';
-  import DeferredPersonThumbnail from '$lib/components/people/deferred-person-thumbnail.svelte';
-  import ImageThumbnail from '$lib/components/assets/thumbnail/ImageThumbnail.svelte';
-  import type { ManagedPerson } from '$lib/components/people/people-types';
-  import type { ThumbnailLoadQueue } from '$lib/components/people/thumbnail-load-queue.svelte';
-  import { getPetBadgeLabel } from '$lib/utils/pet-species';
+  import { focusOutside } from '#lib/actions/focus-outside.ts';
+  import ImageThumbnail from '#lib/components/assets/thumbnail/ImageThumbnail.svelte';
+  import DeferredPersonThumbnail from '#lib/components/people/deferred-person-thumbnail.svelte';
+  import type { ManagedPerson } from '#lib/components/people/people-types.ts';
+  import type { ThumbnailLoadQueue } from '#lib/components/people/thumbnail-load-queue.svelte.ts';
+  import { getPetBadgeLabel } from '#lib/utils/pet-species.ts';
   import { Icon } from '@immich/ui';
   import { mdiHeart, mdiPaw } from '@mdi/js';
   import type { Snippet } from 'svelte';
@@ -34,12 +34,13 @@
   bind:this={groupElement}
   class="relative"
   role="group"
+  data-motion-lift-group
   onmouseenter={() => (showActions = true)}
   onmouseleave={hideActionsUnlessFocused}
   use:focusOutside={{ onFocusOut: () => (showActions = false) }}
 >
   <a href={person.href} draggable="false" aria-label={person.displayName} onfocus={() => (showActions = true)}>
-    <div class="size-full rounded-xl brightness-95 filter">
+    <div class="size-full rounded-xl brightness-95 filter" data-motion-lift="flat">
       {#if deferThumbnail && thumbnailQueue}
         <DeferredPersonThumbnail
           queue={thumbnailQueue}
@@ -67,7 +68,7 @@
         </div>
       {/if}
       {#if person.type === 'pet'}
-        {@const petBadgeLabel = getPetBadgeLabel(person.species, $t)}
+        {const petBadgeLabel = $derived(getPetBadgeLabel(person.species, $t))}
         <div
           class="absolute right-1 bottom-1 rounded-full bg-immich-primary p-1 text-white"
           role="img"

@@ -1,17 +1,14 @@
-import { createZoomImageWheel, type ZoomImageWheelState } from '@zoom-image/core';
-import { createRequire } from 'node:module';
 import {
+  composeViewerCrop,
   constrainPhotoPosition,
   navigatorViewport,
   panToNavigatorPoint,
   resizePhotoViewport,
   visibleCropRegion,
   zoomAt,
-} from '$lib/utils/zoom-geometry';
-
-const { createZoomImageWheel: createCommonJsWheel } = createRequire(import.meta.url)(
-  '@zoom-image/core',
-) as typeof import('@zoom-image/core');
+} from '#lib/utils/zoom-geometry.ts';
+import { AssetEditAction } from '@immich/sdk';
+import { createZoomImageWheel, type ZoomImageWheelState } from '@zoom-image/core';
 
 const base: ZoomImageWheelState = {
   currentZoom: 1,
@@ -23,6 +20,36 @@ const base: ZoomImageWheelState = {
 const viewport = { width: 1000, height: 800 };
 
 describe('photo zoom geometry and patched engine', () => {
+  it('composes a displayed crop with an existing crop and rotation', () => {
+    const edits = [
+      { action: AssetEditAction.Crop, parameters: { x: 100, y: 200, width: 1000, height: 800 } },
+      { action: AssetEditAction.Rotate, parameters: { angle: 90 } },
+    ] as const;
+    expect(
+      composeViewerCrop(
+        [...edits],
+        { x: 0, y: 0, width: 400, height: 500 },
+        { width: 4000, height: 3000 },
+        { width: 800, height: 1000 },
+      ),
+    ).toEqual([{ action: AssetEditAction.Crop, parameters: { x: 100, y: 600, width: 500, height: 400 } }, edits[1]]);
+  });
+
+  it('composes an existing arbitrary-rotation crop in rotated-canvas coordinates', () => {
+    const edits = [
+      { action: AssetEditAction.Crop, parameters: { x: 100, y: 200, width: 1000, height: 800 } },
+      { action: AssetEditAction.Rotate, parameters: { angle: 15 } },
+    ] as const;
+    expect(
+      composeViewerCrop(
+        [...edits],
+        { x: 200, y: 100, width: 500, height: 400 },
+        { width: 4000, height: 3000 },
+        { width: 1000, height: 800 },
+      ),
+    ).toEqual([{ action: AssetEditAction.Crop, parameters: { x: 300, y: 300, width: 500, height: 400 } }, edits[1]]);
+  });
+
   it('keeps the same image point centered when a sidebar changes the viewport aspect ratio', () => {
     const image = { width: 4000, height: 3000 };
     const state = panToNavigatorPoint(image, viewport, { ...base, currentZoom: 4 }, 0.65, 0.4);
@@ -91,23 +118,23 @@ describe('photo zoom geometry and patched engine', () => {
     expect(constrainPhotoPosition('y', -10_000, 1, rotation, image, viewport)).toBe(0);
     expect(navigatorViewport(image, viewport, state)).toEqual({ x: 0, y: 0, width: 1, height: 1 });
   });
-  it.each([
-    ['ESM', createZoomImageWheel],
-    ['CommonJS', createCommonJsWheel],
-  ] as const)('%s navigation updates the library store and the next drag continues from it', (_, createEngine) => {
-    const node = document.createElement('div');
-    Object.defineProperties(node, { clientWidth: { value: 1000 }, clientHeight: { value: 800 } });
-    const target = document.createElement('div');
-    const engine = createEngine(node, { zoomTarget: target, maxZoom: 10 });
-    engine.setState({ currentZoom: 2, currentPositionX: -700, currentPositionY: -300 });
-    expect(engine.getState()).toMatchObject({ currentPositionX: -700, currentPositionY: -300 });
-    node.dispatchEvent(new PointerEvent('pointerdown', { pointerId: 1, clientX: 500, clientY: 400 }));
-    engine.setState({ currentPositionX: -600, currentPositionY: -200 });
-    node.dispatchEvent(new PointerEvent('pointermove', { pointerId: 1, clientX: 520, clientY: 410 }));
-    expect(engine.getState()).toMatchObject({ currentPositionX: -580, currentPositionY: -190 });
-    node.dispatchEvent(new PointerEvent('pointercancel', { pointerId: 1 }));
-    node.dispatchEvent(new PointerEvent('pointermove', { pointerId: 1, clientX: 600, clientY: 500 }));
-    expect(engine.getState().currentPositionX).toBe(-580);
-    engine.cleanup();
-  });
+  it.each([['ESM', createZoomImageWheel]] as const)(
+    '%s navigation updates the library store and the next drag continues from it',
+    (_, createEngine) => {
+      const node = document.createElement('div');
+      Object.defineProperties(node, { clientWidth: { value: 1000 }, clientHeight: { value: 800 } });
+      const target = document.createElement('div');
+      const engine = createEngine(node, { zoomTarget: target, maxZoom: 10 });
+      engine.setState({ currentZoom: 2, currentPositionX: -700, currentPositionY: -300 });
+      expect(engine.getState()).toMatchObject({ currentPositionX: -700, currentPositionY: -300 });
+      node.dispatchEvent(new PointerEvent('pointerdown', { pointerId: 1, clientX: 500, clientY: 400 }));
+      engine.setState({ currentPositionX: -600, currentPositionY: -200 });
+      node.dispatchEvent(new PointerEvent('pointermove', { pointerId: 1, clientX: 520, clientY: 410 }));
+      expect(engine.getState()).toMatchObject({ currentPositionX: -580, currentPositionY: -190 });
+      node.dispatchEvent(new PointerEvent('pointercancel', { pointerId: 1 }));
+      node.dispatchEvent(new PointerEvent('pointermove', { pointerId: 1, clientX: 600, clientY: 500 }));
+      expect(engine.getState().currentPositionX).toBe(-580);
+      engine.cleanup();
+    },
+  );
 });

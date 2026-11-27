@@ -1,28 +1,27 @@
 <script lang="ts">
-  import { goto, invalidateAll } from '$app/navigation';
-  import { page } from '$app/state';
-  import UserPageLayout from '$lib/components/layouts/UserPageLayout.svelte';
-  import ButtonContextMenu from '$lib/components/shared-components/context-menu/ButtonContextMenu.svelte';
-  import MenuOption from '$lib/components/shared-components/context-menu/MenuOption.svelte';
-  import SpaceHero from '$lib/components/spaces/space-hero.svelte';
-  import SpaceTabs from '$lib/components/spaces/space-tabs.svelte';
-  import { authManager } from '$lib/managers/auth-manager.svelte';
-  import { spaceUiManager } from '$lib/managers/space-ui-manager.svelte';
-  import SpaceEditModal from '$lib/modals/SpaceEditModal.svelte';
-  import SpaceHideFromTimelineConfirmModal from '$lib/modals/SpaceHideFromTimelineConfirmModal.svelte';
-  import { Route } from '$lib/route';
-  import { handleError } from '$lib/utils/handle-error';
-  import { getSearchablePageState } from '$lib/utils/searchable-page-search';
+  import UserPageLayout from '#lib/components/layouts/UserPageLayout.svelte';
+  import ButtonContextMenu from '#lib/components/shared-components/context-menu/ButtonContextMenu.svelte';
+  import MenuOption from '#lib/components/shared-components/context-menu/MenuOption.svelte';
+  import SpaceHero from '#lib/components/spaces/space-hero.svelte';
+  import SpaceTabs from '#lib/components/spaces/space-tabs.svelte';
+  import { invalidateSpaces } from '#lib/gallery/spaces/space.query.ts';
+  import { authManager } from '#lib/managers/auth-manager.svelte.ts';
+  import { spaceUiManager } from '#lib/managers/space-ui-manager.svelte.ts';
+  import SpaceEditModal from '#lib/modals/SpaceEditModal.svelte';
+  import SpaceHideFromTimelineConfirmModal from '#lib/modals/SpaceHideFromTimelineConfirmModal.svelte';
+  import { Route } from '#lib/route.ts';
+  import { handleError } from '#lib/utils/handle-error.ts';
+  import { getSearchablePageState } from '#lib/utils/searchable-page-search.ts';
   import {
+    SharedSpaceRole,
+    UserAvatarColor,
     bulkAddAssets,
     getTimelineHidePreview,
     removeMember,
     removeSpace,
-    SharedSpaceRole,
     updateMemberPreferences,
     updateMemberTimeline,
     updateSpace,
-    UserAvatarColor,
   } from '@immich/sdk';
   import { Button, IconButton, modalManager, toastManager } from '@immich/ui';
   import {
@@ -40,6 +39,8 @@
   } from '@mdi/js';
   import type { Snippet } from 'svelte';
   import { t } from 'svelte-i18n';
+  import { goto, invalidateAll } from '$app/navigation';
+  import { page } from '$app/state';
   import type { LayoutData } from './$types';
 
   interface Props {
@@ -79,7 +80,7 @@
   // with the results. A phone leaves the space ~520 CSS px of page height, and a tall cover stacked
   // with the app bar, tabs and search header left the grid a sliver of it (#1028). The query is read
   // from the URL (`?q=`), the same source the Photos page commits it from.
-  const searchActive = $derived(onPhotosTab && getSearchablePageState(page.url).query.length > 0);
+  const searchActive = $derived(onPhotosTab && getSearchablePageState(new URL(page.url.href)).query.length > 0);
 
   // No-cover spaces fall back to a per-space colored gradient derived from space.color.
   const gradientClasses: Record<string, string> = {
@@ -148,6 +149,8 @@
         id: space.id,
         sharedSpaceMemberTimelineDto: { showInTimeline: !showInTimeline },
       });
+      // The Photos library view follows the spaces on the timeline (#1038).
+      void invalidateSpaces();
       await invalidateAll();
     } catch (error) {
       handleError(error, $t('errors.unable_to_update_timeline_display_status'));
@@ -203,6 +206,7 @@
     }
     try {
       await removeMember({ id: space.id, userId: authManager.user.id });
+      void invalidateSpaces();
       toastManager.success($t('spaces_leave_success', { values: { name: space.name } }));
       await goto(Route.spaces());
     } catch (error) {
@@ -228,7 +232,9 @@
        entirely so the app doesn't nest inside itself. -->
   {@render children?.()}
 {:else}
-  <UserPageLayout hideNavbar={spaceUiManager.chromeHidden} title={space.name} scrollbar={false}>
+  <!-- Only the Photos tab hides the page scrollbar: its timeline scrolls itself and brings a scrubber.
+       Every other tab (albums, people, members, ...) scrolls the page and needs a visible scrollbar. -->
+  <UserPageLayout hideNavbar={spaceUiManager.chromeHidden} title={space.name} scrollbar={!onPhotosTab}>
     {#snippet leading()}
       {#if !spaceUiManager.chromeHidden}
         <IconButton

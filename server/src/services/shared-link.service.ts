@@ -1,5 +1,6 @@
 import { BadRequestException, ForbiddenException, Injectable, UnauthorizedException } from '@nestjs/common';
 import { PostgresError } from 'postgres';
+import { SharedLink } from 'src/database.js';
 import { AssetIdErrorReason, AssetIdsResponseDto } from 'src/dtos/asset-ids.response.dto.js';
 import { AssetIdsDto } from 'src/dtos/asset.dto.js';
 import { AuthDto } from 'src/dtos/auth.dto.js';
@@ -12,7 +13,9 @@ import {
   mapSharedLink,
 } from 'src/dtos/shared-link.dto.js';
 import { Permission, SharedLinkType, SharedSpaceRole } from 'src/enum.js';
+import { AlbumMetadataScope, sharedLinkAlbumMetadataScope } from 'src/gallery/utils/album-metadata-scope.js';
 import { BaseService } from 'src/services/base.service.js';
+import { asDateTimeString } from 'src/utils/date.js';
 import { OpenGraphTags, findOrFail, getExternalDomain } from 'src/utils/misc.js';
 import { sharedLinkPublisherRoles } from 'src/utils/shared-link-space-tether.js';
 
@@ -22,7 +25,7 @@ export class SharedLinkService extends BaseService {
     return this.sharedLinkRepository
       .getAll({ userId: auth.user.id, id, albumId })
 
-      .then((links) => links.map((link) => mapSharedLink(link, { stripAssetMetadata: false })));
+      .then((links) => links.map((link) => mapSharedLink(link, { auth })));
   }
 
   async login(auth: AuthDto, dto: SharedLinkLoginDto) {
@@ -43,10 +46,11 @@ export class SharedLinkService extends BaseService {
 
     return {
       // Anonymous visitor path — redact who owns what (#1018).
-      sharedLink: mapSharedLink(sharedLink, {
-        stripAssetMetadata: !sharedLink.showExif,
-        redactAssetOwners: true,
-      }),
+      sharedLink: await this.mapWithAlbumMetadata(
+        sharedLink,
+        { auth, redactAssetOwners: true },
+        sharedLinkAlbumMetadataScope(auth.sharedLink),
+      ),
       token: this.asToken({ id, password }),
     };
   }
@@ -64,12 +68,21 @@ export class SharedLinkService extends BaseService {
     }
 
     // Anonymous visitor path — redact who owns what (#1018).
-    return mapSharedLink(sharedLink, { stripAssetMetadata: !sharedLink.showExif, redactAssetOwners: true });
+    return this.mapWithAlbumMetadata(
+      sharedLink,
+      { auth, redactAssetOwners: true },
+      sharedLinkAlbumMetadataScope(auth.sharedLink),
+    );
   }
 
   async get(auth: AuthDto, id: string): Promise<SharedLinkResponseDto> {
     const sharedLink = await this.findOrFail(auth.user.id, id);
-    return mapSharedLink(sharedLink, { stripAssetMetadata: false });
+    const spaceId = await this.spaceAlbumRepository.getSharedLinkSpaceId(id);
+    return this.mapWithAlbumMetadata(
+      sharedLink,
+      { auth },
+      sharedLinkAlbumMetadataScope({ userId: sharedLink.userId, spaceId }),
+    );
   }
 
   async create(auth: AuthDto, dto: SharedLinkCreateDto): Promise<SharedLinkResponseDto> {
@@ -110,7 +123,7 @@ export class SharedLinkService extends BaseService {
           // linked library, linked album, cross-owner contribution). Deliberately NOT unioned
           // with `AssetShare`: a link that claims to come from a space must contain only that
           // space's assets, or the tether on the read side would have nothing to re-derive.
-          const allowed = await this.accessRepository.asset.checkSpaceAccessForSpace(
+          const allowed = await this.accessRepository.spaceAsset.checkSpaceAccessForSpace(
             auth.user.id,
             dto.spaceId,
             new Set(dto.assetIds),
@@ -138,23 +151,23 @@ export class SharedLinkService extends BaseService {
         password: dto.password,
         expiresAt: dto.expiresAt || null,
         allowUpload: dto.allowUpload ?? true,
-        allowDownload: dto.showMetadata === false ? false : (dto.allowDownload ?? true),
+        allowDownload: dto.showMetadata !== false && (dto.allowDownload ?? true),
         showExif: dto.showMetadata ?? true,
         slug: dto.slug || null,
         spaceId: dto.spaceId || null,
       });
 
-      return mapSharedLink(sharedLink, { stripAssetMetadata: false });
+      return mapSharedLink(sharedLink, { auth });
     } catch (error) {
       this.handleError(error);
     }
   }
 
   /**
-   * #1018: only a space Owner/Editor may publish a link that reaches other members' photos.
-   * Rejects BEFORE any asset or album lookup, so a Viewer never learns what a space contains
-   * from the shape of the error.
-   */
+  #1018: only a space Owner/Editor may publish a link that reaches other members' photos.
+  Rejects BEFORE any asset or album lookup, so a Viewer never learns what a space contains
+  from the shape of the error.
+  */
   private async requireSpaceEditor(auth: AuthDto, spaceId: string): Promise<void> {
     const member = await this.sharedSpaceRepository.getMember(spaceId, auth.user.id);
     if (!member || !sharedLinkPublisherRoles.includes(member.role as SharedSpaceRole)) {
@@ -184,7 +197,7 @@ export class SharedLinkService extends BaseService {
         showExif: dto.showMetadata,
         slug: dto.slug || null,
       });
-      return mapSharedLink(sharedLink, { stripAssetMetadata: false });
+      return mapSharedLink(sharedLink, { auth });
     } catch (error) {
       this.handleError(error);
     }
@@ -273,7 +286,13 @@ export class SharedLinkService extends BaseService {
     const config = await this.getConfig({ withCache: true });
     const sharedLink = await this.findOrFail(auth.sharedLink.userId, auth.sharedLink.id);
     const assetId = sharedLink.album?.albumThumbnailAssetId || sharedLink.assets[0]?.id;
-    const assetCount = sharedLink.assets.length > 0 ? sharedLink.assets.length : sharedLink.album?.assets?.length || 0;
+    const [albumMetadata] = sharedLink.album
+      ? await this.albumRepository.getMetadataForIds(
+          [sharedLink.album.id],
+          sharedLinkAlbumMetadataScope(auth.sharedLink),
+        )
+      : [];
+    const assetCount = sharedLink.assets.length > 0 ? sharedLink.assets.length : albumMetadata?.assetCount || 0;
     const imagePath = assetId
       ? `/api/assets/${assetId}/thumbnail?key=${sharedLink.key.toString('base64url')}`
       : '/feature-panel.png';
@@ -283,6 +302,22 @@ export class SharedLinkService extends BaseService {
       description: sharedLink.description || `${assetCount} shared photos & videos`,
       imageUrl: new URL(imagePath, getExternalDomain(config.server, defaultDomain)).href,
     };
+  }
+
+  private async mapWithAlbumMetadata(
+    sharedLink: SharedLink,
+    options: Parameters<typeof mapSharedLink>[1],
+    scope: AlbumMetadataScope,
+  ) {
+    const response = mapSharedLink(sharedLink, options);
+    if (response.album) {
+      const [metadata] = await this.albumRepository.getMetadataForIds([response.album.id], scope);
+      response.album.startDate = asDateTimeString(metadata?.startDate ?? undefined);
+      response.album.endDate = asDateTimeString(metadata?.endDate ?? undefined);
+      response.album.assetCount = metadata?.assetCount ?? 0;
+    }
+
+    return response;
   }
 
   private asToken(sharedLink: { id: string; password: string }) {

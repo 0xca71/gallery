@@ -1,30 +1,31 @@
 <script lang="ts">
-  import { shortcuts } from '$lib/actions/shortcut';
-  import { zoomImageAction } from '$lib/actions/zoom-image';
-  import AdaptiveImage from '$lib/components/AdaptiveImage.svelte';
-  import PhotoNavigator from '$lib/components/asset-viewer/PhotoNavigator.svelte';
-  import { transformManager } from '$lib/managers/edit/transform-manager.svelte';
-  import { ProjectionType } from '$lib/constants';
-  import { getAssetMediaUrl } from '$lib/utils';
-  import { fittedPhoto, resizePhotoViewport, visibleCropRegion } from '$lib/utils/zoom-geometry';
-  import FaceEditor from '$lib/components/asset-viewer/face-editor/FaceEditor.svelte';
-  import OcrBoundingBox from '$lib/components/asset-viewer/OcrBoundingBox.svelte';
-  import AssetViewerEvents from '$lib/components/AssetViewerEvents.svelte';
-  import Thumbhash from '$lib/components/Thumbhash.svelte';
-  import { assetViewerManager, type Faces } from '$lib/managers/asset-viewer-manager.svelte';
-  import { authManager } from '$lib/managers/auth-manager.svelte';
-  import { castManager } from '$lib/managers/cast-manager.svelte';
-  import { editManager } from '$lib/managers/edit/edit-manager.svelte';
-  import { faceManager } from '$lib/stores/face.svelte';
-  import { mediaQueryManager } from '$lib/stores/media-query-manager.svelte';
-  import { ocrManager } from '$lib/stores/ocr.svelte';
-  import { SlideshowLook, SlideshowState, slideshowStore } from '$lib/stores/slideshow.store';
-  import { handlePromiseError } from '$lib/utils';
-  import { canCopyImageToClipboard, copyImageToClipboard } from '$lib/utils/asset-utils';
-  import { getNaturalSize, type Size } from '$lib/utils/container-utils';
-  import { handleError } from '$lib/utils/handle-error';
-  import { getOcrBoundingBoxes } from '$lib/utils/ocr-utils';
-  import { getBoundingBox, type BoundingBox } from '$lib/utils/people-utils';
+  import { shortcuts } from '#lib/actions/shortcut.ts';
+  import { zoomImageAction } from '#lib/actions/zoom-image.ts';
+  import AdaptiveImage from '#lib/components/AdaptiveImage.svelte';
+  import AssetViewerEvents from '#lib/components/AssetViewerEvents.svelte';
+  import Thumbhash from '#lib/components/Thumbhash.svelte';
+  import OcrBoundingBox from '#lib/components/asset-viewer/OcrBoundingBox.svelte';
+  import PhotoNavigator from '#lib/components/asset-viewer/PhotoNavigator.svelte';
+  import FaceEditorPanel from '#lib/components/asset-viewer/face-editor/FaceEditorPanel.svelte';
+  import { ProjectionType } from '#lib/constants.ts';
+  import { getViewerSpace } from '#lib/gallery/viewer-space.ts';
+  import { assetViewerManager, type Faces } from '#lib/managers/asset-viewer-manager.svelte.ts';
+  import { authManager } from '#lib/managers/auth-manager.svelte.ts';
+  import { castManager } from '#lib/managers/cast-manager.svelte.ts';
+  import { editManager } from '#lib/managers/edit/edit-manager.svelte.ts';
+  import { transformManager } from '#lib/managers/edit/transform-manager.svelte.ts';
+  import { faceManager } from '#lib/stores/face.svelte.ts';
+  import { mediaQueryManager } from '#lib/stores/media-query-manager.svelte.ts';
+  import { ocrManager } from '#lib/stores/ocr.svelte.ts';
+  import { SlideshowLook, SlideshowState, slideshowStore } from '#lib/stores/slideshow.store.ts';
+  import { getAssetMediaUrl, handlePromiseError } from '#lib/utils.ts';
+  import { canEditAsset } from '#lib/utils/asset-editability.ts';
+  import { canCopyImageToClipboard, copyImageToClipboard } from '#lib/utils/asset-utils.ts';
+  import { getNaturalSize, type Size } from '#lib/utils/container-utils.ts';
+  import { handleError } from '#lib/utils/handle-error.ts';
+  import { getOcrBoundingBoxes } from '#lib/utils/ocr-utils.ts';
+  import { getBoundingBox, type BoundingBox } from '#lib/utils/people-utils.ts';
+  import { fittedPhoto, resizePhotoViewport, visibleCropRegion } from '#lib/utils/zoom-geometry.ts';
   import { AssetMediaSize, AssetTypeEnum, type SharedLinkResponseDto } from '@immich/sdk';
   import { toastManager } from '@immich/ui';
   import { onDestroy, untrack } from 'svelte';
@@ -45,19 +46,24 @@
 
   const { slideshowState, slideshowLook } = slideshowStore;
   const asset = $derived(cursor.current);
+  const viewerSpace = getViewerSpace();
 
   let visibleImageReady: boolean = $state(false);
   let retryOriginal = $state(0);
   let zoomElement = $state<HTMLDivElement>();
   const imageSize = $derived({ width: asset.width || 1, height: asset.height || 1 });
   const navigatorUrl = $derived(
-    getAssetMediaUrl({ id: asset.id, cacheKey: asset.thumbhash, size: AssetMediaSize.Preview }),
+    getAssetMediaUrl({
+      id: asset.id,
+      cacheKey: `${asset.thumbhash ?? ''}:${asset.fileModifiedAt}`,
+      size: AssetMediaSize.Preview,
+    }),
   );
   const limited = $derived(!!sharedLink && (!sharedLink.allowDownload || !sharedLink.showMetadata));
   const canCrop = $derived(
     !sharedLink &&
       authManager.authenticated &&
-      authManager.user.id === asset.ownerId &&
+      canEditAsset(asset, { userId: authManager.user.id }) &&
       asset.type === AssetTypeEnum.Image &&
       !asset.livePhotoVideoId &&
       asset.exifInfo?.projectionType !== ProjectionType.EQUIRECTANGULAR &&
@@ -77,7 +83,7 @@
 
   let previousAssetId: string | undefined;
   $effect.pre(() => {
-    const id = asset.id;
+    const id = `${asset.id}:${asset.fileModifiedAt}`;
     if (id === previousAssetId) {
       return;
     }
@@ -99,6 +105,7 @@
 
   let containerWidth = $state(0);
   let containerHeight = $state(0);
+  const faceLabelOffset = 32;
 
   const container = $derived({
     width: containerWidth,
@@ -164,7 +171,7 @@
 
     const crop = visibleCropRegion(imageSize, container, assetViewerManager.zoomState);
     if (mediaQueryManager.maxMd) {
-      handlePromiseError(editManager.saveImageCropFromViewer(asset, crop));
+      handlePromiseError(editManager.saveImageCropFromViewer(asset, crop, viewerSpace().spaceId));
       return;
     }
 
@@ -240,9 +247,12 @@
 
   const faces = $derived(Array.from(faceToNameMap.keys()));
 
-  const boundingBoxes = $derived.by(() => {
+  // we want to bind to `boundingbox.labelWidth`, which requires deep reactivity
+  // $derived does not currently support that, only $state does.
+  let boundingBoxes = $state<Array<BoundingBox & { name?: string; face: Faces }>>([]);
+  $effect(() => {
     if (assetViewerManager.isFaceEditMode || ocrManager.showOverlay) {
-      return [];
+      return;
     }
 
     const knownBoxes = getBoundingBox(faces, overlaySize);
@@ -253,7 +263,7 @@
     }));
 
     if (assetViewerManager.highlightedFaces.length === 0) {
-      return result;
+      boundingBoxes = result;
     }
 
     const knownIds = new Set(faces.map((f) => f.id));
@@ -263,7 +273,7 @@
       result.push({ ...unassignedBoxes[i], face: unassignedFaces[i], name: undefined });
     }
 
-    return result;
+    boundingBoxes = result;
   });
 </script>
 
@@ -337,7 +347,7 @@
           </svg>
         </div>
         {#each boundingBoxes as boundingbox (boundingbox.id)}
-          {@const isActive = assetViewerManager.highlightedFaces.some((f) => f.id === boundingbox.id)}
+          {const isActive = $derived(assetViewerManager.highlightedFaces.some((f) => f.id === boundingbox.id))}
           <!-- svelte-ignore a11y_no_static_element_interactions -->
           <div
             class="pointer-events-auto absolute rounded-lg {isActive && 'border-3 border-solid border-white'}"
@@ -346,11 +356,16 @@
             onpointerleave={() => assetViewerManager.clearHighlightedFaces()}
           >
             {#if isActive && boundingbox.name}
+              {const labelAbove = $derived(
+                boundingbox.top + boundingbox.height + faceLabelOffset > overlaySize.height &&
+                  boundingbox.top >= faceLabelOffset,
+              )}
               <div
                 aria-hidden="true"
                 class="absolute rounded-sm bg-white/90 px-2 py-1 text-sm font-medium whitespace-nowrap text-black shadow-lg"
-                style="top: {boundingbox.height + 4}px; {assetViewerManager.imgRef
-                  ? boundingbox.left >= 0
+                bind:clientWidth={boundingbox.labelWidth}
+                style="{labelAbove ? 'bottom' : 'top'}: {boundingbox.height + 4}px; {assetViewerManager.imgRef
+                  ? boundingbox.left >= boundingbox.labelWidth - boundingbox.width
                     ? `right: ${Math.max(boundingbox.left + boundingbox.width - assetViewerManager.imgRef.clientWidth, 0)}px;`
                     : `left: ${-boundingbox.left}px;`
                   : ''}"
@@ -381,6 +396,12 @@
   {/if}
 
   {#if assetViewerManager.isFaceEditMode && assetViewerManager.imgRef}
-    <FaceEditor htmlElement={assetViewerManager.imgRef} {containerWidth} {containerHeight} assetId={asset.id} />
+    <FaceEditorPanel
+      htmlElement={assetViewerManager.imgRef}
+      {containerWidth}
+      {containerHeight}
+      assetId={asset.id}
+      {asset}
+    />
   {/if}
 </div>

@@ -1,25 +1,10 @@
 import { Injectable } from '@nestjs/common';
-import AsyncLock from 'async-lock';
-import { randomUUID } from 'node:crypto';
-import { isAbsolute } from 'node:path';
-import type {
-  AudioStreamInfo,
-  DecodeToBufferOptions,
-  GenerateThumbnailOptions,
-  ImageDimensions,
-  JobItem,
-  JobOf,
-  VideoFormat,
-  VideoInterfaces,
-  VideoStreamInfo,
-} from 'src/types.js';
-import { DiskStorageBackend } from 'src/backends/disk-storage.backend.js';
-import { FACE_THUMBNAIL_SIZE } from 'src/constants.js';
+import { FACE_THUMBNAIL_SIZE, THUMBNAIL_DECODING_TIER } from 'src/constants.js';
 import { ImagePathOptions, StorageCore, ThumbnailPathEntity } from 'src/cores/storage.core.js';
 import { AssetFile } from 'src/database.js';
 import { OnEvent, OnJob } from 'src/decorators.js';
 import { ConfigFFmpegDto, SystemConfig } from 'src/dtos/config.dto.js';
-import { AssetEditAction, CropParameters, TrimParameters } from 'src/dtos/editing.dto.js';
+import { AssetEditAction, CropParameters } from 'src/dtos/editing.dto.js';
 import {
   AssetFileType,
   AssetType,
@@ -39,11 +24,24 @@ import {
   VideoCodec,
   VideoContainer,
 } from 'src/enum.js';
+import type { ImageAdjust } from 'src/gallery/dtos/image-adjust.dto.js';
+import { getRelativeEncodedVideoPath, getRelativePersonThumbnailPath } from 'src/gallery/utils/storage-keys.js';
 import { AssetJobRepository } from 'src/repositories/asset-job.repository.js';
 import { BoundingBox } from 'src/repositories/machine-learning.repository.js';
 import { BaseService } from 'src/services/base.service.js';
-import { StorageService } from 'src/services/storage.service.js';
+import type {
+  AudioStreamInfo,
+  DecodeToBufferOptions,
+  GenerateThumbnailOptions,
+  ImageDimensions,
+  JobItem,
+  JobOf,
+  VideoFormat,
+  VideoInterfaces,
+  VideoStreamInfo,
+} from 'src/types.js';
 import { getAssetFile, getDimensions } from 'src/utils/asset.util.js';
+import { tokenizeForSearch } from 'src/utils/database.js';
 import { checkFaceVisibility, checkOcrVisibility } from 'src/utils/editor.js';
 import { BaseConfig, ThumbnailConfig } from 'src/utils/media.js';
 import { mimeTypes } from 'src/utils/mime-types.js';
@@ -65,50 +63,9 @@ type ThumbnailAsset = NonNullable<Awaited<ReturnType<AssetJobRepository['getForG
 export class MediaService extends BaseService {
   videoInterfaces: VideoInterfaces = { dri: [], mali: false };
 
-  // Serializes video trims per asset id. Rapid re-trims otherwise race: the second
-  // job overwrites `{id}_edited.mp4` while the first may still be probing/reading it,
-  // and both share the trim output as thumbnail input (issue #743 item 2).
-  private videoTrimLock = new AsyncLock();
-
   @OnEvent({ name: 'AppBootstrap', workers: [ImmichWorker.Microservices] })
   async onBootstrap() {
     this.videoInterfaces = await this.storageCore.getVideoInterfaces();
-  }
-
-  /**
-   * After generating a file locally, uploads it to S3 if the write backend is S3.
-   * Returns the key to store in the DB.
-   */
-  private async persistFile(localPath: string, relativeKey: string, contentType?: string): Promise<string> {
-    const writeBackend = StorageService.getWriteBackend();
-    if (!writeBackend || writeBackend instanceof DiskStorageBackend) {
-      // Disk mode: the file was already written to the final path
-      return localPath;
-    }
-    // S3 mode: upload the locally-generated file
-    const stream = this.storageRepository.createPlainReadStream(localPath);
-    await writeBackend.put(relativeKey, stream, { contentType });
-    // Clean up local temp file
-    await this.storageRepository.unlink(localPath).catch(() => {
-      /* ignore */
-    });
-    return relativeKey;
-  }
-
-  /**
-   * Persists every generated image file and rewrites its path to the stored location.
-   * Every ffmpeg/sharp output path must go through this — forgetting it is how the
-   * trim thumbnails ended up unpersisted on S3 (gh#671).
-   */
-  private async persistImageFiles(asset: ThumbnailAsset, files: UpsertFileOptions[]): Promise<void> {
-    for (const file of files) {
-      const relativeKey = StorageCore.getRelativeImagePath(asset, {
-        fileType: file.type,
-        format: file.path.split('.').pop() as ImageFormat,
-        isEdited: file.isEdited,
-      });
-      file.path = await this.persistFile(file.path, relativeKey, mimeTypes.lookup(file.path));
-    }
   }
 
   @OnJob({ name: JobName.AssetGenerateThumbnailsQueueAll, queue: QueueName.ThumbnailGeneration })
@@ -187,16 +144,19 @@ export class MediaService extends BaseService {
 
   @OnJob({ name: JobName.AssetFileMigration, queue: QueueName.Migration })
   async handleAssetMigration({ id }: JobOf<JobName.AssetFileMigration>): Promise<JobStatus> {
+    return this.databaseRepository.withAssetLock(id, async () => {
+      if (await this.assetEditSaveRepository.isSaving(id, false)) {
+        return JobStatus.Skipped;
+      }
+      return this.handleAssetMigrationUnlocked({ id });
+    });
+  }
+
+  private async handleAssetMigrationUnlocked({ id }: JobOf<JobName.AssetFileMigration>): Promise<JobStatus> {
     const { image } = await this.getConfig({ withCache: true });
     const asset = await this.assetJobRepository.getForMigrationJob(id);
     if (!asset) {
       return JobStatus.Failed;
-    }
-
-    if (!asset.originalPath || !isAbsolute(asset.originalPath)) {
-      // S3 assets live under relative keys and are managed by the S3 backend, not fs.rename.
-      this.logger.debug(`Skipping asset file migration for S3 asset ${id}`);
-      return JobStatus.Skipped;
     }
 
     await this.storageCore.moveAssetImage(asset, AssetFileType.FullSize, image.fullsize.format);
@@ -208,25 +168,18 @@ export class MediaService extends BaseService {
   }
 
   @OnJob({ name: JobName.AssetEditThumbnailGeneration, queue: QueueName.Editor })
-  async handleAssetEditThumbnailGeneration({
-    id,
-    editSaveOperationId,
-  }: JobOf<JobName.AssetEditThumbnailGeneration>): Promise<JobStatus> {
-    if (editSaveOperationId) {
-      const request = { id: editSaveOperationId, result: JobStatus.Skipped };
-      await this.eventRepository.emit('AssetEditSave', request);
-      return request.result;
-    }
-    return this.databaseRepository.withAssetLock(id, async () => {
-      if (await this.assetEditSaveRepository.isSaving(id, false)) {
+  async handleAssetEditThumbnailGeneration(job: JobOf<JobName.AssetEditThumbnailGeneration>): Promise<JobStatus> {
+    return this.databaseRepository.withAssetLock(job.id, async () => {
+      if (await this.assetEditSaveRepository.isSaving(job.id, false)) {
         return JobStatus.Skipped;
       }
-      return this.handleAssetEditThumbnailGenerationUnlocked({ id });
+      return this.handleAssetEditThumbnailGenerationUnlocked(job);
     });
   }
 
   private async handleAssetEditThumbnailGenerationUnlocked({
     id,
+    ...editJob
   }: JobOf<JobName.AssetEditThumbnailGeneration>): Promise<JobStatus> {
     const asset = await this.assetJobRepository.getForGenerateThumbnailJob(id);
     const config = await this.getConfig({ withCache: true });
@@ -236,193 +189,46 @@ export class MediaService extends BaseService {
       return JobStatus.Failed;
     }
 
+    // Gallery: a video's edited files are its trim's (src/gallery/services/video-trim.service.ts)
+    if (asset.type === AssetType.Video) {
+      await this.jobRepository.queue({ name: JobName.AssetVideoTrimGenerate, data: { id, ...editJob } });
+      return JobStatus.Success;
+    }
+
     // For S3 assets, download the original to a local temp file for processing
-    const { localPath, cleanup } = await this.ensureLocalFile(asset.originalPath);
+    await using original = await this.backendMedia.ensureLocalFile(asset.originalPath);
+    const { localPath } = original;
 
-    try {
-      const trimEdit = asset.edits.find((e) => e.action === AssetEditAction.Trim);
+    const generated = await this.generateEditedThumbnails(asset, config, localPath);
 
-      if (asset.type === AssetType.Video && trimEdit) {
-        return await this.videoTrimLock.acquire(asset.id, () =>
-          this.handleVideoTrim(asset, config, trimEdit, localPath),
-        );
-      }
-
-      if (asset.type === AssetType.Video && asset.edits.length === 0) {
-        // Video undo path — clean up edited files and regenerate thumbnails from original
-        await this.syncFiles(
-          asset.files.filter((file) => file.isEdited),
-          [],
-        );
-
-        // asset.files never contains EncodedVideo rows (getForGenerateThumbnailJob only loads
-        // thumbnail/preview/fullsize), so syncFiles cannot see the trimmed video. Without this,
-        // getForVideo (isEdited DESC) would keep serving the trimmed video after an undo.
-        const editedVideo = await this.assetRepository.getEditedEncodedVideo(asset.id);
-        if (editedVideo) {
-          await this.assetRepository.deleteFiles([editedVideo]);
-          await this.jobRepository.queue({ name: JobName.FileDelete, data: { files: [editedVideo.path] } });
-        }
-
-        await this.jobRepository.queue({ name: JobName.AssetGenerateThumbnails, data: { id } });
-        return JobStatus.Success;
-      }
-
-      const generated = await this.generateEditedThumbnails(asset, config, localPath);
-
-      // Persist output files to S3 if needed
-      if (generated?.files) {
-        await this.persistImageFiles(asset, generated.files);
-      }
-
-      await this.syncFiles(
-        asset.files.filter((file) => file.isEdited),
-        generated?.files ?? [],
-      );
-
-      let thumbhash: Buffer | undefined = generated?.thumbhash;
-      if (!thumbhash) {
-        const extractedImage = await this.extractOriginalImage(asset, config.image, false, localPath);
-        const { info, data, colorspace } = extractedImage;
-
-        thumbhash = await this.mediaRepository.generateThumbhash(data, {
-          colorspace,
-          processInvalidImages: false,
-          raw: info,
-          edits: [],
-        });
-      }
-
-      if (!asset.thumbhash || Buffer.compare(asset.thumbhash, thumbhash) !== 0) {
-        await this.assetRepository.update({ id: asset.id, thumbhash });
-      }
-
-      const fullsizeDimensions = generated?.fullsizeDimensions ?? getDimensions(asset.exifInfo!);
-      await this.assetRepository.update({ id: asset.id, ...fullsizeDimensions });
-
-      return JobStatus.Success;
-    } finally {
-      await cleanup();
-    }
-  }
-
-  private async handleVideoTrim(
-    asset: ThumbnailAsset,
-    config: SystemConfig,
-    trimEdit: ThumbnailAsset['edits'][number],
-    localPath: string,
-  ): Promise<JobStatus> {
-    const params = trimEdit.parameters as TrimParameters & { originalDuration: number };
-    const duration = params.endTime - params.startTime;
-
-    // ffmpeg always reads the original. The asset's encoded video is not a candidate:
-    // getForGenerateThumbnailJob never loads EncodedVideo rows (asset-job.repository.ts),
-    // and on S3 its path would be a relative key ffmpeg cannot open anyway.
-    const inputPath = localPath;
-
-    // Output path for edited encoded video in EncodedVideo directory
-    const outputPath = StorageCore.getEditedEncodedVideoPath(asset);
-    this.storageCore.ensureFolders(outputPath);
-
-    // Trim to a unique temp path and atomically rename into place — ffmpeg writing
-    // the final path in place would let a concurrent reader (probe / frame extraction
-    // in another worker process) open a partial file (issue #743 item 2).
-    const trimTempPath = `${outputPath}.tmp-${randomUUID()}.mp4`;
-    try {
-      await this.mediaRepository.trim(inputPath, trimTempPath, params.startTime, duration);
-      await this.storageRepository.rename(trimTempPath, outputPath);
-    } catch (error) {
-      this.logger.error(`FFmpeg trim failed for asset ${asset.id}: ${error}`);
-      await this.storageRepository.unlink(trimTempPath).catch(() => {});
-      return JobStatus.Failed;
+    // Persist output files to S3 if needed
+    if (generated?.files) {
+      await this.backendMedia.persistImageFiles(asset, generated.files);
     }
 
-    // outputPath is now a locally-written trimmed video. Every step below can throw; on failure
-    // the catch removes it (and the extracted frame) so an S3-mode error doesn't leak temps on
-    // the pod's local disk — persistFile is what hands ownership of outputPath to the write backend.
-    //
-    // The frame path is unique per invocation: the in-process trim lock does not cover other
-    // worker processes, and a fixed name would let one job's cleanup unlink the frame another
-    // job is still reading (issue #743 item 2).
-    const framePath = `${outputPath}.frame-${randomUUID()}.jpg`;
-    try {
-      // Re-probe for the actual trimmed duration. It is committed to the DB only after the
-      // trimmed video is durably persisted (below), so a mid-op failure can't leave the asset's
-      // duration pointing at a video that was never stored.
-      const probeResult = await this.mediaRepository.probe(outputPath);
-      const probedDuration = probeResult.format.duration;
-      let newDuration: number;
-      if (probedDuration && probedDuration > 0) {
-        newDuration = Math.round(probedDuration * 1000);
-        this.logger.debug(`Trim: updating duration from probe: ${newDuration} (${probedDuration}s)`);
-      } else {
-        // Probe didn't return duration — use calculated duration from trim parameters
-        newDuration = Math.round((params.endTime - params.startTime) * 1000);
-        this.logger.debug(`Trim: probe duration unavailable, using calculated: ${newDuration}`);
-      }
+    await this.syncFiles(
+      asset.files.filter((file) => file.isEdited),
+      generated?.files ?? [],
+    );
 
-      // Extract a frame at ~10% into the trimmed video for thumbnail generation
-      const frameTime = duration * 0.1;
-      await this.mediaRepository.extractFrame(outputPath, framePath, frameTime);
+    let thumbhash: Buffer | undefined = generated?.thumbhash;
+    if (!thumbhash) {
+      const { info, data, colorspace } = await this.extractOriginalImage(asset, config.image, false, localPath);
 
-      // Generate thumbnail/preview/fullsize from extracted frame
-      const thumbnailResult = await this.generateImageThumbnails(
-        { ...asset, originalPath: framePath },
-        config,
-        true,
-        framePath,
+      thumbhash = await this.mediaRepository.generateThumbhash(
+        { data, info },
+        { colorspace, processInvalidImages: false, edits: [] },
       );
-
-      // Clean up temp frame
-      await this.storageRepository.unlink(framePath).catch(() => {});
-
-      // Persist output files to S3 if needed
-      await this.persistImageFiles(asset, thumbnailResult.files);
-
-      // persistFile unlinks the local file after uploading, so this must come AFTER
-      // probe() and extractFrame() have read outputPath.
-      const editedVideoPath = await this.persistFile(
-        outputPath,
-        StorageCore.getRelativeEditedEncodedVideoPath(asset),
-        'video/mp4',
-      );
-
-      // Sync both edited encoded video and edited thumbnail files
-      const editedVideoFile: UpsertFileOptions = {
-        assetId: asset.id,
-        type: AssetFileType.EncodedVideo,
-        path: editedVideoPath,
-        isEdited: true,
-        isProgressive: false,
-        isTransparent: false,
-      };
-      const newFiles = [editedVideoFile, ...thumbnailResult.files];
-
-      await this.syncFiles(
-        asset.files.filter((file) => file.isEdited),
-        newFiles,
-      );
-
-      // Commit the new duration only now that the trimmed video + files are persisted.
-      await this.assetRepository.update({ id: asset.id, duration: newDuration });
-
-      if (
-        thumbnailResult.thumbhash &&
-        (!asset.thumbhash || Buffer.compare(asset.thumbhash, thumbnailResult.thumbhash) !== 0)
-      ) {
-        await this.assetRepository.update({ id: asset.id, thumbhash: thumbnailResult.thumbhash });
-      }
-
-      return JobStatus.Success;
-    } catch (error) {
-      // A post-trim step failed. Remove the local trimmed video + extracted frame so an S3-mode
-      // failure doesn't leak temps on local disk (persistFile may already have removed outputPath
-      // on the S3 happy path — unlink is best-effort). Rethrow so the job fails and BullMQ retries.
-      this.logger.error(`Trim post-processing failed for asset ${asset.id}: ${error}`);
-      await this.storageRepository.unlink(outputPath).catch(() => {});
-      await this.storageRepository.unlink(framePath).catch(() => {});
-      throw error;
     }
+
+    if (!asset.thumbhash || Buffer.compare(asset.thumbhash, thumbhash) !== 0) {
+      await this.assetRepository.update({ id: asset.id, thumbhash });
+    }
+
+    const fullsizeDimensions = generated?.fullsizeDimensions ?? getDimensions(asset.exifInfo!);
+    await this.assetRepository.update({ id: asset.id, ...fullsizeDimensions });
+
+    return JobStatus.Success;
   }
 
   @OnJob({ name: JobName.AssetGenerateThumbnails, queue: QueueName.ThumbnailGeneration })
@@ -450,41 +256,38 @@ export class MediaService extends BaseService {
     }
 
     // For S3 assets, download the original to a local temp file for processing
-    const { localPath, cleanup } = await this.ensureLocalFile(asset.originalPath);
+    await using original = await this.backendMedia.ensureLocalFile(asset.originalPath);
+    const { localPath } = original;
 
-    try {
-      let generated: Awaited<ReturnType<MediaService['generateImageThumbnails']>>;
-      if (asset.type === AssetType.Video || asset.originalFileName.toLowerCase().endsWith('.gif')) {
-        this.logger.verbose(`Thumbnail generation for video ${id} ${asset.originalPath}`);
-        generated = await this.generateVideoThumbnails(asset, config, localPath);
-      } else if (asset.type === AssetType.Image) {
-        this.logger.verbose(`Thumbnail generation for image ${id} ${asset.originalPath}`);
-        generated = await this.generateImageThumbnails(asset, config, false, localPath);
-      } else {
-        this.logger.warn(`Skipping thumbnail generation for asset ${id}: ${asset.type} is not an image or video`);
-        return JobStatus.Skipped;
-      }
-
-      // Persist output files to S3 if needed
-      await this.persistImageFiles(asset, generated.files);
-
-      const editedGenerated = await this.generateEditedThumbnails(asset, config, localPath);
-      if (editedGenerated) {
-        await this.persistImageFiles(asset, editedGenerated.files);
-        generated.files.push(...editedGenerated.files);
-      }
-
-      await this.syncFiles(asset.files, generated.files);
-      const thumbhash = editedGenerated?.thumbhash || generated.thumbhash;
-
-      if (!asset.thumbhash || Buffer.compare(asset.thumbhash, thumbhash) !== 0) {
-        await this.assetRepository.update({ id: asset.id, thumbhash });
-      }
-
-      return JobStatus.Success;
-    } finally {
-      await cleanup();
+    let generated: Awaited<ReturnType<MediaService['generateImageThumbnails']>>;
+    if (asset.type === AssetType.Video || asset.originalFileName.toLowerCase().endsWith('.gif')) {
+      this.logger.verbose(`Thumbnail generation for video ${id} ${asset.originalPath}`);
+      generated = await this.generateVideoThumbnails(asset, config, localPath);
+    } else if (asset.type === AssetType.Image) {
+      this.logger.verbose(`Thumbnail generation for image ${id} ${asset.originalPath}`);
+      generated = await this.generateImageThumbnails(asset, config, false, localPath);
+    } else {
+      this.logger.warn(`Skipping thumbnail generation for asset ${id}: ${asset.type} is not an image or video`);
+      return JobStatus.Skipped;
     }
+
+    // Persist output files to S3 if needed
+    await this.backendMedia.persistImageFiles(asset, generated.files);
+
+    const editedGenerated = await this.generateEditedThumbnails(asset, config, localPath);
+    if (editedGenerated) {
+      await this.backendMedia.persistImageFiles(asset, editedGenerated.files);
+      generated.files.push(...editedGenerated.files);
+    }
+
+    await this.syncFiles(asset.files, generated.files);
+    const thumbhash = editedGenerated?.thumbhash || generated.thumbhash;
+
+    if (!asset.thumbhash || Buffer.compare(asset.thumbhash, thumbhash) !== 0) {
+      await this.assetRepository.update({ id: asset.id, thumbhash });
+    }
+
+    return JobStatus.Success;
   }
 
   private async extractImage(originalPath: string, minSize: number) {
@@ -517,13 +320,14 @@ export class MediaService extends BaseService {
     localOriginalPath?: string,
   ) {
     const inputPath = localOriginalPath ?? asset.originalPath;
-    const extractEmbedded = image.extractEmbedded && mimeTypes.isRaw(asset.originalFileName);
-    const extracted = extractEmbedded ? await this.extractImage(inputPath, image.preview.size) : null;
-    const generateFullsize =
+    const isExtractEmbedded = image.extractEmbedded && mimeTypes.isRaw(asset.originalFileName);
+    const extracted = isExtractEmbedded ? await this.extractImage(inputPath, image.preview.size) : null;
+    const isGenerateFullsize =
       ((image.fullsize.enabled || asset.exifInfo.projectionType === 'EQUIRECTANGULAR') &&
         !mimeTypes.isWebSupportedImage(asset.originalPath)) ||
       useEdits;
-    const convertFullsize = generateFullsize && (!extracted || !mimeTypes.isWebSupportedImage(` .${extracted.format}`));
+    const isConvertFullsize =
+      isGenerateFullsize && (!extracted || !mimeTypes.isWebSupportedImage(` .${extracted.format}`));
 
     const thumbSource = extracted ? extracted.buffer : inputPath;
     const { data, info, colorspace } = await this.decodeImage(
@@ -531,7 +335,7 @@ export class MediaService extends BaseService {
       // only specify orientation to extracted images which don't have EXIF orientation data
       // or it can double rotate the image
       extracted ? asset.exifInfo : { ...asset.exifInfo, orientation: null },
-      convertFullsize ? undefined : image.preview.size,
+      isConvertFullsize ? undefined : image.preview.size,
     );
 
     let isTransparent = false;
@@ -544,21 +348,22 @@ export class MediaService extends BaseService {
       data,
       info,
       colorspace,
-      convertFullsize,
-      generateFullsize,
+      convertFullsize: isConvertFullsize,
+      generateFullsize: isGenerateFullsize,
       isTransparent,
     };
   }
 
-  private async generateImageThumbnails(
+  protected async generateImageThumbnails(
     asset: ThumbnailAsset,
     { image }: SystemConfig,
     useEdits: boolean = false,
     localOriginalPath?: string,
+    adjust?: ImageAdjust,
   ) {
     // Handle embedded preview extraction for RAW files
-    const extractedImage = await this.extractOriginalImage(asset, image, useEdits, localOriginalPath);
-    const { info, data, colorspace, generateFullsize, convertFullsize, extracted, isTransparent } = extractedImage;
+    const { info, data, colorspace, generateFullsize, convertFullsize, extracted, isTransparent } =
+      await this.extractOriginalImage(asset, image, useEdits, localOriginalPath);
 
     const previewFormat = image.preview.format;
     this.warnOnTransparencyLoss(isTransparent, previewFormat, asset.id);
@@ -570,26 +375,37 @@ export class MediaService extends BaseService {
       fileType: AssetFileType.Preview,
       format: previewFormat,
       isEdited: useEdits,
-      isProgressive: !!image.preview.progressive && previewFormat !== ImageFormat.Webp,
+      isProgressive: !!image.preview.progressive && previewFormat === ImageFormat.Jpeg,
       isTransparent,
     });
     const thumbnailFile = this.getImageFile(asset, {
       fileType: AssetFileType.Thumbnail,
       format: thumbnailFormat,
       isEdited: useEdits,
-      isProgressive: !!image.thumbnail.progressive && thumbnailFormat !== ImageFormat.Webp,
+      isProgressive: !!image.thumbnail.progressive && thumbnailFormat === ImageFormat.Jpeg,
       isTransparent,
     });
     this.storageCore.ensureFolders(previewFile.path);
 
     // generate final images
-    const baseOptions = { colorspace, processInvalidImages: false, raw: info, edits: useEdits ? asset.edits : [] };
-    const thumbnailOptions = { ...image.thumbnail, ...baseOptions, format: thumbnailFormat };
-    const previewOptions = { ...image.preview, ...baseOptions, format: previewFormat };
+    const decoded = { data, info };
+    const baseOptions = {
+      colorspace,
+      processInvalidImages: false,
+      edits: useEdits ? asset.edits : [],
+      adjust: useEdits ? adjust : undefined,
+    };
+    const thumbnailOptions = {
+      ...image.thumbnail,
+      ...baseOptions,
+      format: thumbnailFormat,
+      decodingTier: THUMBNAIL_DECODING_TIER,
+    } as const;
+    const previewOptions = { ...image.preview, ...baseOptions, format: previewFormat, decodingTier: 0 } as const;
     const promises = [
-      this.mediaRepository.generateThumbhash(data, baseOptions),
-      this.mediaRepository.generateThumbnail(data, thumbnailOptions, thumbnailFile.path),
-      this.mediaRepository.generateThumbnail(data, previewOptions, previewFile.path),
+      this.mediaRepository.generateThumbhash(decoded, baseOptions),
+      this.mediaRepository.generateThumbnail(decoded, thumbnailOptions, thumbnailFile.path),
+      this.mediaRepository.generateThumbnail(decoded, previewOptions, previewFile.path),
     ];
 
     let fullsizeFile: UpsertFileOptions | undefined;
@@ -601,7 +417,7 @@ export class MediaService extends BaseService {
         fileType: AssetFileType.FullSize,
         format: fullsizeFormat,
         isEdited: useEdits,
-        isProgressive: !!image.fullsize.progressive && fullsizeFormat !== ImageFormat.Webp,
+        isProgressive: !!image.fullsize.progressive && fullsizeFormat === ImageFormat.Jpeg,
         isTransparent,
       });
       const fullsizeOptions = {
@@ -609,14 +425,15 @@ export class MediaService extends BaseService {
         format: fullsizeFormat,
         quality: image.fullsize.quality,
         progressive: image.fullsize.progressive,
-      };
-      promises.push(this.mediaRepository.generateThumbnail(data, fullsizeOptions, fullsizeFile.path));
+        decodingTier: 0,
+      } as const;
+      promises.push(this.mediaRepository.generateThumbnail(decoded, fullsizeOptions, fullsizeFile.path));
     } else if (generateFullsize && extracted && extracted.format === RawExtractedFormat.Jpeg) {
       fullsizeFile = this.getImageFile(asset, {
         fileType: AssetFileType.FullSize,
         format: extracted.format,
         isEdited: false,
-        isProgressive: !!image.fullsize.progressive && image.fullsize.format !== ImageFormat.Webp,
+        isProgressive: !!image.fullsize.progressive && image.fullsize.format === ImageFormat.Jpeg,
         isTransparent,
       });
       this.storageCore.ensureFolders(fullsizeFile.path);
@@ -667,69 +484,71 @@ export class MediaService extends BaseService {
       return JobStatus.Failed;
     }
 
-    const { x1, y1, x2, y2, oldWidth, oldHeight, exifOrientation, previewPath, originalPath } = data;
+    const { oldWidth, oldHeight, exifOrientation, originalPath } = data;
+    const { previewPath, x1, y1, x2, y2 } = await this.backendMedia.getPersonThumbnailSource(
+      { ownerId, personGroupId },
+      data,
+    );
 
     // For S3 assets, download to local temp files for processing
-    const originalLocal = await this.ensureLocalFile(originalPath);
-    const previewLocal = previewPath ? await this.ensureLocalFile(previewPath) : undefined;
+    await using originalLocal = await this.backendMedia.ensureLocalFile(originalPath);
+    await using previewLocal = previewPath ? await this.backendMedia.ensureLocalFile(previewPath) : undefined;
 
-    try {
-      let inputImage: string | Buffer;
-      if (data.type === AssetType.Video) {
-        if (!previewLocal?.localPath) {
-          this.logger.error(`Could not generate person thumbnail for video ${personGroupId}: missing preview path`);
-          return JobStatus.Failed;
-        }
-        inputImage = previewLocal.localPath;
-      } else if (image.extractEmbedded && mimeTypes.isRaw(originalPath)) {
-        const extracted = await this.extractImage(originalLocal.localPath, image.preview.size);
-        inputImage = extracted ? extracted.buffer : originalLocal.localPath;
-      } else {
-        inputImage = originalLocal.localPath;
+    let inputImage: string | Buffer;
+    if (data.type === AssetType.Video) {
+      if (!previewLocal?.localPath) {
+        this.logger.error(`Could not generate person thumbnail for video ${personGroupId}: missing preview path`);
+        return JobStatus.Failed;
       }
-
-      const { data: decodedImage, info } = await this.mediaRepository.decodeImage(inputImage, {
-        colorspace: image.colorspace,
-        processInvalidImages: process.env.IMMICH_PROCESS_INVALID_IMAGES === 'true',
-        // if this is an extracted image, it may not have orientation metadata
-        orientation: Buffer.isBuffer(inputImage) && exifOrientation ? Number(exifOrientation) : undefined,
-      });
-
-      const thumbnailPath = StorageCore.getPersonThumbnailPath({ ownerId, personGroupId });
-      this.storageCore.ensureFolders(thumbnailPath);
-
-      const thumbnailOptions: GenerateThumbnailOptions = {
-        colorspace: image.colorspace,
-        format: ImageFormat.Jpeg,
-        raw: info,
-        quality: image.thumbnail.quality,
-        progressive: false,
-        processInvalidImages: false,
-        size: FACE_THUMBNAIL_SIZE,
-        edits: [
-          {
-            action: AssetEditAction.Crop,
-            parameters: this.getCrop(
-              { old: { width: oldWidth, height: oldHeight }, new: { width: info.width, height: info.height } },
-              { x1, y1, x2, y2 },
-            ),
-          },
-        ],
-      };
-
-      await this.mediaRepository.generateThumbnail(decodedImage, thumbnailOptions, thumbnailPath);
-
-      // Persist person thumbnail to S3 if needed
-      const relativeKey = StorageCore.getRelativePersonThumbnailPath({ ownerId, personGroupId });
-      const finalPath = await this.persistFile(thumbnailPath, relativeKey, 'image/jpeg');
-
-      await this.personRepository.update({ ownerId, personGroupId, thumbnailPath: finalPath });
-
-      return JobStatus.Success;
-    } finally {
-      await originalLocal.cleanup();
-      await previewLocal?.cleanup();
+      inputImage = previewLocal.localPath;
+    } else if (image.extractEmbedded && mimeTypes.isRaw(originalPath)) {
+      const extracted = await this.extractImage(originalLocal.localPath, image.preview.size);
+      inputImage = extracted ? extracted.buffer : originalLocal.localPath;
+    } else {
+      inputImage = originalLocal.localPath;
     }
+
+    const decoded = await this.mediaRepository.decodeImage(inputImage, {
+      colorspace: image.colorspace,
+      processInvalidImages: process.env.IMMICH_PROCESS_INVALID_IMAGES === 'true',
+      // if this is an extracted image, it may not have orientation metadata
+      orientation: Buffer.isBuffer(inputImage) && exifOrientation ? Number(exifOrientation) : undefined,
+    });
+
+    const thumbnailPath = StorageCore.getPersonThumbnailPath({ ownerId, personGroupId });
+    this.storageCore.ensureFolders(thumbnailPath);
+
+    const thumbnailOptions: GenerateThumbnailOptions = {
+      colorspace: image.colorspace,
+      format: ImageFormat.Jpeg,
+      quality: image.thumbnail.quality,
+      progressive: false,
+      processInvalidImages: false,
+      size: FACE_THUMBNAIL_SIZE,
+      edits: [
+        {
+          action: AssetEditAction.Crop,
+          parameters: this.getCrop(
+            {
+              old: { width: oldWidth, height: oldHeight },
+              new: { width: decoded.info.width, height: decoded.info.height },
+            },
+            { x1, y1, x2, y2 },
+          ),
+        },
+      ],
+      decodingTier: THUMBNAIL_DECODING_TIER,
+    };
+
+    await this.mediaRepository.generateThumbnail(decoded, thumbnailOptions, thumbnailPath);
+
+    // Persist person thumbnail to S3 if needed
+    const relativeKey = getRelativePersonThumbnailPath({ ownerId, personGroupId });
+    const finalPath = await this.backendMedia.persistFile(thumbnailPath, relativeKey, 'image/jpeg');
+
+    await this.personRepository.update({ ownerId, personGroupId, thumbnailPath: finalPath });
+
+    return JobStatus.Success;
   }
 
   private getCrop(
@@ -778,14 +597,15 @@ export class MediaService extends BaseService {
     const inputPath = localOriginalPath ?? asset.originalPath;
     const previewFile = this.getImageFile(asset, {
       fileType: AssetFileType.Preview,
-      format: image.preview.format,
+      // TODO: write JPEG XL for video thumbnails
+      format: image.preview.format === ImageFormat.Jxl ? ImageFormat.Webp : image.preview.format,
       isEdited: false,
       isProgressive: false,
       isTransparent: false,
     });
     const thumbnailFile = this.getImageFile(asset, {
       fileType: AssetFileType.Thumbnail,
-      format: image.thumbnail.format,
+      format: image.thumbnail.format === ImageFormat.Jxl ? ImageFormat.Webp : image.thumbnail.format,
       isEdited: false,
       isProgressive: false,
       isTransparent: false,
@@ -805,9 +625,14 @@ export class MediaService extends BaseService {
     await this.mediaRepository.transcode(inputPath, previewFile.path, previewOptions);
     await this.mediaRepository.transcode(inputPath, thumbnailFile.path, thumbnailOptions);
 
-    const thumbhash = await this.mediaRepository.generateThumbhash(previewFile.path, {
+    const processInvalidImages = process.env.IMMICH_PROCESS_INVALID_IMAGES === 'true';
+    const preview = await this.mediaRepository.decodeImage(previewFile.path, {
       colorspace: image.colorspace,
-      processInvalidImages: process.env.IMMICH_PROCESS_INVALID_IMAGES === 'true',
+      processInvalidImages,
+    });
+    const thumbhash = await this.mediaRepository.generateThumbhash(preview, {
+      colorspace: image.colorspace,
+      processInvalidImages,
     });
 
     return {
@@ -838,96 +663,89 @@ export class MediaService extends BaseService {
     }
 
     // For S3 assets, download the original to a local temp file for processing
-    const { localPath: input, cleanup } = await this.ensureLocalFile(asset.originalPath);
+    await using original = await this.backendMedia.ensureLocalFile(asset.originalPath);
+    const input = original.localPath;
     const output = StorageCore.getEncodedVideoPath(asset);
     this.storageCore.ensureFolders(output);
 
-    try {
-      const { videoStream, format } = asset;
-      const audioStream = asset.audioStream ?? undefined;
-      if (!videoStream || !format) {
-        this.logger.warn(`Skipped transcoding for asset ${asset.id}: missing metadata; re-run extraction first`);
-        return JobStatus.Failed;
-      }
-      if (!videoStream.height || !videoStream.width) {
-        this.logger.warn(`Skipped transcoding for asset ${asset.id}: no video dimensions`);
-        return JobStatus.Failed;
-      }
+    const { videoStream, format } = asset;
+    const audioStream = asset.audioStream ?? undefined;
+    if (!videoStream || !format) {
+      this.logger.warn(`Skipped transcoding for asset ${asset.id}: missing metadata; re-run extraction first`);
+      return JobStatus.Failed;
+    }
+    if (!videoStream.height || !videoStream.width) {
+      this.logger.warn(`Skipped transcoding for asset ${asset.id}: no video dimensions`);
+      return JobStatus.Failed;
+    }
 
-      let { ffmpeg } = await this.getConfig({ withCache: true });
-      const target = this.getTranscodeTarget(ffmpeg, videoStream, audioStream);
-      if (target === TranscodeTarget.None && !this.isRemuxRequired(ffmpeg, format)) {
-        const encodedVideo = getAssetFile(asset.files, AssetFileType.EncodedVideo, { isEdited: false });
-        if (encodedVideo) {
-          this.logger.log(`Transcoded video exists for asset ${asset.id}, but is no longer required. Deleting...`);
-          await this.jobRepository.queue({ name: JobName.FileDelete, data: { files: [encodedVideo.path] } });
-          await this.assetRepository.deleteFiles([encodedVideo]);
-        } else {
-          this.logger.verbose(`Asset ${asset.id} does not require transcoding based on current policy, skipping`);
-        }
-
-        return JobStatus.Skipped;
-      }
-
-      const command = BaseConfig.create(ffmpeg, this.videoInterfaces).getCommand(target, videoStream, audioStream);
-      if (ffmpeg.accel === TranscodeHardwareAcceleration.Disabled) {
-        this.logger.log(`Transcoding video ${asset.id} without hardware acceleration`);
+    let { ffmpeg } = await this.getConfig({ withCache: true });
+    const target = this.getTranscodeTarget(ffmpeg, videoStream, audioStream);
+    if (target === TranscodeTarget.None && !this.isRemuxRequired(ffmpeg, format)) {
+      const encodedVideo = getAssetFile(asset.files, AssetFileType.EncodedVideo, { isEdited: false });
+      if (encodedVideo) {
+        this.logger.log(`Transcoded video exists for asset ${asset.id}, but is no longer required. Deleting...`);
+        await this.jobRepository.queue({ name: JobName.FileDelete, data: { files: [encodedVideo.path] } });
+        await this.assetRepository.deleteFiles([encodedVideo]);
       } else {
-        this.logger.log(
-          `Transcoding video ${asset.id} with ${ffmpeg.accel.toUpperCase()}-accelerated encoding and${ffmpeg.accelDecode ? '' : ' software'} decoding`,
-        );
+        this.logger.verbose(`Asset ${asset.id} does not require transcoding based on current policy, skipping`);
       }
 
-      try {
-        await this.mediaRepository.transcode(input, output, command);
-      } catch (error: any) {
-        this.logger.error(`Error occurred during transcoding: ${error.message}`);
-        if (ffmpeg.accel === TranscodeHardwareAcceleration.Disabled) {
-          return JobStatus.Failed;
-        }
+      return JobStatus.Skipped;
+    }
 
-        let partialFallbackSuccess = false;
-        if (ffmpeg.accelDecode) {
-          try {
-            this.logger.error(`Retrying with ${ffmpeg.accel.toUpperCase()}-accelerated encoding and software decoding`);
-            ffmpeg = { ...ffmpeg, accelDecode: false };
-            const command = BaseConfig.create(ffmpeg, this.videoInterfaces).getCommand(
-              target,
-              videoStream,
-              audioStream,
-            );
-            await this.mediaRepository.transcode(input, output, command);
-            partialFallbackSuccess = true;
-          } catch (error: any) {
-            this.logger.error(`Error occurred during transcoding: ${error.message}`);
-          }
-        }
+    const command = BaseConfig.create(ffmpeg, this.videoInterfaces).getCommand(target, videoStream, audioStream);
+    if (ffmpeg.accel === TranscodeHardwareAcceleration.Disabled) {
+      this.logger.log(`Transcoding video ${asset.id} without hardware acceleration`);
+    } else {
+      this.logger.log(
+        `Transcoding video ${asset.id} with ${ffmpeg.accel.toUpperCase()}-accelerated encoding and${ffmpeg.accelDecode ? '' : ' software'} decoding`,
+      );
+    }
 
-        if (!partialFallbackSuccess) {
-          this.logger.error(`Retrying with ${ffmpeg.accel.toUpperCase()} acceleration disabled`);
-          ffmpeg = { ...ffmpeg, accel: TranscodeHardwareAcceleration.Disabled };
+    try {
+      await this.mediaRepository.transcode(input, output, command);
+    } catch (error: any) {
+      this.logger.error(`Error occurred during transcoding: ${error.message}`);
+      if (ffmpeg.accel === TranscodeHardwareAcceleration.Disabled) {
+        return JobStatus.Failed;
+      }
+
+      let isPartialFallbackSuccess = false;
+      if (ffmpeg.accelDecode) {
+        try {
+          this.logger.error(`Retrying with ${ffmpeg.accel.toUpperCase()}-accelerated encoding and software decoding`);
+          ffmpeg = { ...ffmpeg, accelDecode: false };
           const command = BaseConfig.create(ffmpeg, this.videoInterfaces).getCommand(target, videoStream, audioStream);
           await this.mediaRepository.transcode(input, output, command);
+          isPartialFallbackSuccess = true;
+        } catch (error: any) {
+          this.logger.error(`Error occurred during transcoding: ${error.message}`);
         }
       }
 
-      this.logger.log(`Successfully encoded ${asset.id}`);
-
-      // Persist encoded video to S3 if needed
-      const relativeKey = StorageCore.getRelativeEncodedVideoPath(asset);
-      const finalPath = await this.persistFile(output, relativeKey, 'video/mp4');
-
-      await this.assetRepository.upsertFile({
-        assetId: asset.id,
-        type: AssetFileType.EncodedVideo,
-        path: finalPath,
-        isEdited: false,
-      });
-
-      return JobStatus.Success;
-    } finally {
-      await cleanup();
+      if (!isPartialFallbackSuccess) {
+        this.logger.error(`Retrying with ${ffmpeg.accel.toUpperCase()} acceleration disabled`);
+        ffmpeg = { ...ffmpeg, accel: TranscodeHardwareAcceleration.Disabled };
+        const command = BaseConfig.create(ffmpeg, this.videoInterfaces).getCommand(target, videoStream, audioStream);
+        await this.mediaRepository.transcode(input, output, command);
+      }
     }
+
+    this.logger.log(`Successfully encoded ${asset.id}`);
+
+    // Persist encoded video to S3 if needed
+    const relativeKey = getRelativeEncodedVideoPath(asset);
+    const finalPath = await this.backendMedia.persistFile(output, relativeKey, 'video/mp4');
+
+    await this.assetRepository.upsertFile({
+      assetId: asset.id,
+      type: AssetFileType.EncodedVideo,
+      path: finalPath,
+      isEdited: false,
+    });
+
+    return JobStatus.Success;
   }
 
   private getTranscodeTarget(
@@ -977,9 +795,9 @@ export class MediaService extends BaseService {
   }
 
   private isVideoTranscodeRequired(ffmpegConfig: ConfigFFmpegDto, stream: VideoStreamInfo): boolean {
-    const scalingEnabled = ffmpegConfig.targetResolution !== 'original';
+    const isScalingEnabled = ffmpegConfig.targetResolution !== 'original';
     const targetRes = Number.parseInt(ffmpegConfig.targetResolution);
-    const isLargerThanTargetRes = scalingEnabled && Math.min(stream.height, stream.width) > targetRes;
+    const isLargerThanTargetRes = isScalingEnabled && Math.min(stream.height, stream.width) > targetRes;
     const maxBitrate = this.parseBitrateToBps(ffmpegConfig.maxBitrate);
     const isLargerThanTargetBitrate = maxBitrate > 0 && stream.bitrate > maxBitrate;
 
@@ -1066,7 +884,7 @@ export class MediaService extends BaseService {
     return extractedSize >= targetSize;
   }
 
-  private async syncFiles(
+  protected async syncFiles(
     oldFiles: (AssetFile & { isProgressive: boolean; isTransparent: boolean })[],
     newFiles: UpsertFileOptions[],
   ) {
@@ -1081,6 +899,7 @@ export class MediaService extends BaseService {
       }
 
       // upsert new file path
+      // eslint-disable-next-line unicorn/prefer-continue
       if (
         existingFile?.path !== newFile.path ||
         existingFile.isProgressive !== newFile.isProgressive ||
@@ -1116,12 +935,16 @@ export class MediaService extends BaseService {
   }
 
   private async generateEditedThumbnails(asset: ThumbnailAsset, config: SystemConfig, localOriginalPath?: string) {
-    if (asset.type !== AssetType.Image || (asset.files.length === 0 && asset.edits.length === 0)) {
+    // Gallery: the Adjust panel's colour adjustment lives beside asset_edit (src/gallery/utils/image-adjust.ts).
+    const adjust = asset.type === AssetType.Image ? await this.imageAdjustRepository.getForRender(asset.id) : undefined;
+    if (asset.type !== AssetType.Image || (asset.files.length === 0 && asset.edits.length === 0 && !adjust)) {
       return;
     }
 
     const generated =
-      asset.edits.length > 0 ? await this.generateImageThumbnails(asset, config, true, localOriginalPath) : undefined;
+      asset.edits.length > 0 || adjust
+        ? await this.generateImageThumbnails(asset, config, true, localOriginalPath, adjust)
+        : undefined;
 
     const crop = asset.edits.find((e) => e.action === AssetEditAction.Crop);
     const cropBox = crop
@@ -1141,7 +964,10 @@ export class MediaService extends BaseService {
     await this.personRepository.updateVisibility(faceStatuses.visible, faceStatuses.hidden);
 
     const ocrStatuses = checkOcrVisibility(ocrData, originalDimensions, cropBox);
-    await this.ocrRepository.updateOcrVisibilities(asset.id, ocrStatuses.visible, ocrStatuses.hidden);
+    const searchText = (cropBox ? ocrStatuses.visible : ocrData)
+      .flatMap(({ text }) => tokenizeForSearch(text))
+      .join(' ');
+    await this.ocrRepository.updateOcrVisibilities(asset.id, ocrStatuses.visible, ocrStatuses.hidden, searchText);
 
     return generated;
   }

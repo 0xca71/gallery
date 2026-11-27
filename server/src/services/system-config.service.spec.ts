@@ -1,5 +1,4 @@
 import { BadRequestException } from '@nestjs/common';
-import type { DeepPartial } from 'src/types.js';
 import { AdminConfigDto, SystemConfig, defaults } from 'src/dtos/config.dto.js';
 import {
   AudioCodec,
@@ -18,8 +17,9 @@ import {
   VideoCodec,
   VideoContainer,
 } from 'src/enum.js';
-import { MEMORY_TYPE_KEYS } from 'src/services/memory-rules/memory-type.metadata.js';
+import { MEMORY_TYPE_KEYS } from 'src/gallery/services/memory-rules/memory-type.metadata.js';
 import { SystemConfigService } from 'src/services/system-config.service.js';
+import type { DeepPartial } from 'src/types.js';
 import { mockEnvData } from 'test/repositories/config.repository.mock.js';
 import { ServiceMocks, newTestService } from 'test/utils.js';
 
@@ -32,17 +32,17 @@ const partialConfig = {
 } satisfies DeepPartial<SystemConfig>;
 
 /**
- * Every registry memory type, with alternating values. `memories.types` is a `z.record` whose keys
- * are data rather than schema, so an override map that gets truncated, key-filtered, or collapsed to
- * a single boolean must not be able to satisfy a deep-equality assertion against this.
- */
+Every registry memory type, with alternating values. `memories.types` is a `z.record` whose keys
+are data rather than schema, so an override map that gets truncated, key-filtered, or collapsed to
+a single boolean must not be able to satisfy a deep-equality assertion against this.
+*/
 const buildAlternatingMemoryTypes = (): Record<string, boolean> =>
   Object.fromEntries(MEMORY_TYPE_KEYS.map((key, index) => [key, index % 2 === 0]));
 
 /**
- * Wires the system-metadata mock as a real read/write store, so a round-trip assertion reads back
- * whatever `updateConfig` actually persisted instead of a value the mock was primed to return.
- */
+Wires the system-metadata mock as a real read/write store, so a round-trip assertion reads back
+whatever `updateConfig` actually persisted instead of a value the mock was primed to return.
+*/
 const useMetadataStore = (mocks: ServiceMocks) => {
   const store: { partial: DeepPartial<SystemConfig> } = { partial: {} };
 
@@ -79,12 +79,16 @@ const updatedConfig = Object.freeze<SystemConfig>({
     [QueueName.IntegrityCheck]: { concurrency: 1 },
     [QueueName.Editor]: { concurrency: 2 },
     [QueueName.Classification]: { concurrency: 1 },
+    [QueueName.QualityAnalysis]: { concurrency: 2 },
+    [QueueName.SpatialScene]: { concurrency: 1 },
   },
   backup: {
+    beta: false,
     database: {
       enabled: true,
       cronExpression: '0 02 * * *',
       keepLastAmount: 14,
+      s3: { enabled: false },
     },
   },
   ffmpeg: {
@@ -114,6 +118,7 @@ const updatedConfig = Object.freeze<SystemConfig>({
       videoCodecs: [VideoCodec.H264, VideoCodec.Hevc],
       resolutions: [HlsVideoResolution.p480, HlsVideoResolution.p720, HlsVideoResolution.p1080],
     },
+    dataSaver: { enabled: false, targetVideoCodec: VideoCodec.Hevc, targetResolution: '720', maxBitrate: '1500k' },
   },
   integrityChecks: {
     untrackedFiles: {
@@ -164,6 +169,18 @@ const updatedConfig = Object.freeze<SystemConfig>({
       maxDistance: 0.5,
       minFaces: 3,
       suggestions: { enabled: true, maxDistance: 0.7 },
+      video: {
+        enabled: false,
+        sampleInterval: 2,
+        sceneDetection: true,
+        maxFrames: 1800,
+        tiledDetection: false,
+        maxDistance: 0.5,
+        minFaceSize: 20,
+        minSightings: 1,
+        createPeople: true,
+        minRecognitionScore: 0.75,
+      },
     },
     ocr: {
       enabled: true,
@@ -176,12 +193,30 @@ const updatedConfig = Object.freeze<SystemConfig>({
       enabled: false,
       modelName: 'rfdetr-nano',
       minScore: 0.3,
+      video: {
+        enabled: false,
+        sampleInterval: 2,
+        sceneDetection: true,
+        maxFrames: 900,
+        maxDistance: 0.55,
+        minSightings: 2,
+      },
     },
     petRecognition: {
       enabled: false,
       modelName: 'pet-recognition-base',
       maxDistance: 0.55,
       minFaces: 1,
+    },
+    spatialScene: {
+      enabled: false,
+      modelName: 'depth-anything-v2-small',
+      offer: 'suitable',
+      minBoundarySharpness: 0.03,
+      minEdgeDensity: 0.02,
+      minForegroundRatio: 0.01,
+      maxForegroundRatio: 0.75,
+      minFaceHeight: 0.03,
     },
   },
   map: {
@@ -233,6 +268,11 @@ const updatedConfig = Object.freeze<SystemConfig>({
     storageQuotaClaim: 'immich_quota',
     roleClaim: 'immich_role',
   },
+  passkey: {
+    enabled: false,
+    domain: null,
+    additionalDomains: [],
+  },
   passwordLogin: {
     enabled: true,
   },
@@ -241,6 +281,8 @@ const updatedConfig = Object.freeze<SystemConfig>({
     loginPageMessage: '',
     publicUsers: true,
     mergePeopleAcrossOwners: false,
+    spaceEditorsCanAddMembers: false,
+    spaceEditorsCanChangeRoles: false,
   },
   storageTemplate: {
     enabled: false,
@@ -478,6 +520,28 @@ describe(SystemConfigService.name, () => {
       });
     });
 
+    it('should accept the Data Saver video settings from a config file, keeping defaults for the rest', async () => {
+      mocks.config.getEnv.mockReturnValue(mockEnvData({ configFile: 'immich-config.json' }));
+      mocks.systemMetadata.readFile.mockResolvedValue(
+        JSON.stringify({ ffmpeg: { dataSaver: { enabled: true, maxBitrate: '800k' } } }),
+      );
+
+      await expect(sut.getAdminConfig()).resolves.toMatchObject({
+        ffmpeg: expect.objectContaining({
+          dataSaver: { enabled: true, targetVideoCodec: 'hevc', targetResolution: '720', maxBitrate: '800k' },
+        }),
+      });
+    });
+
+    it('should refuse a config file with an invalid Data Saver bitrate cap', async () => {
+      mocks.config.getEnv.mockReturnValue(mockEnvData({ configFile: 'immich-config.json' }));
+      mocks.systemMetadata.readFile.mockResolvedValue(
+        JSON.stringify({ ffmpeg: { dataSaver: { enabled: true, maxBitrate: '1.5 Mbit/s' } } }),
+      );
+
+      await expect(sut.getAdminConfig()).rejects.toThrow('ffmpeg.dataSaver.maxBitrate');
+    });
+
     it('should accept storageUsage from a config file', async () => {
       mocks.config.getEnv.mockReturnValue(mockEnvData({ configFile: 'immich-config.json' }));
       mocks.systemMetadata.readFile.mockResolvedValue(JSON.stringify({ storageUsage: { includeDerivatives: true } }));
@@ -695,6 +759,21 @@ describe(SystemConfigService.name, () => {
       expect(config.ffmpeg.acceptedAudioCodecs).toContain(AudioCodec.Aac);
     });
 
+    it('should disable passkeys when enabled in the database', async () => {
+      mocks.systemMetadata.get.mockResolvedValue({ passkey: { enabled: true } });
+
+      const config = await sut.getAdminConfig();
+      expect(config.passkey.enabled).toBe(false);
+    });
+
+    it('should disable passkeys when enabled in the config file', async () => {
+      mocks.config.getEnv.mockReturnValue(mockEnvData({ configFile: 'immich-config.json' }));
+      mocks.systemMetadata.readFile.mockResolvedValue(JSON.stringify({ passkey: { enabled: true } }));
+
+      const config = await sut.getAdminConfig();
+      expect(config.passkey.enabled).toBe(false);
+    });
+
     it('should allow underscores in the machine learning url', async () => {
       mocks.config.getEnv.mockReturnValue(mockEnvData({ configFile: 'immich-config.json' }));
       const partialConfig = { machineLearning: { urls: ['immich_machine_learning'] } };
@@ -715,14 +794,14 @@ describe(SystemConfigService.name, () => {
       },
     ];
 
-    for (const { should, externalDomain, result } of externalDomainTests) {
+    for (const { should, externalDomain, result = 'https://demo.immich.app' } of externalDomainTests) {
       it(`should normalize an external domain ${should}`, async () => {
         mocks.config.getEnv.mockReturnValue(mockEnvData({ configFile: 'immich-config.json' }));
         const partialConfig = { server: { externalDomain } };
         mocks.systemMetadata.readFile.mockResolvedValue(JSON.stringify(partialConfig));
 
         const config = await sut.getAdminConfig();
-        expect(config.server.externalDomain).toEqual(result ?? 'https://demo.immich.app');
+        expect(config.server.externalDomain).toEqual(result);
       });
     }
 
@@ -1084,5 +1163,18 @@ describe(SystemConfigService.name, () => {
 
       expect(config.storageUsage.includeDerivatives).toBe(false);
     });
+  });
+});
+
+describe('environment-only public viewer configuration', () => {
+  it('publishes the configured deletion threshold without exposing backup credentials', async () => {
+    const { sut, mocks } = newTestService(SystemConfigService);
+    mocks.config.getEnv.mockReturnValue(mockEnvData({ webDeleteToastThreshold: 42 }));
+
+    const config = await sut.getPublicConfig();
+
+    expect(config.webDeleteToastThreshold).toBe(42);
+    expect(config).not.toHaveProperty('backup');
+    expect(config).not.toHaveProperty('oauth.clientSecret');
   });
 });

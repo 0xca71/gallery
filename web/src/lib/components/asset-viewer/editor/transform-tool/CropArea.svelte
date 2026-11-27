@@ -1,8 +1,9 @@
 <script lang="ts">
-  import { ResizeBoundary, transformManager } from '$lib/managers/edit/transform-manager.svelte';
-  import { getAssetMediaUrl } from '$lib/utils';
-  import { getAltText } from '$lib/utils/thumbnail-util';
-  import { toTimelineAsset } from '$lib/utils/timeline-util';
+  import { imageAdjustManager } from '#lib/gallery/edit/image-adjust-manager.svelte.ts';
+  import { ResizeBoundary, transformManager } from '#lib/managers/edit/transform-manager.svelte.ts';
+  import { getAssetMediaUrl } from '#lib/utils.ts';
+  import { getAltText } from '#lib/utils/thumbnail-util.ts';
+  import { toTimelineAsset } from '#lib/utils/timeline-util.ts';
   import { AssetMediaSize, type AssetResponseDto } from '@immich/sdk';
   import { Icon } from '@immich/ui';
   import { onMount } from 'svelte';
@@ -77,8 +78,12 @@
     class:rotated={transformManager.normalizedBaseRotation % 180 > 0}
     style:rotate={transformManager.baseRotation + 'deg'}
     bind:this={transformManager.cropAreaEl}
-    onmousedown={(e) => transformManager.handleMouseDownOn(e, ResizeBoundary.Marquee)}
-    ondblclick={() => transformManager.resetCrop()}
+    onmousedown={(e) => {
+      if (imageAdjustManager.mode === 'crop') transformManager.handleMouseDownOn(e, ResizeBoundary.Marquee);
+    }}
+    ondblclick={() => {
+      if (imageAdjustManager.mode === 'crop') transformManager.resetCrop();
+    }}
     role="application"
     aria-label="Crop area"
   >
@@ -91,15 +96,22 @@
         !transformManager.isInteracting && 'transition-transform motion-reduce:transition-none',
       ]}
       style:transform={imageTransform}
+      style:filter={imageAdjustManager.filter}
     />
     <div
       class={[
         'overlay pointer-events-none absolute top-0 size-full transition-colors motion-reduce:transition-none',
         transformManager.isInteracting ? 'bg-black/30' : 'bg-black/56',
+        imageAdjustManager.mode !== 'crop' && 'invisible',
       ]}
       bind:this={transformManager.overlayEl}
     ></div>
-    <div class="crop-frame absolute border-2 border-white" bind:this={transformManager.cropFrame}>
+    <!-- Gallery: hidden, not unmounted, while the Adjust sliders show: draw() keeps writing its position. -->
+    <div
+      class="crop-frame absolute border-2 border-white"
+      class:invisible={imageAdjustManager.mode !== 'crop'}
+      bind:this={transformManager.cropFrame}
+    >
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div
         class={[
@@ -111,7 +123,7 @@
       ></div>
 
       {#each edges as edge (edge)}
-        {@const rotatedEdge = rotateBoundary(edges, edge, transformManager.normalizedBaseRotation / 90)}
+        {const rotatedEdge = $derived(rotateBoundary(edges, edge, transformManager.normalizedBaseRotation / 90))}
         <button
           class={['absolute', edge]}
           style={`${edge}: -10px`}
@@ -122,7 +134,7 @@
       {/each}
 
       {#each corners as corner (corner)}
-        {@const rotatedCorner = rotateBoundary(corners, corner, transformManager.normalizedBaseRotation / 90)}
+        {const rotatedCorner = $derived(rotateBoundary(corners, corner, transformManager.normalizedBaseRotation / 90))}
         <button
           class={['corner', corner]}
           onmousedown={(e) => transformManager.handleMouseDownOn(e, corner)}

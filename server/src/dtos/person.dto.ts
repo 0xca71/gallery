@@ -1,16 +1,25 @@
 import { Selectable } from 'kysely';
 import { createZodDto } from 'nestjs-zod';
 import z from 'zod';
-import type { ImageDimensions, MaybeDehydrated } from 'src/types.js';
-import { AssetFace, Person } from 'src/database.js';
+import { AssetFace, Person, User } from 'src/database.js';
 import { HistoryBuilder } from 'src/decorators.js';
-import { AuthDto } from 'src/dtos/auth.dto.js';
+import { BulkIdsSchema } from 'src/dtos/asset-ids.response.dto.js';
 import { AssetEditActionItem } from 'src/dtos/editing.dto.js';
-import { SourceTypeSchema } from 'src/enum.js';
+import { UserResponseSchema, mapUser } from 'src/dtos/user.dto.js';
+import { SharingDirectionSchema, SourceTypeSchema } from 'src/enum.js';
+import {
+  GalleryMergePersonExtension,
+  GalleryPersonResponseExtension,
+  GalleryPersonSearchExtension,
+  GalleryPersonStatisticsExtension,
+  GalleryPersonUpdateExtension,
+} from 'src/gallery/dtos/person.dto.js';
 import { AssetFaceTable } from 'src/schema/tables/asset-face.table.js';
+import type { ImageDimensions, MaybeDehydrated } from 'src/types.js';
 import { asDateString, asDateTimeString } from 'src/utils/date.js';
+import { hasSomeDefined } from 'src/utils/misc.js';
 import { transformFaceBoundingBox } from 'src/utils/transform.js';
-import { hexColor, stringToBool } from 'src/validation.js';
+import { hexColor, stringToBool, uniqueIds } from 'src/validation.js';
 
 const PersonCreateSchema = z
   .object({
@@ -20,7 +29,7 @@ const PersonCreateSchema = z
       .meta({ format: 'date' })
       .nullable()
       .optional()
-      .refine((val) => (val ? new Date(val) <= new Date() : true), { error: 'Birth date cannot be in the future' })
+      .refine((val) => !val || new Date(val) <= new Date(), { error: 'Birth date cannot be in the future' })
       .describe('Person date of birth'),
     isHidden: z.boolean().optional().describe('Person visibility (hidden)'),
     isFavorite: z.boolean().optional().describe('Mark as favorite'),
@@ -28,9 +37,18 @@ const PersonCreateSchema = z
   })
   .meta({ id: 'PersonCreateDto' });
 
-const PersonUpdateSchema = PersonCreateSchema.extend({
+const PersonUpdateBaseSchema = PersonCreateSchema.extend({
+  ...GalleryPersonUpdateExtension,
   featureFaceAssetId: z.uuidv4().optional().describe('Asset ID used for feature face thumbnail'),
-}).meta({ id: 'PersonUpdateDto' });
+});
+
+const PersonUpdateSchema = PersonUpdateBaseSchema.extend({
+  userId: z.uuid().optional().describe('Restrict the update to the person record of this User ID'),
+})
+  .refine((dto) => Object.entries(dto).some(([key, value]) => key !== 'userId' && value !== undefined), {
+    message: `At least one of the following fields is required: ${Object.keys(PersonUpdateBaseSchema.shape).join(', ')}`,
+  })
+  .meta({ id: 'PersonUpdateDto' });
 
 const PeopleUpdateItemSchema = PersonUpdateSchema.extend({
   id: z.uuidv4().describe('Person ID'),
@@ -44,84 +62,59 @@ const PeopleUpdateSchema = z
 
 const MergePersonSchema = z
   .object({
-    // Capped so a single request cannot hold the instance-wide merge advisory lock while doing one DB round-trip
-    // per source (design §5.2 row 6; the web UI caps at 5).
-    ids: z.array(z.uuidv4()).max(20).describe('Person IDs to merge'),
-    confirmCrossOwner: z
-      .boolean()
-      .optional()
-      .describe(
-        'Acknowledgement that this merge will combine two people belonging to another user, which cannot be undone. Required to commit such a merge.',
-      ),
+    ids: z.array(z.uuidv4()).describe('Person IDs to merge'),
   })
+  .extend(GalleryMergePersonExtension)
   .meta({ id: 'MergePersonDto' });
-
-const ScopedPersonProfileRefSchema = z
-  .object({
-    type: z.enum(['person', 'space-person']).describe('Scoped profile type'),
-    id: z.uuidv4().describe('Scoped profile ID'),
-    spaceId: z.uuidv4().optional().describe('Space ID for Space Person refs'),
-  })
-  .superRefine((value, ctx) => {
-    if (value.type === 'space-person' && !value.spaceId) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ['spaceId'],
-        message: 'spaceId is required for space-person refs',
-      });
-    }
-  })
-  .meta({ id: 'ScopedPersonProfileRefDto' });
-
-const MergeScopedPeopleSchema = z
-  .object({
-    target: ScopedPersonProfileRefSchema.describe('Target scoped profile'),
-    // Capped so a single request cannot hold the instance-wide merge advisory lock while doing one DB round-trip
-    // per source (design §5.2 row 6; the web UI caps at 5).
-    sources: z.array(ScopedPersonProfileRefSchema).min(1).max(20).describe('Source scoped profiles'),
-    confirmCrossOwner: z
-      .boolean()
-      .optional()
-      .describe(
-        'Acknowledgement that this merge will combine two people belonging to another user, which cannot be undone. Required to commit such a merge.',
-      ),
-  })
-  .meta({ id: 'MergeScopedPeopleDto' });
-
-const DetachScopedPersonSchema = z
-  .object({
-    profile: ScopedPersonProfileRefSchema.describe('Scoped profile to detach'),
-  })
-  .meta({ id: 'DetachScopedPersonDto' });
 
 const PersonSearchSchema = z
   .object({
     withHidden: stringToBool.optional().describe('Include hidden people'),
-    withSharedSpaces: stringToBool
-      .optional()
-      .describe('Include identity-grouped people from timeline-enabled shared spaces'),
-    type: z
-      .enum(['person', 'pet'])
-      .optional()
-      .describe(
-        'Filter the list. `person` returns human people. `pet` returns the individual pets that pet ' +
-          'recognition identified — species buckets, which the detector produces without an embedding, are ' +
-          'excluded, and the People-page minimumFaces threshold is waived. Omit for the unfiltered list.',
-      ),
     closestPersonId: z.uuidv4().optional().describe('Closest person ID for similarity search'),
     closestAssetId: z.uuidv4().optional().describe('Closest asset ID for similarity search'),
     page: z.coerce.number().int().min(1).default(1).describe('Page number for pagination'),
     size: z.coerce.number().int().min(1).max(1000).default(500).describe('Number of items per page'),
+    sharedById: z.uuid().optional().describe('Only include people to which the user gave access'),
+    sharedWithId: z.uuid().optional().describe('Only include people to which the user was given access'),
+    isFavorite: stringToBool.optional().describe('Filter by favorite status'),
+    isHidden: stringToBool.optional().describe('Filter by hidden status'),
+    name: z.string().optional().describe('Filter by person name'),
   })
+  .extend(GalleryPersonSearchExtension)
   .meta({ id: 'PersonSearchDto' });
 
-export const ScopedPrimaryProfileSchema = z
+export enum PersonUserRole {
+  Read = 'read',
+  Write = 'write',
+  Admin = 'admin',
+}
+
+const PersonUserRoleSchema = z
+  .enum(PersonUserRole)
+  .describe('Levels of access for managing people resources on behalf of another user.')
+  .meta({ id: 'PersonUserRole' });
+
+export enum PeopleUsersUpsertType {
+  Everyone = 'everyone',
+}
+
+const PeopleUsersUpsertTypeSchema = z
+  .enum(PeopleUsersUpsertType)
+  .describe('Which people to update when personIds is omitted')
+  .meta({ id: 'PeopleUsersUpsertType' });
+
+const PersonOtherResponseSchema = z
   .object({
-    type: z.enum(['user-person', 'space-person']),
-    id: z.string(),
-    spaceId: z.string().optional(),
+    sharedById: z.uuid(),
+    name: z.string(),
+    birthDate: z.string().nullable(),
+    role: PersonUserRoleSchema,
   })
-  .meta({ id: 'ScopedPrimaryProfile' });
+  .meta({ id: 'PersonOtherResponseDto' });
+
+const PeopleUserResponseSchema = UserResponseSchema.extend({
+  role: PersonUserRoleSchema.describe('Access role'),
+}).meta({ id: 'PeopleUserResponseDto' });
 
 export const PersonResponseSchema = z
   .object({
@@ -148,26 +141,34 @@ export const PersonResponseSchema = z
       .optional()
       .describe('Person color (hex)')
       .meta(new HistoryBuilder().added('v1.126.0').stable('v2').getExtensions()),
-    primaryProfile: ScopedPrimaryProfileSchema.optional().describe('Accessible profile used for navigation'),
-    filterId: z.string().optional().describe('Scoped identity filter token'),
-    numberOfAssets: z.number().int().min(0).optional().describe('Accessible asset count for this grouped person'),
-    type: z.string().default('person').describe('Entity type (person or pet)'),
-    species: z.string().nullable().optional().describe('Pet species (e.g. dog, cat)'),
-    spacePersonId: z.string().optional().describe('Space person ID when viewed through a shared space'),
+    ...GalleryPersonResponseExtension,
+    otherPeople: z.array(PersonOtherResponseSchema),
+    sharedBy: z.array(PeopleUserResponseSchema).describe('Users that gave the current user access to this person'),
+    sharedWith: z.array(PeopleUserResponseSchema).describe('Users the current user gave access to this person'),
   })
   .meta({ id: 'PersonResponseDto' });
 
+const PersonDeleteSchema = z
+  .object({ userId: z.string().optional() })
+  .default({})
+  .meta({ id: 'PersonDeleteDto', ...new HistoryBuilder().added('v3.3').stable('v3.3').getExtensions() });
+// TODO(v4) change to {userId: string, personId: string}[]
+const PeopleDeleteSchema = BulkIdsSchema.extend({ userId: z.string().optional() }).meta({
+  id: 'PeopleDeleteDto',
+  ...new HistoryBuilder().added('v3.3').getExtensions(),
+});
+
 export class PersonCreateDto extends createZodDto(PersonCreateSchema) {}
 export class PersonUpdateDto extends createZodDto(PersonUpdateSchema) {}
+export class PersonDeleteDto extends createZodDto(PersonDeleteSchema) {}
+export class PeopleDeleteDto extends createZodDto(PeopleDeleteSchema) {}
 export class PeopleUpdateDto extends createZodDto(PeopleUpdateSchema) {}
 export class MergePersonDto extends createZodDto(MergePersonSchema) {}
-export class ScopedPersonProfileRefDto extends createZodDto(ScopedPersonProfileRefSchema) {}
-export class MergeScopedPeopleDto extends createZodDto(MergeScopedPeopleSchema) {}
-export class DetachScopedPersonDto extends createZodDto(DetachScopedPersonSchema) {}
 export class PersonSearchDto extends createZodDto(PersonSearchSchema) {}
 export class PersonResponseDto extends createZodDto(PersonResponseSchema) {}
+export class PeopleUserResponseDto extends createZodDto(PeopleUserResponseSchema) {}
 
-export const AssetFaceResponseSchema = z
+const AssetFaceResponseSchema = z
   .object({
     id: z.uuidv4().describe('Face ID'),
     imageHeight: z.int().min(0).describe('Image height in pixels'),
@@ -182,106 +183,13 @@ export const AssetFaceResponseSchema = z
   .describe('Asset face with person')
   .meta({ id: 'AssetFaceResponseDto' });
 
-const PersonFacePageQuerySchema = z
-  .object({
-    page: z.coerce.number().int().min(1).default(1).describe('Page number'),
-    size: z.coerce.number().int().min(1).max(100).default(50).describe('Number of faces per page'),
-  })
-  .meta({ id: 'PersonFacePageQueryDto' });
-
-const RepresentativeFaceUpdateSchema = z
-  .object({
-    assetFaceId: z.uuidv4().describe('Asset face ID used as the representative face'),
-  })
-  .meta({ id: 'RepresentativeFaceUpdateDto' });
-
-const PersonFaceResponseSchema = z
-  .object({
-    id: z.uuidv4().describe('Face ID'),
-    imageHeight: z.int().min(0).describe('Image height in pixels'),
-    imageWidth: z.int().min(0).describe('Image width in pixels'),
-    boundingBoxX1: z.int().describe('Bounding box X1 coordinate'),
-    boundingBoxX2: z.int().describe('Bounding box X2 coordinate'),
-    boundingBoxY1: z.int().describe('Bounding box Y1 coordinate'),
-    boundingBoxY2: z.int().describe('Bounding box Y2 coordinate'),
-    sourceType: SourceTypeSchema.optional(),
-    assetId: z.uuidv4().describe('Asset ID containing the face'),
-    isRepresentative: z.boolean().describe('Whether this face is the current representative face'),
-    fileCreatedAt: z.string().meta({ format: 'date-time' }).optional().describe('Asset creation date'),
-  })
-  .meta({ id: 'PersonFaceResponseDto' });
-
-const PersonFacePageResponseSchema = z
-  .object({
-    faces: z.array(PersonFaceResponseSchema),
-    hasNextPage: z.boolean(),
-  })
-  .meta({ id: 'PersonFacePageResponseDto' });
-
-export class PersonFacePageQueryDto extends createZodDto(PersonFacePageQuerySchema) {}
-export class RepresentativeFaceUpdateDto extends createZodDto(RepresentativeFaceUpdateSchema) {}
-export class PersonFaceResponseDto extends createZodDto(PersonFaceResponseSchema) {}
-export class PersonFacePageResponseDto extends createZodDto(PersonFacePageResponseSchema) {}
-
-const PersonFaceSuggestionPageQuerySchema = z
-  .object({
-    page: z.coerce.number().int().min(1).default(1).describe('Page number'),
-    size: z.coerce.number().int().min(1).max(100).default(50).describe('Number of suggestions per page'),
-  })
-  .meta({ id: 'PersonFaceSuggestionPageQueryDto' });
-
-const PersonFaceSuggestionParamsSchema = z
-  .object({
-    id: z.uuidv4().describe('Person ID'),
-    assetFaceId: z.uuidv4().describe('Unassigned asset face ID being reviewed'),
-  })
-  .meta({ id: 'PersonFaceSuggestionParamsDto' });
-
-const PersonFaceSuggestionResponseSchema = z
-  .object({
-    assetFaceId: z.uuidv4().describe('Unassigned asset face ID'),
-    assetId: z.uuidv4().describe('Asset ID containing the candidate face'),
-    distance: z.number().meta({ format: 'double' }).describe('Embedding distance to the person'),
-    imageHeight: z.int().min(0).describe('Image height in pixels'),
-    imageWidth: z.int().min(0).describe('Image width in pixels'),
-    boundingBoxX1: z.int().describe('Bounding box X1 coordinate'),
-    boundingBoxX2: z.int().describe('Bounding box X2 coordinate'),
-    boundingBoxY1: z.int().describe('Bounding box Y1 coordinate'),
-    boundingBoxY2: z.int().describe('Bounding box Y2 coordinate'),
-    fileCreatedAt: z.string().meta({ format: 'date-time' }).optional().describe('Asset creation date'),
-  })
-  .meta({ id: 'PersonFaceSuggestionResponseDto' });
-
-const PersonFaceSuggestionPageResponseSchema = z
-  .object({
-    total: z.int().min(0).describe('Total in-band pending suggestions for this person'),
-    items: z.array(PersonFaceSuggestionResponseSchema),
-  })
-  .meta({ id: 'PersonFaceSuggestionPageResponseDto' });
-
-// S11b (F24): the outcome of a suggestion action travels in the BODY, not the status code.
-// @oazapfts/runtime's ok() resolves to the response body and discards the numeric status for every
-// success code, so a 200-vs-204 contract is structurally unreadable by any generated client — the
-// caller cannot tell "I acted" from "there was nothing to do". Both are 200; `acted` is the signal.
-// Shared by PersonController and SharedSpaceController, which already import from this module.
-const FaceSuggestionActionResponseSchema = z
-  .object({
-    acted: z.boolean().describe('Whether the call changed anything. False when the suggestion was already resolved.'),
-  })
-  .meta({ id: 'FaceSuggestionActionResponseDto' });
-
-export class PersonFaceSuggestionPageQueryDto extends createZodDto(PersonFaceSuggestionPageQuerySchema) {}
-export class PersonFaceSuggestionParamsDto extends createZodDto(PersonFaceSuggestionParamsSchema) {}
-export class PersonFaceSuggestionResponseDto extends createZodDto(PersonFaceSuggestionResponseSchema) {}
-export class PersonFaceSuggestionPageResponseDto extends createZodDto(PersonFaceSuggestionPageResponseSchema) {}
-export class FaceSuggestionActionResponseDto extends createZodDto(FaceSuggestionActionResponseSchema) {}
-
 export class AssetFaceResponseDto extends createZodDto(AssetFaceResponseSchema) {}
 
 const AssetFaceUpdateItemSchema = z
   .object({
     personId: z.uuidv4().describe('Person ID'),
     assetId: z.uuidv4().describe('Asset ID'),
+    userId: z.uuidv4().optional().describe('User ID'),
   })
   .meta({ id: 'AssetFaceUpdateItem' });
 
@@ -314,38 +222,66 @@ const AssetFaceDeleteSchema = z
 
 const PersonStatisticsResponseSchema = z
   .object({
-    assets: z.int().min(0).describe('Number of assets'),
-    faces: z.int().min(0).describe('Number of faces assigned to this person in the current accessible scope'),
+    assets: z.int().describe('Number of assets'),
   })
+  .extend(GalleryPersonStatisticsExtension)
   .meta({ id: 'PersonStatisticsResponseDto' });
+
+const PersonUsersResponseSchema = z
+  .array(
+    z.object({
+      personId: z.uuid().describe('Person ID'),
+      sharedById: z.uuid().describe('User ID of the user that gave access to this person'),
+      sharedWithId: z.uuid().describe('User ID of the user that was given access to this person'),
+      sharedBy: UserResponseSchema.describe('The user that gave access to this person'),
+      sharedWith: UserResponseSchema.describe('The user that was given access to this person'),
+      role: PersonUserRoleSchema.describe('Access role'),
+    }),
+  )
+  .meta({ id: 'PersonUsersResponseDto' });
+
+const PersonUsersSearchSchema = z
+  .object({
+    personId: z.uuid().optional().describe('Person ID'),
+    direction: SharingDirectionSchema.optional(),
+    sharedById: z.uuid().optional().describe('User ID of the user that gave access'),
+    sharedWithId: z.uuid().optional().describe('User ID of the user that was given access'),
+    role: PersonUserRoleSchema.optional().describe('Role of user'),
+  })
+  .meta({ id: 'PersonUsersSearchDto' });
+
+const PeopleUsersUpsertSchema = z
+  .object({
+    personIds: uniqueIds.optional().describe('Person IDs, required when type is omitted'),
+    type: PeopleUsersUpsertTypeSchema.optional(),
+    sharedWithIds: uniqueIds.describe('User IDs that should be given access to the person'),
+    role: PersonUserRoleSchema.describe('Role that should be applied'),
+  })
+  .refine((data) => hasSomeDefined([data.personIds, data.type]), {
+    error: 'Either personIds or type must be provided',
+    path: ['personIds'],
+  })
+  .meta({ id: 'PeopleUsersUpsertDto' });
+
+const PersonUsersDeleteSchema = z
+  .array(
+    z.object({
+      personId: z.uuid().describe('Person ID'),
+      sharedWithId: z.uuid().describe('User ID of the user that was given access to the person'),
+      sharedById: z.uuid().optional().describe('User ID of the user that gave access to the person'),
+    }),
+  )
+  .meta({ id: 'PersonUsersDeleteDto' });
 
 export class AssetFaceUpdateDto extends createZodDto(AssetFaceUpdateSchema) {}
 export class FaceDto extends createZodDto(FaceSchema) {}
 export class AssetFaceCreateDto extends createZodDto(AssetFaceCreateSchema) {}
 export class AssetFaceDeleteDto extends createZodDto(AssetFaceDeleteSchema) {}
 export class PersonStatisticsResponseDto extends createZodDto(PersonStatisticsResponseSchema) {}
-
-const PeopleStatisticsResponseSchema = z
-  .object({
-    total: z.int().min(0).describe('Total number of people'),
-    hidden: z.int().min(0).describe('Number of hidden people'),
-    detectedFaceCount: z.int().min(0).describe('Number of detected faces in the accessible people scope'),
-  })
-  .meta({ id: 'PeopleStatisticsResponseDto' });
-
-export class PeopleStatisticsResponseDto extends createZodDto(PeopleStatisticsResponseSchema) {}
-
-const PeopleFaceStatisticsResponseSchema = z
-  .object({
-    detectedFaceCount: z.int().min(0).describe('Number of detected faces in the accessible people scope'),
-    assignedVisibleFaceCount: z.int().min(0).describe('Number of detected faces assigned to visible people'),
-    namedVisiblePersonCount: z.int().min(0).describe('Number of named visible people in the accessible people scope'),
-    assignedHiddenFaceCount: z.int().min(0).describe('Number of detected faces assigned to hidden people'),
-    unassignedFaceCount: z.int().min(0).describe('Number of detected faces not assigned to people in this scope'),
-  })
-  .meta({ id: 'PeopleFaceStatisticsResponseDto' });
-
-export class PeopleFaceStatisticsResponseDto extends createZodDto(PeopleFaceStatisticsResponseSchema) {}
+export class PersonUsersResponseDto extends createZodDto(PersonUsersResponseSchema) {}
+export class PersonUsersSearchDto extends createZodDto(PersonUsersSearchSchema) {}
+export class PeopleUsersUpsertDto extends createZodDto(PeopleUsersUpsertSchema) {}
+export class PersonUsersDeleteDto extends createZodDto(PersonUsersDeleteSchema) {}
 
 const PeopleResponseSchema = z
   .object({
@@ -362,6 +298,8 @@ const PeopleResponseSchema = z
   .describe('People response');
 export class PeopleResponseDto extends createZodDto(PeopleResponseSchema) {}
 
+export * from 'src/gallery/dtos/person.dto.js';
+
 export function mapPerson(person: MaybeDehydrated<Person>): PersonResponseDto {
   return {
     id: person.personGroupId,
@@ -374,8 +312,31 @@ export function mapPerson(person: MaybeDehydrated<Person>): PersonResponseDto {
     updatedAt: asDateTimeString(person.updatedAt),
     type: person.type,
     species: person.species,
+    // Gallery: person sharing is dormant (specs/2026-10-01-upstream-person-sharing-dormant-design.md).
+    otherPeople: [],
+    sharedBy: [],
+    sharedWith: [],
   };
 }
+
+type PersonUserShare = {
+  personId: string;
+  sharedById: string;
+  sharedWithId: string;
+  role: PersonUserRole;
+  sharedBy: MaybeDehydrated<User>;
+  sharedWith: MaybeDehydrated<User>;
+};
+
+export const mapPersonUsers = (shares: PersonUserShare[]): PersonUsersResponseDto =>
+  shares.map((share) => ({
+    personId: share.personId,
+    sharedById: share.sharedById,
+    sharedWithId: share.sharedWithId,
+    role: share.role,
+    sharedBy: mapUser(share.sharedBy),
+    sharedWith: mapUser(share.sharedWith),
+  }));
 
 function mapFacesWithoutPerson(
   face: MaybeDehydrated<Selectable<AssetFaceTable>>,
@@ -401,20 +362,16 @@ function mapFacesWithoutPerson(
 }
 
 /**
- * #796: who is in a photo is read-only metadata that anyone with read access to the asset may see,
- * not just the owner. The sole caller (PersonService.getFacesById) authorizes Permission.AssetRead
- * before mapping, so every face reaching here belongs to an asset the caller is entitled to; the
- * caller is also responsible for dropping faces of hidden people for non-owners.
- *
- * `auth` is retained for signature stability and future per-viewer projection.
- */
+#796: who is in a photo is read-only metadata that anyone with read access to the asset may see,
+not just the owner. The sole caller (PersonService.getFacesById) authorizes Permission.AssetRead
+before mapping, so every face reaching here belongs to an asset the caller is entitled to; the
+caller is also responsible for dropping faces of hidden people for non-owners.
+*/
 export function mapFaces(
   face: AssetFace,
-  auth: AuthDto,
   edits?: AssetEditActionItem[],
   assetDimensions?: ImageDimensions,
 ): AssetFaceResponseDto {
-  void auth;
   return {
     ...mapFacesWithoutPerson(face, edits, assetDimensions),
     person: face.person ? mapPerson(face.person) : null,

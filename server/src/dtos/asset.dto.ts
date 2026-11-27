@@ -3,6 +3,7 @@ import z from 'zod';
 import { HistoryBuilder } from 'src/decorators.js';
 import { BulkIdsSchema } from 'src/dtos/asset-ids.response.dto.js';
 import { AssetType, AssetVisibilitySchema } from 'src/enum.js';
+import { GalleryAssetDownloadOriginalExtension, GalleryUpdateAssetBaseExtension } from 'src/gallery/dtos/asset.dto.js';
 import { AssetStats } from 'src/repositories/asset.repository.js';
 import { IsNotSiblingOf, isoDatetimeToDate, latitudeSchema, longitudeSchema, stringToBool } from 'src/validation.js';
 
@@ -31,6 +32,7 @@ const UpdateAssetBaseSchema = z
       }),
     description: z.string().optional().describe('Asset description'),
   })
+  .extend(GalleryUpdateAssetBaseExtension)
   .refine(
     (data) =>
       (data.latitude === undefined && data.longitude === undefined) ||
@@ -166,7 +168,7 @@ const AssetCopySchema = z
 const AssetDownloadOriginalSchema = z
   .object({
     edited: stringToBool.default(false).optional().describe('Return edited asset if available'),
-    download: stringToBool.default(false).optional().describe('Return original asset as an attachment download'),
+    ...GalleryAssetDownloadOriginalExtension,
   })
   .meta({ id: 'AssetDownloadOriginalDto' });
 
@@ -193,3 +195,5 @@ export class AssetMetadataResponseDto extends createZodDto(AssetMetadataResponse
 export class AssetMetadataBulkResponseDto extends createZodDto(AssetMetadataBulkResponseSchema) {}
 export class AssetCopyDto extends createZodDto(AssetCopySchema) {}
 export class AssetDownloadOriginalDto extends createZodDto(AssetDownloadOriginalSchema) {}
+
+export * from 'src/gallery/dtos/asset.dto.js';

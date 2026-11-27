@@ -2,14 +2,14 @@ name: Auto-close PRs
 
 on:
   workflow_dispatch:
-    # Disabled for personal-use CI; keep the file for easy re-enable.
+    # Automatic runs disabled for this standalone private fork.
 
 permissions: {}
 
 jobs:
   close_llm:
     runs-on: ubuntu-latest
-    if: ${{ github.event.action == 'labeled' && github.event.label.name == 'auto-closed:llm' }}
+    if: ${{ github.repository == 'immich-app/immich' && (github.event.action == 'labeled' && github.event.label.name == 'auto-closed:llm') }}
     permissions:
       pull-requests: write
     steps:

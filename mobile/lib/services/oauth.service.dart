@@ -51,7 +51,7 @@ class OAuthService {
     );
 
     final authUrl = dto?.url;
-    log.info('Received Authorization URL: $authUrl');
+    log.info('Received Authorization URL');
 
     return authUrl;
   }
@@ -61,7 +61,7 @@ class OAuthService {
       await FlutterWebAuth2.authenticate(url: oauthUrl, callbackUrlScheme: oAuthCallbackScheme),
     );
 
-    log.info('Received OAuth callback: $result');
+    log.info('Received OAuth callback');
 
     return await _apiService.oAuthApi.finishOAuth(
       OAuthCallbackDto(url: result, state: Optional.present(state), codeVerifier: Optional.present(codeVerifier)),

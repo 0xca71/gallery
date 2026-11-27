@@ -1,6 +1,7 @@
 import { Kysely } from 'kysely';
 import { vi } from 'vitest';
 import { AssetVisibility, JobName, JobStatus, SharedSpaceRole, SourceType, SystemMetadataKey } from 'src/enum.js';
+import { FaceSearchRepository } from 'src/gallery/repositories/face-search.repository.js';
 import { AccessRepository } from 'src/repositories/access.repository.js';
 import { ConfigRepository } from 'src/repositories/config.repository.js';
 import { DatabaseRepository } from 'src/repositories/database.repository.js';
@@ -22,7 +23,7 @@ import { PersonService } from 'src/services/person.service.js';
 import { SharedSpaceService } from 'src/services/shared-space.service.js';
 import { IFacialRecognitionJob } from 'src/types.js';
 import { clearConfigCache } from 'src/utils/config.js';
-import { MediumTestContext, newMediumService } from 'test/medium.factory.js';
+import { MediumTestContext, newMediumService, updatePersonForTest } from 'test/medium.factory.js';
 import { factory } from 'test/small.factory.js';
 import { getKyselyDB } from 'test/utils.js';
 
@@ -77,6 +78,7 @@ const setupRepair = () => {
       FaceRepairDeclineRepository,
       FacePersonVerdictRepository,
       SearchRepository,
+      FaceSearchRepository,
       PersonRepository,
       FaceIdentityRepository,
       ConfigRepository,
@@ -103,6 +105,7 @@ const setupPerson = () => {
       FacePersonVerdictRepository,
       PersonRepository,
       SearchRepository,
+      FaceSearchRepository,
       SharedSpaceRepository,
     ],
     mock: [JobRepository, LoggingRepository, SystemMetadataRepository],
@@ -149,6 +152,10 @@ const setupSpace = () =>
       // this.databaseRepository.transaction(...) — without this, databaseRepository is undefined on the sut
       // and every confirm call throws.
       DatabaseRepository,
+      // Spec §6.3.1 (REVISED 2026-08-25): attach/detach now propagate into the OWNER's layer via
+      // personRepository.getOrCreateOwnerPersonForIdentity / setFaceOwnerPerson — without this the
+      // repository is undefined on the sut and every attach throws.
+      PersonRepository,
     ],
     mock: [LoggingRepository, JobRepository],
   });
@@ -377,11 +384,22 @@ describe('face review cross-flow: a decision in one engine is honoured by the ot
         .executeTakeFirst();
       expect(sspfAfterConfirm).toBeDefined(); // positive control: the confirm actually wrote the projection row
 
+      // Since §6.3.1 was revised (2026-08-25) the confirm ALSO propagates into the owner's layer, so
+      // asset_face.personGroupId is set before recognition even runs. Capture it here: what this case
+      // pins is that the recognition pass does not disturb it, which is no longer expressible as
+      // "still null".
+      const { personGroupId: personGroupIdAfterConfirm } = await ctx.database
+        .selectFrom('asset_face')
+        .select('personGroupId')
+        .where('id', '=', face.id)
+        .executeTakeFirstOrThrow();
+      expect(personGroupIdAfterConfirm).not.toBeNull();
+
       // When: a non-forced handleQueueRecognizeFaces runs and every queued handleRecognizeFaces job is
       // executed.
       const jobMock = ctx.getMock(JobRepository);
       jobMock.waitForQueueCompletion.mockResolvedValue();
-      jobMock.getJobCounts.mockResolvedValue({ active: 0, waiting: 0, delayed: 0, paused: 0, completed: 0, failed: 0 });
+      jobMock.getJobCounts.mockResolvedValue({ active: 0, waiting: 0, delayed: 0, completed: 0, failed: 0 });
       const metadata = ctx.getMock(SystemMetadataRepository);
       metadata.set.mockResolvedValue();
 
@@ -437,13 +455,14 @@ describe('face review cross-flow: a decision in one engine is honoured by the ot
         .executeTakeFirstOrThrow();
       expect(linkAfter).toEqual({ identityId: confirmedIdentityId, source: 'manual' });
 
-      // F itself was never touched by recognition at all.
+      // F itself was never touched by recognition at all: the owner-side person the CONFIRM
+      // propagated is still exactly the one it wrote, neither cleared nor re-pointed by the pass.
       const faceAfter = await ctx.database
         .selectFrom('asset_face')
         .select('personGroupId')
         .where('id', '=', face.id)
         .executeTakeFirstOrThrow();
-      expect(faceAfter.personGroupId).toBeNull();
+      expect(faceAfter.personGroupId).toBe(personGroupIdAfterConfirm);
     });
 
     it('S5.6 — a face carrying an ml/owner-person/backfill link is still queued by non-forced recognition (control for S5.1)', async () => {
@@ -629,7 +648,7 @@ describe('face review cross-flow: a decision in one engine is honoured by the ot
   it('leak 2 — a detached "not a face" is never re-proposed by a suggestion scan', async () => {
     const { sut: repair, ctx } = setupRepair();
     const { user } = await ctx.newUser();
-    const searchRepo = ctx.get(SearchRepository);
+    const searchRepo = ctx.get(FaceSearchRepository);
 
     const { person: anna } = await buildCluster(ctx, user.id, axisEmbedding('second'), 5, 'Anna');
     const [face] = await leakFacesInto(ctx, user.id, anna, axisEmbedding('second'), 1);
@@ -1098,11 +1117,7 @@ describe('face review cross-flow: a decision in one engine is honoured by the ot
       expect(faceAfterDelete.personGroupId).toBeNull(); // sanity: the face is genuinely unassigned
 
       const q2 = await newSuggestionAnchoredPerson(ctx, user.id, 'Q');
-      await ctx.database
-        .updateTable('person')
-        .set({ identityId: q1Identity.id })
-        .where('personGroupId', '=', q2.personGroupId)
-        .execute();
+      await updatePersonForTest(ctx.database, q2.personGroupId, { identityId: q1Identity.id });
 
       // Then: a suggestion scan offers F again — it was permanently suppressed before this slice.
       await expect(faceSuggestion.handlePersonSuggestionScan({ id: q2.personGroupId })).resolves.toBe(
@@ -1122,7 +1137,6 @@ describe('face review cross-flow: a decision in one engine is honoured by the ot
         active: 0,
         waiting: 0,
         delayed: 0,
-        paused: 0,
         completed: 0,
         failed: 0,
       });

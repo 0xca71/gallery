@@ -2,12 +2,12 @@ import { Injectable } from '@nestjs/common';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import type { ArgOf } from 'src/repositories/event.repository.js';
-import type { JobOf, VideoInfo } from 'src/types.js';
 import { OnEvent, OnJob } from 'src/decorators.js';
 import { MachineLearningConfig, SystemConfig } from 'src/dtos/config.dto.js';
 import { AssetType, AssetVisibility, DatabaseLock, ImmichWorker, JobName, JobStatus, QueueName } from 'src/enum.js';
+import type { ArgOf } from 'src/repositories/event.repository.js';
 import { BaseService } from 'src/services/base.service.js';
+import type { JobOf, VideoInfo } from 'src/types.js';
 import { batched, getCLIPModelInfo, isSmartSearchEnabled } from 'src/utils/misc.js';
 import { elementWiseMean } from 'src/utils/vector.js';
 
@@ -104,7 +104,8 @@ export class SmartInfoService extends BaseService {
     }
 
     const asset = await this.assetJobRepository.getForClipEncoding(id);
-    if (!asset || asset.files.length !== 1) {
+    const previewFile = asset?.files.find((file) => file.isEdited) ?? asset?.files[0];
+    if (!asset || !previewFile) {
       return JobStatus.Failed;
     }
 
@@ -120,7 +121,7 @@ export class SmartInfoService extends BaseService {
       }
       embedding = result;
     } else {
-      embedding = await this.machineLearningRepository.encodeImage(asset.files[0].path, machineLearning.clip);
+      embedding = await this.machineLearningRepository.encodeImage(previewFile.path, machineLearning.clip);
     }
 
     if (this.databaseRepository.isBusy(DatabaseLock.CLIPDimSize)) {
@@ -143,7 +144,7 @@ export class SmartInfoService extends BaseService {
     originalPath: string,
     clipConfig: MachineLearningConfig['clip'],
   ): Promise<string | null> {
-    const { localPath, cleanup } = await this.ensureLocalFile(originalPath);
+    const { localPath, cleanup } = await this.backendMedia.ensureLocalFile(originalPath);
     try {
       let videoInfo: VideoInfo;
       try {
@@ -168,7 +169,7 @@ export class SmartInfoService extends BaseService {
       try {
         let framePaths: string[];
         try {
-          framePaths = await this.mediaRepository.extractVideoFrames(localPath, timestamps, tempDir);
+          framePaths = await this.videoTrimRepository.extractVideoFrames(localPath, timestamps, tempDir);
         } catch (error) {
           this.logger.error(`Failed to extract video frames: ${originalPath}`, error);
           return null;

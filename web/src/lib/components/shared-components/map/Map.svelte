@@ -1,25 +1,23 @@
 <script lang="ts" module>
-  import mapboxRtlUrl from '@mapbox/mapbox-gl-rtl-text?url';
-  import { addProtocol, setRTLTextPlugin, setWorkerUrl } from 'maplibre-gl';
+  import { addProtocol, setWorkerUrl } from 'maplibre-gl';
   import workerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url';
   import { Protocol } from 'pmtiles';
 
   let protocol = new Protocol();
   setWorkerUrl(workerUrl);
   void addProtocol('pmtiles', protocol.tile);
-  void setRTLTextPlugin(mapboxRtlUrl, true);
 </script>
 
 <script lang="ts">
-  import { afterNavigate } from '$app/navigation';
-  import OnEvents from '$lib/components/OnEvents.svelte';
-  import { assetViewerManager } from '$lib/managers/asset-viewer-manager.svelte';
-  import { serverConfigManager } from '$lib/managers/server-config-manager.svelte';
-  import MapSettingsModal from '$lib/modals/MapSettingsModal.svelte';
-  import { mapSettings } from '$lib/stores/preferences.store';
-  import { getAssetMediaUrl, handlePromiseError } from '$lib/utils';
+  import OnEvents from '#lib/components/OnEvents.svelte';
+  import { assetViewerManager } from '#lib/managers/asset-viewer-manager.svelte.ts';
+  import MapSettingsModal from '#lib/modals/MapSettingsModal.svelte';
+  import { createPreloadedQuery } from '#lib/queries/client.ts';
+  import { getPublicConfigQuery } from '#lib/queries/config-public.query.ts';
+  import { mapSettings } from '#lib/stores/preferences.store.ts';
+  import { getAssetMediaUrl, handlePromiseError } from '#lib/utils.ts';
   import { getMapMarkers, getSpaceMapMarkers, type MapMarkerResponseDto } from '@immich/sdk';
-  import { Alert, Container, Icon, modalManager, Text, Theme, themeManager } from '@immich/ui';
+  import { Alert, Container, Icon, Text, Theme, modalManager, themeManager } from '@immich/ui';
   import { mdiCog, mdiImageMultiple, mdiMap, mdiMapMarker, mdiThemeLightDark } from '@mdi/js';
   import type { Feature, GeoJsonProperties, Geometry, Point } from 'geojson';
   import { isEqual, omit } from 'lodash-es';
@@ -49,7 +47,11 @@
     Popup,
     ScaleControl,
   } from 'svelte-maplibre';
+  import { afterNavigate } from '$app/navigation';
   import type { SelectionBBox } from './types';
+
+  const query = createPreloadedQuery(getPublicConfigQuery);
+  const publicConfig = $derived(query.data);
 
   interface Props {
     mapMarkers?: MapMarkerResponseDto[];
@@ -115,9 +117,7 @@
   let abortController: AbortController;
 
   const mapTheme = $derived($mapSettings.allowDarkMode ? themeManager.value : Theme.Light);
-  const styleUrl = $derived(
-    mapTheme === Theme.Dark ? serverConfigManager.value.mapDarkStyleUrl : serverConfigManager.value.mapLightStyleUrl,
-  );
+  const styleUrl = $derived(mapTheme === Theme.Dark ? publicConfig.map.darkStyle : publicConfig.map.lightStyle);
 
   export function addClipMapMarker(lng: number, lat: number) {
     if (!map) {
@@ -190,7 +190,15 @@
 
   type FeaturePoint = Feature<
     Point,
-    { id: string; city: string | null; state: string | null; country: string | null; formattedAddress?: string | null }
+    {
+      id: string;
+      lat: number;
+      lon: number;
+      city: string | null;
+      state: string | null;
+      country: string | null;
+      formattedAddress?: string | null;
+    }
   >;
 
   const asFeature = (marker: MapMarkerResponseDto): FeaturePoint => {
@@ -199,6 +207,8 @@
       geometry: { type: 'Point', coordinates: [marker.lon, marker.lat] },
       properties: {
         id: marker.id,
+        lat: marker.lat,
+        lon: marker.lon,
         city: marker.city,
         state: marker.state,
         country: marker.country,
@@ -209,10 +219,14 @@
 
   const asMarker = (feature: Feature<Geometry, GeoJsonProperties>): MapMarkerResponseDto => {
     const featurePoint = feature as FeaturePoint;
-    const coords = LngLat.convert(featurePoint.geometry.coordinates as [number, number]);
+    // MapLibre quantizes tile geometry; popup metadata must retain the original asset GPS.
+    const coords =
+      Number.isFinite(featurePoint.properties.lat) && Number.isFinite(featurePoint.properties.lon)
+        ? undefined
+        : LngLat.convert(featurePoint.geometry.coordinates as [number, number]);
     return {
-      lat: coords.lat,
-      lon: coords.lng,
+      lat: coords?.lat ?? featurePoint.properties.lat,
+      lon: coords?.lng ?? featurePoint.properties.lon,
       id: featurePoint.properties.id,
       city: featurePoint.properties.city,
       state: featurePoint.properties.state,
@@ -279,7 +293,9 @@
     }
   };
 
-  afterNavigate(() => {
+  afterNavigate(({ shallow, type }) => {
+    if (shallow && type === 'goto') return;
+
     if (!map) {
       return;
     }
@@ -464,7 +480,9 @@
           features: mapMarkers?.map((marker) => asFeature(marker)) ?? [],
         }}
         id="geojson"
+        promoteId="id"
         cluster={{ radius: 35, maxZoom: 18 }}
+        maxzoom={19}
       >
         <MarkerLayer
           applyToClusters
@@ -490,7 +508,12 @@
         >
           {#snippet children({ feature }: { feature: Feature })}
             {#if useLocationPin}
-              <Icon icon={mdiMapMarker} size="50px" class="translate-y-[calc(5px-50%)] text-primary" />
+              <Icon
+                icon={mdiMapMarker}
+                size="50px"
+                class="translate-y-[calc(5px-50%)] text-primary"
+                data-testid="map-location-marker"
+              />
             {:else}
               <img
                 src={getAssetMediaUrl({ id: feature.properties?.id })}

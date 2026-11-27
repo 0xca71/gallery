@@ -1,9 +1,10 @@
 <script lang="ts">
-  import { shortcuts } from '$lib/actions/shortcut';
-  import { editManager, EditToolType } from '$lib/managers/edit/edit-manager.svelte';
-  import { websocketEvents } from '$lib/stores/websocket';
+  import { shortcuts } from '#lib/actions/shortcut.ts';
+  import { getViewerSpace } from '#lib/gallery/viewer-space.ts';
+  import { EditToolType, editManager } from '#lib/managers/edit/edit-manager.svelte.ts';
+  import { websocketEvents } from '#lib/stores/websocket.ts';
   import { AssetEditSaveMode, AssetTypeEnum, getAssetEdits, type AssetResponseDto } from '@immich/sdk';
-  import { Button, HStack, Icon, IconButton } from '@immich/ui';
+  import { Button, HStack, Icon, IconButton, toastManager } from '@immich/ui';
   import { mdiChevronDown, mdiClose } from '@mdi/js';
   import { onDestroy, onMount } from 'svelte';
   import { t } from 'svelte-i18n';
@@ -22,12 +23,24 @@
   }
 
   let { asset = $bindable(), onClose }: Props = $props();
+  const viewerSpace = getViewerSpace();
+  let ready = $state(false);
+  let loadFailed = $state(false);
   let saveMenuOpen = $state(false);
   let splitButtonContainer: HTMLDivElement | undefined = $state();
 
-  const canOverwrite = $derived(editManager.saveCapabilities?.canOverwrite ?? true);
-  const canCopy = $derived(editManager.saveCapabilities?.canCopy ?? true);
-  const defaultSaveMode = $derived(canOverwrite ? AssetEditSaveMode.Overwrite : AssetEditSaveMode.Copy);
+  const canOverwrite = $derived(editManager.saveCapabilities?.canOverwrite ?? false);
+  const canCopy = $derived(editManager.saveCapabilities?.canCopy ?? false);
+  const hasPendingSave = $derived(
+    editManager.pendingSave?.assetId === asset.id || editManager.pendingRequest?.assetId === asset.id,
+  );
+  const defaultSaveMode = $derived(
+    editManager.pendingRequest?.assetId === asset.id
+      ? editManager.pendingRequest.dto.mode
+      : canOverwrite
+        ? AssetEditSaveMode.Overwrite
+        : AssetEditSaveMode.Copy,
+  );
   const unavailableReason = $derived(editManager.saveCapabilities?.overwriteUnavailableReason ?? null);
   const unavailableReasonKey = $derived(
     unavailableReason === 'unsupported_format'
@@ -37,10 +50,25 @@
         : 'editor_save_unavailable_not_writable',
   );
 
-  onMount(async () => {
-    const edits = await getAssetEdits({ id: asset.id });
-    const toolType = asset.type === AssetTypeEnum.Video ? EditToolType.Trim : EditToolType.Transform;
-    await editManager.activateTool(toolType, asset, edits);
+  async function initialize() {
+    ready = false;
+    loadFailed = false;
+    try {
+      const edits = await getAssetEdits({ id: asset.id });
+      const toolType = asset.type === AssetTypeEnum.Video ? EditToolType.Trim : EditToolType.Transform;
+      await editManager.activateTool(toolType, asset, edits, viewerSpace().spaceId);
+      if (asset.type === AssetTypeEnum.Image && !editManager.saveCapabilities)
+        throw new Error('Capabilities unavailable');
+      ready = true;
+    } catch {
+      loadFailed = true;
+      editManager.cleanup();
+      toastManager.danger($t('editor_edits_applied_error'));
+    }
+  }
+
+  onMount(() => {
+    void initialize();
   });
 
   onDestroy(() => {
@@ -48,6 +76,7 @@
   });
 
   async function applyEdits(mode?: AssetEditSaveMode) {
+    if (!ready) return;
     saveMenuOpen = false;
     const success =
       asset.type === AssetTypeEnum.Image
@@ -109,7 +138,8 @@
           class="rounded-e-none"
           onclick={() => applyEdits(defaultSaveMode)}
           loading={editManager.isApplyingEdits}
-          disabled={defaultSaveMode === AssetEditSaveMode.Overwrite ? !canOverwrite : !canCopy}
+          disabled={!ready ||
+            (!hasPendingSave && (defaultSaveMode === AssetEditSaveMode.Overwrite ? !canOverwrite : !canCopy))}
         >
           {defaultSaveMode === AssetEditSaveMode.Overwrite ? $t('editor_save_overwrite') : $t('editor_save_copy')}
         </Button>
@@ -120,7 +150,7 @@
           aria-label={$t('editor_save_mode_title')}
           aria-expanded={saveMenuOpen}
           aria-haspopup="menu"
-          disabled={editManager.isApplyingEdits}
+          disabled={!ready || editManager.isApplyingEdits || hasPendingSave}
           onclick={() => (saveMenuOpen = !saveMenuOpen)}
         >
           <Icon icon={mdiChevronDown} size="18" />
@@ -134,7 +164,7 @@
               type="button"
               role="menuitem"
               class="w-full rounded-lg p-2.5 text-start transition hover:bg-subtle disabled:cursor-not-allowed disabled:opacity-60"
-              disabled={!canOverwrite}
+              disabled={!ready || !canOverwrite}
               onclick={() => applyEdits(AssetEditSaveMode.Overwrite)}
             >
               <span class="block text-sm font-medium">{$t('editor_save_overwrite')}</span>
@@ -147,7 +177,7 @@
               type="button"
               role="menuitem"
               class="mt-1 w-full rounded-lg p-2.5 text-start transition hover:bg-subtle disabled:cursor-not-allowed disabled:opacity-60"
-              disabled={!canCopy}
+              disabled={!ready || !canCopy}
               onclick={() => applyEdits(AssetEditSaveMode.Copy)}
             >
               <span class="block text-sm font-medium">{$t('editor_save_copy')}</span>
@@ -157,14 +187,27 @@
         {/if}
       </div>
     {:else}
-      <Button shape="round" size="small" onclick={() => applyEdits()} loading={editManager.isApplyingEdits}>
+      <Button
+        shape="round"
+        size="small"
+        onclick={() => applyEdits()}
+        disabled={!ready}
+        loading={editManager.isApplyingEdits}
+      >
         {$t('save')}
       </Button>
     {/if}
   </HStack>
 
+  {#if loadFailed}
+    <Button onclick={initialize}>{$t('retry')}</Button>
+  {:else if hasPendingSave}
+    <p role="status" class="p-4 text-sm">{$t('editor_save_pending')}</p>
+  {/if}
+
   <section
-    inert={editManager.isApplyingEdits ||
+    inert={!ready ||
+      editManager.isApplyingEdits ||
       editManager.pendingSave?.assetId === asset.id ||
       editManager.pendingRequest?.assetId === asset.id}
   >
@@ -177,7 +220,7 @@
     <Button
       variant="outline"
       onclick={() => editManager.resetAllChanges()}
-      disabled={!editManager.canReset}
+      disabled={!ready || hasPendingSave || editManager.isApplyingEdits || !editManager.canReset}
       class="self-start"
       shape="round"
       size="small"

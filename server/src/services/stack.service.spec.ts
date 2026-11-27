@@ -1,4 +1,4 @@
-import { BadRequestException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException } from '@nestjs/common';
 import { StackService } from 'src/services/stack.service.js';
 import { AssetFactory } from 'test/factories/asset.factory.js';
 import { AuthFactory } from 'test/factories/auth.factory.js';
@@ -30,10 +30,14 @@ describe(StackService.name, () => {
       mocks.stack.search.mockResolvedValue([getForStack(stack)]);
 
       await sut.search(auth, { primaryAssetId: asset.id });
-      expect(mocks.stack.search).toHaveBeenCalledWith({
-        ownerId: auth.user.id,
-        primaryAssetId: asset.id,
-      });
+      // #763: search now threads the caller's id to project isFavoriteForUser.
+      expect(mocks.stack.search).toHaveBeenCalledWith(
+        {
+          ownerId: auth.user.id,
+          primaryAssetId: asset.id,
+        },
+        auth.user.id,
+      );
     });
   });
 
@@ -75,6 +79,46 @@ describe(StackService.name, () => {
     });
   });
 
+  describe('create — owner-only guard (#734)', () => {
+    it('S-26: rejects stacking an asset the caller does not own', async () => {
+      const auth = AuthFactory.create();
+      const assetId = newUuid();
+      // A space edit grant does not reach AssetUpdate, which is owner-only.
+      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set());
+      mocks.access.spaceAsset.checkSpaceEditAccess.mockResolvedValue(new Set([assetId]));
+
+      await expect(sut.create(auth, { assetIds: [assetId] })).rejects.toBeInstanceOf(BadRequestException);
+
+      expect(mocks.stack.create).not.toHaveBeenCalled();
+    });
+
+    it('S-27: rejects the whole request when only some assets are owned', async () => {
+      const auth = AuthFactory.create();
+      const mine = newUuid();
+      const theirs = newUuid();
+      // The owner guard itself, reached if AssetUpdate ever admits a non-owner again.
+      mocks.access.asset.checkOwnerAccess
+        .mockResolvedValueOnce(new Set([mine, theirs]))
+        .mockResolvedValue(new Set([mine]));
+
+      await expect(sut.create(auth, { assetIds: [mine, theirs] })).rejects.toBeInstanceOf(ForbiddenException);
+
+      expect(mocks.stack.create).not.toHaveBeenCalled();
+    });
+
+    it('S-28: still stacks the caller’s own assets', async () => {
+      const auth = AuthFactory.create();
+      const a = newUuid();
+      const b = newUuid();
+      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([a, b]));
+      mocks.stack.create.mockResolvedValue(getForStack(StackFactory.create({ ownerId: auth.user.id })));
+
+      await sut.create(auth, { assetIds: [a, b] });
+
+      expect(mocks.stack.create).toHaveBeenCalled();
+    });
+  });
+
   describe('get', () => {
     it('should require stack.read permissions', async () => {
       await expect(sut.get(authStub.admin, 'stack-id')).rejects.toBeInstanceOf(BadRequestException);
@@ -90,7 +134,8 @@ describe(StackService.name, () => {
       await expect(sut.get(authStub.admin, 'stack-id')).rejects.toBeInstanceOf(BadRequestException);
 
       expect(mocks.access.stack.checkOwnerAccess).toHaveBeenCalled();
-      expect(mocks.stack.getById).toHaveBeenCalledWith('stack-id');
+      // #763: get threads the caller's id to project isFavoriteForUser.
+      expect(mocks.stack.getById).toHaveBeenCalledWith('stack-id', authStub.admin.user.id);
     });
 
     it('should throw "Asset stack not found" when getById returns null', async () => {
@@ -118,7 +163,8 @@ describe(StackService.name, () => {
         assets: [expect.objectContaining({ id: primaryAsset.id }), expect.objectContaining({ id: asset.id })],
       });
       expect(mocks.access.stack.checkOwnerAccess).toHaveBeenCalled();
-      expect(mocks.stack.getById).toHaveBeenCalledWith(stack.id);
+      // #763: get threads the caller's id to project isFavoriteForUser.
+      expect(mocks.stack.getById).toHaveBeenCalledWith(stack.id, auth.user.id);
     });
   });
 
@@ -134,10 +180,12 @@ describe(StackService.name, () => {
     it('should fail if stack could not be found', async () => {
       mocks.access.stack.checkOwnerAccess.mockResolvedValue(new Set(['stack-id']));
       mocks.stack.getById.mockResolvedValue(void 0);
+      const auth = AuthFactory.create();
 
-      await expect(sut.update(AuthFactory.create(), 'stack-id', {})).rejects.toBeInstanceOf(BadRequestException);
+      await expect(sut.update(auth, 'stack-id', {})).rejects.toBeInstanceOf(BadRequestException);
 
-      expect(mocks.stack.getById).toHaveBeenCalledWith('stack-id');
+      // #763: findOrFail/getById threads the caller's id to project isFavoriteForUser.
+      expect(mocks.stack.getById).toHaveBeenCalledWith('stack-id', auth.user.id);
       expect(mocks.stack.update).not.toHaveBeenCalled();
       expect(mocks.event.emit).not.toHaveBeenCalled();
     });
@@ -156,7 +204,8 @@ describe(StackService.name, () => {
         BadRequestException,
       );
 
-      expect(mocks.stack.getById).toHaveBeenCalledWith(stack.id);
+      // #763: findOrFail/getById threads the caller's id to project isFavoriteForUser.
+      expect(mocks.stack.getById).toHaveBeenCalledWith(stack.id, auth.user.id);
       expect(mocks.stack.update).not.toHaveBeenCalled();
       expect(mocks.event.emit).not.toHaveBeenCalled();
     });
@@ -175,11 +224,16 @@ describe(StackService.name, () => {
 
       await sut.update(auth, stack.id, { primaryAssetId: asset.id });
 
-      expect(mocks.stack.getById).toHaveBeenCalledWith(stack.id);
-      expect(mocks.stack.update).toHaveBeenCalledWith(stack.id, {
-        id: stack.id,
-        primaryAssetId: asset.id,
-      });
+      // #763: getById/update both thread the caller's id to project isFavoriteForUser.
+      expect(mocks.stack.getById).toHaveBeenCalledWith(stack.id, auth.user.id);
+      expect(mocks.stack.update).toHaveBeenCalledWith(
+        stack.id,
+        {
+          id: stack.id,
+          primaryAssetId: asset.id,
+        },
+        auth.user.id,
+      );
       expect(mocks.event.emit).toHaveBeenCalledWith('StackUpdate', {
         stackId: stack.id,
         userId: auth.user.id,

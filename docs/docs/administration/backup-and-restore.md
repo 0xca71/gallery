@@ -19,7 +19,9 @@ Gallery stores [file paths](https://github.com/immich-app/immich/discussions/329
 
 Gallery automatically creates database backups for disaster-recovery purposes. These backups are stored in `UPLOAD_LOCATION/backups` and can be managed through the web interface.
 
-You can adjust the backup schedule and retention settings in **Administration > Settings > Backup** (default: keep last 14 backups, create daily at 2:00 AM).
+You can adjust the backup schedule and retention settings in **Administration > Settings > Database Dump Settings** (default: keep last 14 backups, create daily at 2:00 AM).
+
+If Gallery is running on the [S3-compatible storage backend](/features/s3-storage), it can upload each backup to object storage and keep nothing on the server's disk. See [Remote Database Backups](/administration/remote-database-backups).
 
 :::caution
 Database backups do **not** contain photos or videos — only metadata. They must be used together with a copy of the files in `UPLOAD_LOCATION` as outlined below.

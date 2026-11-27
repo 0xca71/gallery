@@ -1,15 +1,11 @@
-import type { ServerConfigDto } from '@immich/sdk';
-import { serverConfigManager } from '$lib/managers/server-config-manager.svelte';
+import { queryClient } from '#lib/queries/client.ts';
+import { getPublicConfigQuery } from '#lib/queries/config-public.query.ts';
 
 export const DELETE_TOAST_THRESHOLD_DEFAULT = 20;
 
 export const getDeleteToastThreshold = () => {
-  try {
-    const config = serverConfigManager.value as ServerConfigDto & { webDeleteToastThreshold?: number };
-    return config.webDeleteToastThreshold ?? DELETE_TOAST_THRESHOLD_DEFAULT;
-  } catch {
-    return DELETE_TOAST_THRESHOLD_DEFAULT;
-  }
+  const config = queryClient.getQueryData(getPublicConfigQuery().queryKey);
+  return config?.webDeleteToastThreshold ?? DELETE_TOAST_THRESHOLD_DEFAULT;
 };
 
 export const getDeleteToastOptions = (count: number, threshold: number) => ({

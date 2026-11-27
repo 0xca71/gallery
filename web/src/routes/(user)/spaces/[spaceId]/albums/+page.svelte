@@ -1,31 +1,28 @@
 <script lang="ts">
-  import { goto, invalidateAll } from '$app/navigation';
-  import { page } from '$app/state';
-  import { onMount } from 'svelte';
-  import SpaceAlbumFolderBreadcrumb from '$lib/components/spaces/space-album-folder-breadcrumb.svelte';
-  import SpaceAlbumsControls from '$lib/components/spaces/space-albums-controls.svelte';
-  import SpaceAlbumsList from '$lib/components/spaces/space-albums-list.svelte';
-  import { authManager } from '$lib/managers/auth-manager.svelte';
-  import { eventManager } from '$lib/managers/event-manager.svelte';
-  import AlbumHideFromMyTimelineConfirmModal from '$lib/modals/AlbumHideFromMyTimelineConfirmModal.svelte';
-  import AlbumHideFromSpacePhotosConfirmModal from '$lib/modals/AlbumHideFromSpacePhotosConfirmModal.svelte';
-  import SpaceAlbumFolderNameModal from '$lib/modals/SpaceAlbumFolderNameModal.svelte';
-  import SpaceAlbumFolderPickerModal from '$lib/modals/SpaceAlbumFolderPickerModal.svelte';
-  import SpaceLinkAlbumModal from '$lib/modals/SpaceLinkAlbumModal.svelte';
-  import { Route } from '$lib/route';
-  import { handleError } from '$lib/utils/handle-error';
-  import { createAlbum } from '$lib/utils/album-utils';
-  import { canDrop, type DragPayload } from '$lib/utils/space-album-folder-dnd';
-  import { getFolderPath } from '$lib/utils/space-album-folders';
+  import SpaceAlbumFolderBreadcrumb from '#lib/components/spaces/space-album-folder-breadcrumb.svelte';
+  import SpaceAlbumsControls from '#lib/components/spaces/space-albums-controls.svelte';
+  import SpaceAlbumsList from '#lib/components/spaces/space-albums-list.svelte';
+  import { createAlbum } from '#lib/gallery/album/album-add.ts';
+  import { authManager } from '#lib/managers/auth-manager.svelte.ts';
+  import { eventManager } from '#lib/managers/event-manager.svelte.ts';
+  import AlbumHideFromMyTimelineConfirmModal from '#lib/modals/AlbumHideFromMyTimelineConfirmModal.svelte';
+  import AlbumHideFromSpacePhotosConfirmModal from '#lib/modals/AlbumHideFromSpacePhotosConfirmModal.svelte';
+  import SpaceAlbumFolderNameModal from '#lib/modals/SpaceAlbumFolderNameModal.svelte';
+  import SpaceAlbumFolderPickerModal from '#lib/modals/SpaceAlbumFolderPickerModal.svelte';
+  import SpaceLinkAlbumModal from '#lib/modals/SpaceLinkAlbumModal.svelte';
+  import { Route } from '#lib/route.ts';
+  import { handleError } from '#lib/utils/handle-error.ts';
+  import { canDrop, type DragPayload } from '#lib/utils/space-album-folder-dnd.ts';
+  import { getFolderPath } from '#lib/utils/space-album-folders.ts';
   import {
-    getAlbumTimelineHidePreview,
+    SharedSpaceRole,
     createSharedSpaceAlbumFolder,
     deleteSharedSpaceAlbumFolder,
+    getAlbumTimelineHidePreview,
     getSharedSpaceAlbumFolders,
     getSharedSpaceAlbums,
     linkAlbum,
     setSharedSpaceAlbumFolder,
-    SharedSpaceRole,
     unlinkAlbum,
     updateAlbumTimelineForMember,
     updateSharedSpaceAlbum,
@@ -37,7 +34,10 @@
   } from '@immich/sdk';
   import { Button, Icon, modalManager } from '@immich/ui';
   import { mdiFolderPlusOutline, mdiImageMultipleOutline, mdiLinkVariantPlus, mdiPlus } from '@mdi/js';
+  import { onMount } from 'svelte';
   import { t } from 'svelte-i18n';
+  import { goto, invalidateAll } from '$app/navigation';
+  import { page } from '$app/state';
   import type { PageData } from './$types';
 
   interface Props {
@@ -299,14 +299,14 @@
   }
 
   /**
-   * Drops an active search so a just-created folder or newly-linked album becomes visible.
-   *
-   * Search flattens the whole space and hides both the breadcrumb and every folder row, but the
-   * create/link actions stay enabled and keep targeting `currentFolderId`. The result therefore
-   * lands somewhere the user can neither see nor is told about. Clearing the query is the smallest
-   * fix that keeps the capability (disabling the buttons mid-search would remove it) while making
-   * the outcome observable.
-   */
+  Drops an active search so a just-created folder or newly-linked album becomes visible.
+  
+  Search flattens the whole space and hides both the breadcrumb and every folder row, but the
+  create/link actions stay enabled and keep targeting `currentFolderId`. The result therefore
+  lands somewhere the user can neither see nor is told about. Clearing the query is the smallest
+  fix that keeps the capability (disabling the buttons mid-search would remove it) while making
+  the outcome observable.
+  */
   function clearSearchToRevealResult() {
     searchQuery = '';
   }

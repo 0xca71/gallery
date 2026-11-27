@@ -1,17 +1,18 @@
 <script lang="ts">
-  import { lazyComponent } from '$lib/utils/lazy-component.svelte';
-  import { page } from '$app/state';
-  import GalleryViewer from '$lib/components/shared-components/gallery-viewer/GalleryViewer.svelte';
-  import LoadingSpinner from '$lib/components/shared-components/LoadingSpinner.svelte';
-  import Portal from '$lib/elements/Portal.svelte';
-  import type { AssetCursor } from '$lib/components/asset-viewer/AssetViewer.svelte';
-  import { assetMultiSelectManager } from '$lib/managers/asset-multi-select-manager.svelte';
-  import { authManager } from '$lib/managers/auth-manager.svelte';
-  import type { Viewport } from '$lib/managers/timeline-manager/types';
-  import { handlePromiseError } from '$lib/utils';
-  import { navigate } from '$lib/utils/navigation';
-  import { type AssetResponseDto, getAssetInfo } from '@immich/sdk';
+  import type { AssetCursor } from '#lib/components/asset-viewer/AssetViewer.svelte';
+  import LoadingSpinner from '#lib/components/shared-components/LoadingSpinner.svelte';
+  import GalleryViewer from '#lib/components/shared-components/gallery-viewer/GalleryViewer.svelte';
+  import Portal from '#lib/elements/Portal.svelte';
+  import { setViewerSpace } from '#lib/gallery/viewer-space.ts';
+  import { assetMultiSelectManager } from '#lib/managers/asset-multi-select-manager.svelte.ts';
+  import { authManager } from '#lib/managers/auth-manager.svelte.ts';
+  import type { Viewport } from '#lib/managers/timeline-manager/types.ts';
+  import { handlePromiseError } from '#lib/utils.ts';
+  import { lazyComponent } from '#lib/utils/lazy-component.svelte.ts';
+  import { navigate } from '#lib/utils/navigation.ts';
+  import { getAssetInfo, type AssetResponseDto } from '@immich/sdk';
   import { t } from 'svelte-i18n';
+  import { page } from '$app/state';
 
   interface Props {
     results: AssetResponseDto[];
@@ -28,10 +29,10 @@
     /** Re-runs the current search — used to restore results after an undone delete. */
     onReload?: () => void;
     /**
-     * Reports the scroll offset of the results grid. This section is the only scrolling element on
-     * the surface, so a host that shrinks its chrome as the reader scrolls — the space shell
-     * collapsing its cover — has no other way to hear about it (#1028). Mirrors `Timeline`'s prop.
-     */
+    Reports the scroll offset of the results grid. This section is the only scrolling element on
+    the surface, so a host that shrinks its chrome as the reader scrolls — the space shell
+    collapsing its cover — has no other way to hear about it (#1028). Mirrors `Timeline`'s prop.
+    */
     onScroll?: (scrollTop: number) => void;
   }
 
@@ -49,6 +50,7 @@
     onReload,
     onScroll,
   }: Props = $props();
+  setViewerSpace(() => ({ spaceId, space }));
 
   let isViewerOpen = $state(false);
   let sentinelElement: HTMLElement | undefined = $state();
@@ -117,7 +119,7 @@
 
   // Mounting the viewer through `{#await}` leaves it permanently unreactive on reopen.
   // See lazyComponent().
-  const LazyAssetViewer = lazyComponent(() => import('$lib/components/asset-viewer/AssetViewer.svelte'));
+  const LazyAssetViewer = lazyComponent(() => import('#lib/components/asset-viewer/AssetViewer.svelte'));
 </script>
 
 <!-- `viewport.height` is the *visible* height of the scroll container (what GalleryViewer
@@ -188,8 +190,8 @@
 <Portal target="body">
   {#if isViewerOpen && cursor}
     {#if LazyAssetViewer.current}
-      {@const AssetViewer = LazyAssetViewer.current}
-      <AssetViewer {cursor} {isShared} {spaceId} {space} onClose={() => handlePromiseError(handleClose())} />
+      {const AssetViewer = $derived(LazyAssetViewer.current)}
+      <AssetViewer {cursor} {isShared} onClose={() => handlePromiseError(handleClose())} />
     {/if}
   {/if}
 </Portal>

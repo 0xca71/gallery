@@ -1,17 +1,18 @@
 <script lang="ts">
-  import { TimelineManager } from '$lib/managers/timeline-manager/timeline-manager.svelte';
-  import type { ScrubberMonth, ViewportTopMonth } from '$lib/managers/timeline-manager/types';
-  import { mediaQueryManager } from '$lib/stores/media-query-manager.svelte';
-  import { locale } from '$lib/stores/preferences.store';
-  import { getTabbable } from '$lib/utils/focus-util';
-  import { type ScrubberListener } from '$lib/utils/timeline-util';
+  import { TimelineManager } from '#lib/managers/timeline-manager/timeline-manager.svelte.ts';
+  import type { ScrubberMonth, ViewportTopMonth } from '#lib/managers/timeline-manager/types.ts';
+  import { mediaQueryManager } from '#lib/stores/media-query-manager.svelte.ts';
+  import { locale } from '#lib/stores/preferences.store.ts';
+  import { handlePromiseError } from '#lib/utils.ts';
+  import { getTabbable } from '#lib/utils/focus-util.ts';
+  import { type ScrubberListener } from '#lib/utils/timeline-util.ts';
   import { AssetOrder } from '@immich/sdk';
   import { Icon } from '@immich/ui';
   import { mdiPlay } from '@mdi/js';
   import { clamp } from 'lodash-es';
   import { DateTime } from 'luxon';
-  import { get } from 'svelte/store';
   import { onMount } from 'svelte';
+  import { get } from 'svelte/store';
   import { fade, fly } from 'svelte/transition';
 
   interface Props {
@@ -221,12 +222,8 @@
   };
 
   const activeYearMonth = $derived.by(() => {
-    if (isHoverOnPaddingTop) {
-      const segment = segments.at(0);
-      return segment ? { year: segment.year, month: segment.month } : undefined;
-    }
-    if (isHoverOnPaddingBottom) {
-      const segment = segments.at(-1);
+    if (isHoverOnPaddingTop || isHoverOnPaddingBottom) {
+      const segment = isHoverOnPaddingTop ? segments.at(0) : segments.at(-1);
       return segment ? { year: segment.year, month: segment.month } : undefined;
     }
     if (!activeSegment?.dataset.segmentYearMonth) {
@@ -235,18 +232,14 @@
     const [year, month] = activeSegment.dataset.segmentYearMonth.split('-').map(Number);
     return { year, month };
   });
-
   const hoverLabel = $derived.by(() => {
+    if (timelineManager.grouping !== 'day') {
+      return activeSegment?.dataset.label;
+    }
     const yearMonth = activeYearMonth;
     const percent = isHoverOnPaddingTop ? 0 : isHoverOnPaddingBottom ? 0.999999 : hoverSegmentScrollPercent;
     const actual = yearMonth ? timelineManager.getScrubberDateAtMonthScrollPercent(yearMonth, percent) : undefined;
-    if (actual) {
-      return formatHoverDate(actual);
-    }
-    if (yearMonth) {
-      return getEstimatedHoverLabel(yearMonth, percent);
-    }
-    return activeSegment?.dataset.label;
+    return actual ? formatHoverDate(actual) : getEstimatedHoverLabel(yearMonth, percent);
   });
   const segmentDate: ViewportTopMonth = $derived.by(() => {
     if (activeSegment?.dataset.id === 'lead-in') {
@@ -263,12 +256,12 @@
   });
   $effect(() => {
     const yearMonth = activeYearMonth;
-    if (usingMobileDevice || (!isHover && !isDragging) || !yearMonth) {
+    if ((!isHover && !isDragging) || !yearMonth) {
       return;
     }
 
     const timeout = setTimeout(() => {
-      void timelineManager.ensureScrubberMonthGeometry(yearMonth);
+      handlePromiseError(timelineManager.ensureScrubberMonthGeometry(yearMonth));
     }, 120);
 
     return () => clearTimeout(timeout);
@@ -298,6 +291,11 @@
       if (scrollY > offset) {
         return segments.at(-1)?.dateFormatted;
       }
+    }
+    if (usingMobileDevice && timelineManager.grouping === 'day' && scrollSegment) {
+      const yearMonth = { year: scrollSegment.year, month: scrollSegment.month };
+      const actual = timelineManager.getScrubberDateAtMonthScrollPercent(yearMonth, viewportTopMonthScrollPercent);
+      return actual ? formatHoverDate(actual) : getEstimatedHoverLabel(yearMonth, viewportTopMonthScrollPercent);
     }
     return scrollSegment?.dateFormatted || '';
   });
@@ -615,7 +613,7 @@
           style:width="fit-content"
           class="pointer-events-none absolute w-8 truncate rounded-full bg-immich-primary/90 px-4 py-2 text-sm font-semibold text-white select-none hover:cursor-pointer dark:bg-gray-500"
         >
-          {hoverLabel ?? scrollHoverLabel}
+          {isHover || isDragging ? (hoverLabel ?? scrollHoverLabel) : scrollHoverLabel}
         </p>
       {/if}
     </div>

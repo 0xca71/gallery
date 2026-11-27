@@ -17,11 +17,14 @@ import 'package:immich_mobile/constants/locales.dart';
 import 'package:immich_mobile/data/store.dart';
 import 'package:immich_mobile/domain/services/background_worker.service.dart';
 import 'package:immich_mobile/extensions/build_context_extensions.dart';
+import 'package:immich_mobile/gallery/motion/hero_scope.dart';
 import 'package:immich_mobile/generated/codegen_loader.g.dart';
 import 'package:immich_mobile/generated/translations.g.dart';
 import 'package:immich_mobile/infrastructure/repositories/network.repository.dart';
 import 'package:immich_mobile/pages/common/splash_screen.page.dart';
 import 'package:immich_mobile/platform/background_worker_lock_api.g.dart';
+import 'package:immich_mobile/platform/native_sync_api.g.dart';
+import 'package:immich_mobile/platform/permission_api.g.dart';
 import 'package:immich_mobile/providers/app_life_cycle.provider.dart';
 import 'package:immich_mobile/providers/asset_viewer/share_intent_upload.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/platform.provider.dart';
@@ -38,16 +41,24 @@ import 'package:immich_mobile/theme/theme_data.dart';
 import 'package:immich_mobile/utils/bootstrap.dart';
 import 'package:immich_mobile/utils/cache/widgets_binding.dart';
 import 'package:immich_mobile/utils/debug_print.dart';
+import 'package:immich_mobile/utils/fallback_localizations.dart';
 import 'package:immich_mobile/utils/licenses.dart';
 import 'package:immich_mobile/utils/migration.dart';
 import 'package:immich_mobile/wm_executor.dart';
 import 'package:immich_ui/immich_ui.dart';
 import 'package:intl/date_symbol_data_local.dart';
 import 'package:logging/logging.dart';
+import 'package:maplibre_gl/maplibre_gl.dart';
 import 'package:timezone/data/latest.dart';
 
 void main() async {
   try {
+    // https://github.com/flutter/flutter/issues/118384
+    // Android only: Render maps into a TextureView
+    // By default, MapLibre will embed them into platform views, using Virtual Display. For some reason Flutter has a bug
+    // that leaks a presentation window and SurfaceFlinger layer for every map built, and it is never discarded
+    MapLibreMap.useHybridComposition = true;
+
     ImmichWidgetsBinding();
     unawaited(BackgroundWorkerLockService(BackgroundWorkerLockApi()).lock());
     await EasyLocalization.ensureInitialized();
@@ -55,7 +66,7 @@ void main() async {
     await initApp();
     // Warm-up isolate pool for worker manager
     await workerManagerPatch.init(dynamicSpawning: true, isolatesCount: max(Platform.numberOfProcessors - 1, 5));
-    await migrateDatabaseIfNeeded(dataController.db);
+    await migrateDatabaseIfNeeded(dataController.db, NativeSyncApi(), PermissionApi());
 
     runApp(
       ProviderScope(
@@ -64,6 +75,7 @@ void main() async {
       ),
     );
   } catch (error, stack) {
+    Logger('main').severe('Failed to start', error, stack);
     runApp(BootstrapErrorWidget(error: error.toString(), stack: stack.toString()));
   }
 }
@@ -206,6 +218,10 @@ class ImmichAppState extends ConsumerState<ImmichApp> with WidgetsBindingObserve
       return DeepLink.none;
     }
 
+    if (deepLink.initial) {
+      return DeepLink([SplashScreenRoute(deepLink: route)]);
+    }
+
     return DeepLink([
       // we need something to segue back to if the app was cold started
       if (isColdStart) const GalleryTabShellRoute(),
@@ -270,7 +286,7 @@ class ImmichAppState extends ConsumerState<ImmichApp> with WidgetsBindingObserve
         title: kAppTitle,
         debugShowCheckedModeBanner: true,
         scaffoldMessengerKey: scaffoldMessengerKey,
-        localizationsDelegates: context.localizationDelegates,
+        localizationsDelegates: [...context.localizationDelegates, ...fallbackLocalizationDelegates],
         supportedLocales: context.supportedLocales,
         locale: context.locale,
         themeMode: ref.watch(appConfigProvider.select((config) => config.theme.mode)),
@@ -282,7 +298,10 @@ class ImmichAppState extends ConsumerState<ImmichApp> with WidgetsBindingObserve
             password: context.t.password,
             undo: context.t.undo,
           ),
-          child: ImmichThemeProvider(colorScheme: context.colorScheme, child: child!),
+          child: ImmichThemeProvider(
+            colorScheme: context.colorScheme,
+            child: GalleryHeroScope(child: child!),
+          ),
         ),
         routerConfig: router.config(
           deepLinkBuilder: _deepLinkBuilder,

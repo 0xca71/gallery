@@ -1,29 +1,13 @@
 <script lang="ts">
-  import { Route } from '$lib/route';
-  import { sidebarModeStore } from '$lib/stores/sidebar-mode.svelte';
-  import { userInteraction } from '$lib/stores/user.svelte';
-  import { getAssetMediaUrl } from '$lib/utils';
-  import { handleError } from '$lib/utils/handle-error';
-  import { getAllAlbums } from '@immich/sdk';
-  import { t } from 'svelte-i18n';
+  import { getRecentAlbumsQuery } from '#lib/queries/album.query.ts';
+  import { queryClient } from '#lib/queries/client.ts';
+  import { Route } from '#lib/route.ts';
+  import { sidebarModeStore } from '#lib/stores/sidebar-mode.svelte.ts';
+  import { getAssetMediaUrl } from '#lib/utils.ts';
+  import { createQuery } from '@tanstack/svelte-query';
 
-  let albums = $state(userInteraction.recentAlbums);
-
-  const refreshAlbums = async () => {
-    try {
-      const allAlbums = await getAllAlbums({});
-      albums = allAlbums.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()).slice(0, 3);
-      userInteraction.recentAlbums = albums;
-    } catch (error) {
-      handleError(error, $t('failed_to_load_assets'));
-    }
-  };
-
-  $effect(() => {
-    if (!userInteraction.recentAlbums) {
-      void refreshAlbums();
-    }
-  });
+  const query = createQuery(getRecentAlbumsQuery, () => queryClient);
+  const albums = $derived(query.data ?? []);
 
   // These rows stay rendered in the rail so it keeps the sidebar's vertical rhythm; collapsed
   // they show only their thumbnail, centred, the way Google Photos' rail does.

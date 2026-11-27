@@ -1,6 +1,6 @@
 <script lang="ts">
-  import type { FilterState } from '$lib/components/filter-panel/filter-panel';
-  import { Route } from '$lib/route';
+  import type { FilterState } from '#lib/components/filter-panel/filter-panel.ts';
+  import { Route } from '#lib/route.ts';
   import { Icon } from '@immich/ui';
   import { mdiMapOutline } from '@mdi/js';
   import { t } from 'svelte-i18n';
@@ -8,11 +8,11 @@
   interface Props {
     spaceId: string;
     /**
-     * The space's LIVE filter state. Required on purpose: this link used to be a hard-coded
-     * `/map?spaceId=<id>`, which silently dropped every active filter and the search term on the
-     * way to the map (#767a). Making the prop required means a new call site cannot re-introduce
-     * that by simply forgetting it.
-     */
+    The space's LIVE filter state. Required on purpose: this link used to be a hard-coded
+    `/map?spaceId=<id>`, which silently dropped every active filter and the search term on the
+    way to the map (#767a). Making the prop required means a new call site cannot re-introduce
+    that by simply forgetting it.
+    */
     filters: FilterState;
     searchQuery?: string;
   }

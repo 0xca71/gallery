@@ -1,6 +1,9 @@
 import { BadRequestException } from '@nestjs/common';
 import { Kysely } from 'kysely';
 import { AssetVisibility, JobStatus, SharedSpaceRole, SourceType, SystemMetadataKey } from 'src/enum.js';
+import { FaceSearchRepository } from 'src/gallery/repositories/face-search.repository.js';
+import { GalleryPeopleService } from 'src/gallery/services/gallery-people.service.js';
+import { personIdentityId } from 'src/gallery/utils/person-sidecar.js';
 import { AccessRepository } from 'src/repositories/access.repository.js';
 import { ConfigRepository } from 'src/repositories/config.repository.js';
 import { DatabaseRepository } from 'src/repositories/database.repository.js';
@@ -73,6 +76,7 @@ const setupPerson = () => {
       FacePersonVerdictRepository,
       PersonRepository,
       SearchRepository,
+      FaceSearchRepository,
       SharedSpaceRepository,
     ],
     mock: [JobRepository, LoggingRepository, SystemMetadataRepository],
@@ -84,7 +88,7 @@ const setupPerson = () => {
   // Slice 13: the suggestion-scan handlers and the confirm/reject/ignore/dismiss endpoints moved to
   // FaceSuggestionService. Shares `ctx`'s exact dependency instances (same mocked JobRepository/
   // SystemMetadataRepository config, same real repos over the same DB) as `sut` (PersonService), which
-  // this file still needs for mergeScopedPeople (S4.4).
+  // this file still needs for its PersonService calls; mergeScopedPeople goes through GalleryPeopleService (S4.4).
   const faceSuggestion = ctx.getService(FaceSuggestionService);
   return { sut, ctx, faceSuggestion };
 };
@@ -102,6 +106,10 @@ const setupSpace = () =>
       // this.databaseRepository.transaction(...) — without this, databaseRepository is undefined on the sut
       // and every confirm call throws.
       DatabaseRepository,
+      // Spec §6.3.1 (REVISED 2026-08-25): attach/detach now propagate into the OWNER's layer via
+      // personRepository.getOrCreateOwnerPersonForIdentity / setFaceOwnerPerson — without this the
+      // repository is undefined on the sut and every attach throws.
+      PersonRepository,
     ],
     mock: [LoggingRepository, JobRepository],
   });
@@ -424,7 +432,7 @@ describe('reject/ignore face-level authorization (F8)', () => {
     "S4.4: A cannot reject a face in B's library even when a cross-owner merge has put A's and B's " +
       '"Anna" on one identity',
     async () => {
-      const { sut: person, ctx, faceSuggestion } = setupPerson();
+      const { ctx, faceSuggestion } = setupPerson();
       const { user: userA } = await ctx.newUser();
       const { user: userB } = await ctx.newUser();
       const authA = authFor(userA);
@@ -457,14 +465,14 @@ describe('reject/ignore face-level authorization (F8)', () => {
         .returningAll()
         .executeTakeFirstOrThrow();
 
-      await person.mergeScopedPeople(authA, {
+      await ctx.getService(GalleryPeopleService).mergeScopedPeople(authA, {
         target: { type: 'person', id: annaA.personGroupId },
         sources: [{ type: 'space-person', id: spaceBAnna.id, spaceId: space.id }],
       });
 
       const refreshed = await ctx.database
         .selectFrom('person')
-        .select(['personGroupId', 'identityId'])
+        .select(['personGroupId', personIdentityId().as('identityId')])
         .where('personGroupId', 'in', [annaA.personGroupId, annaB.personGroupId])
         .execute();
       const refreshedAnnaA = refreshed.find((row) => row.personGroupId === annaA.personGroupId);

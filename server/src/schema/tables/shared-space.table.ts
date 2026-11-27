@@ -2,12 +2,12 @@ import {
   Column,
   CreateDateColumn,
   ForeignKeyColumn,
-  type Generated,
   PrimaryGeneratedColumn,
   Table,
   Timestamp,
   TriggerFunction,
   UpdateDateColumn,
+  type Generated,
 } from '@immich/sql-tools';
 import { CreateIdColumn, UpdateIdColumn, UpdatedAtTrigger } from 'src/decorators.js';
 import {
@@ -76,6 +76,12 @@ export class SharedSpaceTable {
 
   @Column({ type: 'boolean', default: true })
   petsEnabled!: Generated<boolean>;
+
+  @Column({ type: 'boolean', nullable: true })
+  editorsCanAddMembers!: boolean | null;
+
+  @Column({ type: 'boolean', nullable: true })
+  editorsCanChangeRoles!: boolean | null;
 
   @Column({ type: 'timestamp with time zone', nullable: true })
   lastActivityAt!: Timestamp | null;

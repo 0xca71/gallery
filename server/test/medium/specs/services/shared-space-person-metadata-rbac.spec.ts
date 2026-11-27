@@ -1,5 +1,6 @@
 import { Kysely } from 'kysely';
 import { AssetVisibility, JobStatus, SharedSpaceRole } from 'src/enum.js';
+import { GalleryAssetRepository } from 'src/gallery/repositories/gallery-asset.repository.js';
 import { AssetRepository } from 'src/repositories/asset.repository.js';
 import { ConfigRepository } from 'src/repositories/config.repository.js';
 import { DatabaseRepository } from 'src/repositories/database.repository.js';
@@ -12,17 +13,19 @@ import { SystemMetadataRepository } from 'src/repositories/system-metadata.repos
 import { DB } from 'src/schema/index.js';
 import { SharedSpaceService } from 'src/services/shared-space.service.js';
 import { asDateString } from 'src/utils/date.js';
-import { newMediumService } from 'test/medium.factory.js';
+import { newMediumService, updatePersonForTest } from 'test/medium.factory.js';
 import { factory, newEmbedding } from 'test/small.factory.js';
 import { getKyselyDB } from 'test/utils.js';
 
 let defaultDatabase: Kysely<DB>;
 
+// eslint-disable-next-line unicorn/no-unnecessary-parameters
 const setup = (db?: Kysely<DB>) => {
   const { ctx, sut } = newMediumService(SharedSpaceService, {
     database: db || defaultDatabase,
     real: [
       AssetRepository,
+      GalleryAssetRepository,
       // L7: removeMember wraps the membership delete + owned-album unlink in
       // this.databaseRepository.transaction() — needs a real connection to the test DB.
       DatabaseRepository,
@@ -634,11 +637,7 @@ describe('SharedSpaceService shared-space person metadata RBAC', () => {
     await sut.handleSharedSpaceLibraryFaceSync({ spaceId: targetSpace.id, libraryId: library.id });
     const targetSpacePerson = await getOnlySpacePerson(ctx, targetSpace.id);
     const { person: fallback } = await ctx.newPerson({ ownerId: member.id, name: 'Local John' });
-    await ctx.database
-      .updateTable('person')
-      .set({ identityId: face.identity.id })
-      .where('personGroupId', '=', fallback.personGroupId)
-      .execute();
+    await updatePersonForTest(ctx.database, fallback.personGroupId, { identityId: face.identity.id });
 
     await sut.remove(authFor(source), sourceSpace.id);
     await sut.backfillSpacePersonMetadata({ identityId: face.identity.id, limit: 1000 });
@@ -837,11 +836,7 @@ describe('SharedSpaceService shared-space person metadata RBAC', () => {
   it('falls back to a current target member personal name when a source space name disappears', async () => {
     const { ctx, sut, face, source, member, sourceSpace, targetSpacePerson } = await createSpaceNameBridge();
     const { person: fallback } = await ctx.newPerson({ ownerId: member.id, name: 'Local John' });
-    await ctx.database
-      .updateTable('person')
-      .set({ identityId: face.identity.id })
-      .where('personGroupId', '=', fallback.personGroupId)
-      .execute();
+    await updatePersonForTest(ctx.database, fallback.personGroupId, { identityId: face.identity.id });
 
     await sut.remove(authFor(source), sourceSpace.id);
     await sut.backfillSpacePersonMetadata({ identityId: face.identity.id, limit: 1000 });
@@ -1145,11 +1140,7 @@ describe('SharedSpaceService shared-space person metadata RBAC', () => {
       personName: 'Owner Candidate',
     });
     const { person: memberPerson } = await ctx.newPerson({ ownerId: member.id, name: 'Viewer Candidate' });
-    await ctx.database
-      .updateTable('person')
-      .set({ identityId: ownerFace.identity.id })
-      .where('personGroupId', '=', memberPerson.personGroupId)
-      .execute();
+    await updatePersonForTest(ctx.database, memberPerson.personGroupId, { identityId: ownerFace.identity.id });
 
     await sut.handleSharedSpaceFaceMatch({ spaceId: space.id, assetId: ownerFace.asset.id });
 
@@ -1181,11 +1172,7 @@ describe('SharedSpaceService shared-space person metadata RBAC', () => {
       ownerId: assetAdder.id,
       name: 'Asset Adder Candidate',
     });
-    await ctx.database
-      .updateTable('person')
-      .set({ identityId: sourceFace.identity.id })
-      .where('personGroupId', '=', assetAdderPerson.personGroupId)
-      .execute();
+    await updatePersonForTest(ctx.database, assetAdderPerson.personGroupId, { identityId: sourceFace.identity.id });
 
     await sut.handleSharedSpaceFaceMatch({ spaceId: space.id, assetId: sourceFace.asset.id });
 
@@ -1212,11 +1199,7 @@ describe('SharedSpaceService shared-space person metadata RBAC', () => {
       personName: 'First Candidate',
     });
     const { person: secondPerson } = await ctx.newPerson({ ownerId: second.id, name: 'Second Candidate' });
-    await ctx.database
-      .updateTable('person')
-      .set({ identityId: firstFace.identity.id })
-      .where('personGroupId', '=', secondPerson.personGroupId)
-      .execute();
+    await updatePersonForTest(ctx.database, secondPerson.personGroupId, { identityId: firstFace.identity.id });
     const spacePerson = await ctx.database
       .insertInto('shared_space_person')
       .values({ spaceId: space.id, identityId: firstFace.identity.id, name: '', type: 'person' })

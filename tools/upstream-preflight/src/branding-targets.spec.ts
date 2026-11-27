@@ -58,7 +58,7 @@ describe('branding target paths', () => {
     });
   }
 
-  // M8 — the branch is rebased onto upstream Immich v3.2.2, so
+  // M8 — the branch is rebased onto upstream Immich v3.4.2, so
   // `branding/config.json` upstream.version is bumped to match. The
   // gallery-revert-to-immich-validation workflow boots the Gallery image
   // against `ghcr.io/immich-app/immich-server:v${upstream.version}`, so this
@@ -70,10 +70,23 @@ describe('branding target paths', () => {
   // bump REMOVED eight entries. This 3.2.0→3.2.2 bump removes none: **v3.2.2 ships
   // byte-identical migrations to v3.2.0** (97 files, `git trees` diff empty), so
   // neither direction of the coverage detector changes. Verified both ways before
-  // bumping; do not assume that of the next bump.
+  // bumping; do not assume that of the next bump. The 3.2.2→3.2.4 bump likewise
+  // removes none: v3.2.3 and v3.2.4 carry no `server/src/schema/` change at all
+  // (one mobile fix and a base-image bump, both backported onto `main`). The
+  // 3.2.4→3.3.0 bump REMOVES four: ConvertUserOAuthIdEmptyStringToNull,
+  // RenameGeoNamesCountries, PersonSharing and
+  // AddPersonUserTableSharedBySharedWithConstraint all ship in v3.3.0 (100 files,
+  // identical to this branch's), so their reversals and kysely_migrations deletes left.
+  // The 3.3.0→3.3.1 bump removes none: v3.3.1 carries no `server/src/schema/`
+  // change, so neither direction of the coverage detector moves. The 3.3.1→3.3.3
+  // bump removes none either: v3.3.2 and v3.3.3 carry no `server/src/schema/` change
+  // (a mobile fix, two base-image bumps and a people-query rewrite). The 3.3.3→3.3.5
+  // bump removes none: v3.3.4 ships one new migration (AddAssetFaceAssetState), but
+  // this branch carried it only from this very cycle, so revert-to-immich.sql never
+  // had an entry for it and the tagged release now owns it.
   //
   // Keep this pinned to the base Immich version.
-  it('M8: config.json upstream.version is 3.2.2 (base is immich v3.2.2)', () => {
-    expect(CONFIG.upstream.version).toBe('3.2.2');
+  it('M8: config.json upstream.version is 3.4.2 (base is immich v3.4.2)', () => {
+    expect(CONFIG.upstream.version).toBe('3.4.2');
   });
 });

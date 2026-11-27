@@ -1,27 +1,27 @@
 <script lang="ts">
-  import { lazyComponent } from '$lib/utils/lazy-component.svelte';
-  import { goto } from '$app/navigation';
-  import type { Action } from '$lib/components/asset-viewer/actions/action';
-  import DownloadAction from '$lib/components/timeline/actions/DownloadAction.svelte';
-  import RemoveFromSharedLink from '$lib/components/timeline/actions/RemoveFromSharedLinkAction.svelte';
-  import AssetSelectControlBar from '$lib/components/timeline/AssetSelectControlBar.svelte';
-  import { AssetAction } from '$lib/constants';
-  import { assetMultiSelectManager } from '$lib/managers/asset-multi-select-manager.svelte';
-  import { authManager } from '$lib/managers/auth-manager.svelte';
-  import type { Viewport } from '$lib/managers/timeline-manager/types';
-  import { Route } from '$lib/route';
-  import { dragAndDropFilesStore } from '$lib/stores/drag-and-drop-files.store';
-  import { mediaQueryManager } from '$lib/stores/media-query-manager.svelte';
-  import { handlePromiseError } from '$lib/utils';
-  import { downloadArchive } from '$lib/utils/asset-utils';
-  import { fileUploadHandler, openFileUploadDialog } from '$lib/utils/file-uploader';
-  import { handleError } from '$lib/utils/handle-error';
-  import { toTimelineAsset } from '$lib/utils/timeline-util';
+  import type { Action } from '#lib/components/asset-viewer/actions/action.ts';
+  import Logo from '#lib/components/shared-components/Logo.svelte';
+  import AssetSelectControlBar from '#lib/components/timeline/AssetSelectControlBar.svelte';
+  import DownloadAction from '#lib/components/timeline/actions/DownloadAction.svelte';
+  import RemoveFromSharedLink from '#lib/components/timeline/actions/RemoveFromSharedLinkAction.svelte';
+  import { AssetAction } from '#lib/constants.ts';
+  import { assetMultiSelectManager } from '#lib/managers/asset-multi-select-manager.svelte.ts';
+  import { authManager } from '#lib/managers/auth-manager.svelte.ts';
+  import type { Viewport } from '#lib/managers/timeline-manager/types.ts';
+  import { Route } from '#lib/route.ts';
+  import { dragAndDropFilesStore } from '#lib/stores/drag-and-drop-files.store.ts';
+  import { mediaQueryManager } from '#lib/stores/media-query-manager.svelte.ts';
+  import { handlePromiseError } from '#lib/utils.ts';
+  import { downloadArchive } from '#lib/utils/asset-utils.ts';
+  import { fileUploadHandler, openFileUploadDialog } from '#lib/utils/file-uploader.ts';
+  import { handleError } from '#lib/utils/handle-error.ts';
+  import { lazyComponent } from '#lib/utils/lazy-component.svelte.ts';
+  import { toTimelineAsset } from '#lib/utils/timeline-util.ts';
   import { getAssetInfo, type SharedLinkResponseDto } from '@immich/sdk';
   import { IconButton, toastManager } from '@immich/ui';
-  import Logo from '$lib/components/shared-components/Logo.svelte';
   import { mdiDownload, mdiFileImagePlusOutline, mdiSelectAll } from '@mdi/js';
   import { t } from 'svelte-i18n';
+  import { goto } from '$app/navigation';
   import ControlAppBar from '../shared-components/ControlAppBar.svelte';
   import GalleryViewer from '../shared-components/gallery-viewer/GalleryViewer.svelte';
 
@@ -79,11 +79,15 @@
 
   // Mounting the viewer through `{#await}` leaves it permanently unreactive on reopen.
   // See lazyComponent().
-  const LazyAssetViewer = lazyComponent(() => import('$lib/components/asset-viewer/AssetViewer.svelte'));
+  const LazyAssetViewer = lazyComponent(() => import('#lib/components/asset-viewer/AssetViewer.svelte'));
 </script>
 
 {#if sharedLink?.allowUpload || assets.length > 1}
-  <main class="isolate mx-4 mt-24 mb-40" bind:clientHeight={viewport.height} bind:clientWidth={viewport.width}>
+  <main
+    class="isolate mx-4 mt-24 mb-40 max-h-screen"
+    bind:clientHeight={viewport.height}
+    bind:clientWidth={viewport.width}
+  >
     <GalleryViewer
       {assets}
       assetInteraction={assetMultiSelectManager}
@@ -148,7 +152,7 @@
 {:else if assets.length === 1}
   {#await getAssetInfo({ ...authManager.params, id: assets[0].id }) then asset}
     {#if LazyAssetViewer.current}
-      {@const AssetViewer = LazyAssetViewer.current}
+      {const AssetViewer = $derived(LazyAssetViewer.current)}
       <AssetViewer cursor={{ current: asset }} onAction={handleAction} />
     {/if}
   {/await}

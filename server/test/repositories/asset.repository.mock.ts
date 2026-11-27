@@ -1,6 +1,6 @@
 import { Mocked, vitest } from 'vitest';
-import type { RepositoryInterface } from 'src/types.js';
 import { AssetRepository } from 'src/repositories/asset.repository.js';
+import type { RepositoryInterface } from 'src/types.js';
 
 export const newAssetRepositoryMock = (): Mocked<RepositoryInterface<AssetRepository>> => {
   return {
@@ -13,26 +13,16 @@ export const newAssetRepositoryMock = (): Mocked<RepositoryInterface<AssetReposi
     upsertJobStatus: vitest.fn(),
     getForCopy: vitest.fn(),
     getByDayOfYear: vitest.fn(),
-    getMemoryAssetsForPerson: vitest.fn(),
-    getMemoryLocationClusters: vitest.fn(),
-    getMemoryAssetsForLocation: vitest.fn(),
-    getMemoryAssetsForPeriod: vitest.fn().mockResolvedValue([]),
-    getMemoryFacesForPeriod: vitest.fn().mockResolvedValue([]),
-    getMemoryPersonDailyCounts: vitest.fn().mockResolvedValue([]),
-    getMemoryAssetsForPersonWindow: vitest.fn().mockResolvedValue([]),
     getByIds: vitest.fn().mockResolvedValue([]),
     getByIdsWithAllRelationsButStacks: vitest.fn().mockResolvedValue([]),
-    getOwnedManifestAssets: vitest.fn().mockResolvedValue([]),
     getById: vitest.fn(),
     getByChecksum: vitest.fn(),
     getByChecksums: vitest.fn(),
     getUploadAssetIdByChecksum: vitest.fn(),
     getLivePhotoCount: vitest.fn(),
-    unlinkAndDeleteLivePhoto: vitest.fn(),
+    unlinkAndDeleteLivePhoto: vitest.fn<AssetRepository['unlinkAndDeleteLivePhoto']>(),
     getLibraryAssetCount: vitest.fn(),
     updateAll: vitest.fn(),
-    getByLibraryIdWithFaces: vitest.fn(),
-    getByAlbumIdWithFaces: vitest.fn(),
     getByLibraryIdAndOriginalPath: vitest.fn(),
     deleteAll: vitest.fn(),
     update: vitest.fn(),
@@ -42,8 +32,6 @@ export const newAssetRepositoryMock = (): Mocked<RepositoryInterface<AssetReposi
     getCalendarHeatmap: vitest.fn(),
     getTimeBucket: vitest.fn(),
     getTimeBuckets: vitest.fn(),
-    getTimelineAssetCount: vitest.fn(),
-    getTimeBucketCovers: vitest.fn(),
     getAssetIdByCity: vitest.fn(),
     getRecentlyCreatedAssetIds: vitest.fn(),
     upsertFile: vitest.fn(),
@@ -60,17 +48,14 @@ export const newAssetRepositoryMock = (): Mocked<RepositoryInterface<AssetReposi
     upsertBulkMetadata: vitest.fn(),
     deleteMetadataByKey: vitest.fn(),
     deleteBulkMetadata: vitest.fn(),
-    getChecksumsByIds: vitest.fn(),
     getForOriginal: vitest.fn(),
     getForOriginals: vitest.fn(),
     getForThumbnail: vitest.fn(),
     getForVideo: vitest.fn(),
-    getEditedEncodedVideo: vitest.fn(),
     getForEdit: vitest.fn(),
     getForOcr: vitest.fn(),
     getForMetadataExtractionTags: vitest.fn(),
     getForFaces: vitest.fn(),
     getForUpdateTags: vitest.fn(),
-    getExternalAssetIds: vitest.fn().mockResolvedValue(new Set<string>()),
   };
 };

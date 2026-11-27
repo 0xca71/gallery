@@ -1,14 +1,14 @@
+import en from '#i18n/en.json';
+import { getMemorySubtitle, getMemoryTitle } from '#lib/utils/memory-card.ts';
 import { MemoryType, type MemoryResponseDto } from '@immich/sdk';
 import { IntlMessageFormat } from 'intl-messageformat';
 import type { MessageFormatter } from 'svelte-i18n';
-import en from '$i18n/en.json';
-import { getMemorySubtitle, getMemoryTitle } from '$lib/utils/memory-card';
 
 /**
- * Formats the *real* `en.json` message for the key under test, so a renamed key or a
- * placeholder the rule never puts in `context` fails here rather than reaching a user as a
- * raw key or an "undefined".
- */
+Formats the *real* `en.json` message for the key under test, so a renamed key or a
+placeholder the rule never puts in `context` fails here rather than reaching a user as a
+raw key or an "undefined".
+*/
 const translate = ((key: string, payload?: { values?: Record<string, unknown> }) => {
   const message = (en as unknown as Record<string, string>)[key];
   if (message === undefined) {

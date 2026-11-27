@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { localizeCountry } from '#lib/gallery/utils/country-names.ts';
   import { Icon } from '@immich/ui';
   import {
     mdiAccount,
@@ -24,8 +25,8 @@
     mdiTextSearch,
     mdiVideo,
   } from '@mdi/js';
-  import { t, type Translations } from 'svelte-i18n';
-  import type { FilterState } from './filter-panel';
+  import { locale, t, type Translations } from 'svelte-i18n';
+  import type { FilterState, PinnedFilterChip } from './filter-panel';
 
   const MONTH_LABELS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
   const DATE_FORMATTER = new Intl.DateTimeFormat('en-US', {
@@ -48,11 +49,13 @@
     onClearSearch?: () => void;
     embedded?: boolean;
     /**
-     * When provided (and there are results), shows an "Add all N to…" action that hands the current
-     * filter result off to a collection picker. Surfaces where adding the visible assets to an
-     * album/space doesn't apply (tags, trash, locked, partners) simply pass no handler.
-     */
+    When provided (and there are results), shows an "Add all N to…" action that hands the current
+    filter result off to a collection picker. Surfaces where adding the visible assets to an
+    album/space doesn't apply (tags, trash, locked, partners) simply pass no handler.
+    */
     onAddAllToCollection?: () => void;
+    /** Remembered choices, shown first; Clear all leaves them. */
+    pinned?: PinnedFilterChip[];
   }
 
   let {
@@ -68,6 +71,7 @@
     onClearSearch,
     embedded = false,
     onAddAllToCollection,
+    pinned = [],
   }: Props = $props();
 
   interface Chip {
@@ -77,6 +81,15 @@
     label?: string;
     labelKey?: Translations;
     labelValues?: Record<string, string | number>;
+  }
+
+  interface ChipPill {
+    label: string;
+    icon: string;
+    title?: string;
+    onRemove: () => void;
+    testId: string;
+    closeTestId: string;
   }
 
   function formatDateOnly(value: string): string {
@@ -109,7 +122,11 @@
 
     // Location chip (city + state + country fold into ONE chip — getActiveFilterCount already
     // counts all three as a single filter, so all three must render — and clear — together)
-    const locationParts = [filters.city, filters.state, filters.country].filter(Boolean);
+    const locationParts = [
+      filters.city,
+      filters.state,
+      filters.country ? localizeCountry(filters.country, $locale) : undefined,
+    ].filter(Boolean);
     if (locationParts.length > 0) {
       result.push({ type: 'location', icon: mdiMapMarker, label: locationParts.join(', ') });
     }
@@ -209,8 +226,28 @@
 
   let hasActiveFilters = $derived(chips.length > 0 || searchQuery.trim().length > 0);
   let showAddAll = $derived(!!onAddAllToCollection && hasActiveFilters && resultCount !== undefined && resultCount > 0);
-  let showCountSeparator = $derived(resultCount !== undefined && (chips.length > 0 || searchQuery.trim().length > 0));
+  let showCountSeparator = $derived(resultCount !== undefined && (pinned.length > 0 || hasActiveFilters));
 </script>
+
+{#snippet chipPill({ label, icon, title, onRemove, testId, closeTestId }: ChipPill)}
+  <span
+    class="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-gray-200/70 bg-gray-100 py-1 pr-1 pl-2.5 text-xs font-medium text-gray-700 transition-colors hover:bg-gray-200 dark:border-white/10 dark:bg-white/6 dark:text-gray-200 dark:hover:bg-white/10"
+    {title}
+    data-testid={testId}
+  >
+    <Icon {icon} size="14" class="text-gray-500 dark:text-gray-400" />
+    <span>{label}</span>
+    <button
+      type="button"
+      class="flex size-[18px] items-center justify-center rounded-full text-gray-400 transition-colors hover:bg-gray-300/70 hover:text-gray-700 dark:text-gray-500 dark:hover:bg-white/10 dark:hover:text-gray-200"
+      onclick={onRemove}
+      aria-label={$t('filter_remove_chip', { values: { label } })}
+      data-testid={closeTestId}
+    >
+      <Icon icon={mdiClose} size="12" />
+    </button>
+  </span>
+{/snippet}
 
 <div
   class="flex flex-col gap-1.5 sm:flex-row sm:flex-wrap sm:items-center sm:gap-2 {embedded
@@ -257,24 +294,25 @@
       </span>
     {/if}
 
+    {#each pinned as chip (chip.type)}
+      {@render chipPill({
+        label: $t(chip.labelKey),
+        icon: chip.icon,
+        title: $t(chip.titleKey),
+        onRemove: chip.onRemove,
+        testId: 'pinned-chip',
+        closeTestId: 'pinned-chip-close',
+      })}
+    {/each}
+
     {#each chips as chip (`${chip.type}-${chip.id ?? chip.labelKey ?? chip.label}`)}
-      {@const chipLabel = chip.labelKey ? $t(chip.labelKey, { values: chip.labelValues }) : (chip.label ?? '')}
-      <span
-        class="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-gray-200/70 bg-gray-100 py-1 pr-1 pl-2.5 text-xs font-medium text-gray-700 transition-colors hover:bg-gray-200 dark:border-white/10 dark:bg-white/6 dark:text-gray-200 dark:hover:bg-white/10"
-        data-testid="active-chip"
-      >
-        <Icon icon={chip.icon} size="14" class="text-gray-500 dark:text-gray-400" />
-        <span>{chipLabel}</span>
-        <button
-          type="button"
-          class="flex size-[18px] items-center justify-center rounded-full text-gray-400 transition-colors hover:bg-gray-300/70 hover:text-gray-700 dark:text-gray-500 dark:hover:bg-white/10 dark:hover:text-gray-200"
-          onclick={() => onRemoveFilter(chip.type, chip.id)}
-          aria-label={$t('filter_remove_chip', { values: { label: chipLabel } })}
-          data-testid="chip-close"
-        >
-          <Icon icon={mdiClose} size="12" />
-        </button>
-      </span>
+      {@render chipPill({
+        label: chip.labelKey ? $t(chip.labelKey, { values: chip.labelValues }) : (chip.label ?? ''),
+        icon: chip.icon,
+        onRemove: () => onRemoveFilter(chip.type, chip.id),
+        testId: 'active-chip',
+        closeTestId: 'chip-close',
+      })}
     {/each}
   </div>
 

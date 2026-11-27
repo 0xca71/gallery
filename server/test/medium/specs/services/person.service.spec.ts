@@ -12,6 +12,10 @@ import {
   SourceType,
   SystemMetadataKey,
 } from 'src/enum.js';
+import { FaceSearchRepository } from 'src/gallery/repositories/face-search.repository.js';
+import { FaceIdentityMaintenanceService } from 'src/gallery/services/face-identity-maintenance.service.js';
+import { GalleryPeopleService } from 'src/gallery/services/gallery-people.service.js';
+import { personIdentityId, personSidecarColumns } from 'src/gallery/utils/person-sidecar.js';
 import { AccessRepository } from 'src/repositories/access.repository.js';
 import { AssetEditRepository } from 'src/repositories/asset-edit.repository.js';
 import { AssetJobRepository } from 'src/repositories/asset-job.repository.js';
@@ -24,6 +28,7 @@ import { FacePersonVerdictRepository } from 'src/repositories/face-person-verdic
 import { JobRepository } from 'src/repositories/job.repository.js';
 import { LoggingRepository } from 'src/repositories/logging.repository.js';
 import { MachineLearningRepository } from 'src/repositories/machine-learning.repository.js';
+import { PersonUserRepository } from 'src/repositories/person-user.repository.js';
 import { PersonRepository } from 'src/repositories/person.repository.js';
 import { SearchRepository } from 'src/repositories/search.repository.js';
 import { SharedSpaceRepository } from 'src/repositories/shared-space.repository.js';
@@ -52,6 +57,7 @@ const setup = (db?: Kysely<DB>) => {
       FacePersonVerdictRepository,
       DatabaseRepository,
       PersonRepository,
+      PersonUserRepository,
       AssetRepository,
       AssetEditRepository,
       SharedSpaceRepository,
@@ -71,6 +77,7 @@ const setup = (db?: Kysely<DB>) => {
   return { sut, ctx };
 };
 
+// eslint-disable-next-line unicorn/no-unnecessary-parameters
 const setupFaceDetection = (db?: Kysely<DB>) => {
   clearConfigCache();
 
@@ -119,10 +126,10 @@ const seedPersonAcrossVisibilities = async (ctx: ReturnType<typeof setup>['ctx']
 };
 
 /**
- * #869 follow-up: seed a person whose representative face (`person.faceAssetId`, which points at an
- * ASSET_FACE row) sits on an asset of the given visibility, so the thumbnail source is reachable as
- * person -> asset_face -> asset.
- */
+#869 follow-up: seed a person whose representative face (`person.faceAssetId`, which points at an
+ASSET_FACE row) sits on an asset of the given visibility, so the thumbnail source is reachable as
+person -> asset_face -> asset.
+*/
 const seedPersonWithRepresentativeFace = async (
   ctx: ReturnType<typeof setup>['ctx'],
   ownerId: string,
@@ -138,10 +145,10 @@ const seedPersonWithRepresentativeFace = async (
 
 // Slice 1 (S1.14 pin): a setup with SearchRepository real, so handleRecognizeFaces's KNN passes run
 // against a real DB rather than a mock.
-const setupRecognition = (db?: Kysely<DB>) => {
+const setupRecognition = () => {
   clearConfigCache();
   const { sut, ctx } = newMediumService(PersonService, {
-    database: db || defaultDatabase,
+    database: defaultDatabase,
     real: [
       AccessRepository,
       ConfigRepository,
@@ -149,6 +156,7 @@ const setupRecognition = (db?: Kysely<DB>) => {
       FaceIdentityRepository,
       PersonRepository,
       SearchRepository,
+      FaceSearchRepository,
       SharedSpaceRepository,
     ],
     mock: [JobRepository, LoggingRepository, SystemMetadataRepository],
@@ -162,12 +170,12 @@ const setupRecognition = (db?: Kysely<DB>) => {
 };
 
 /**
- * #808: reproduces the reported shape against a real database — `person.birthDate` is NULL and the
- * birthday only ever existed on a `shared_space_person` profile reached through the shared
- * `identityId`. This is the payload the asset viewer Info panel renders for the owner, so the age
- * has to survive the trip. The small tests stub the resolver; these prove the real
- * `hydrateAccessiblePeople` query actually returns the space birthday for this shape.
- */
+#808: reproduces the reported shape against a real database — `person.birthDate` is NULL and the
+birthday only ever existed on a `shared_space_person` profile reached through the shared
+`identityId`. This is the payload the asset viewer Info panel renders for the owner, so the age
+has to survive the trip. The small tests stub the resolver; these prove the real
+`hydrateAccessiblePeople` query actually returns the space birthday for this shape.
+*/
 const seedSpaceOnlyBirthday = async (birthDateSource: 'manual' | 'inherited') => {
   const { sut, ctx } = setup();
   const faceIdentityRepository = ctx.get(FaceIdentityRepository);
@@ -231,7 +239,6 @@ const setupFaceRecognition = (db?: Kysely<DB>) => {
     active: 1,
     waiting: 0,
     delayed: 0,
-    paused: 0,
     completed: 0,
     failed: 0,
   });
@@ -922,7 +929,7 @@ describe(PersonService.name, () => {
 
       const targetIdentity = await ctx.database
         .selectFrom('person')
-        .select('identityId')
+        .select(personIdentityId().as('identityId'))
         .where('personGroupId', '=', target.personGroupId)
         .executeTakeFirstOrThrow();
 
@@ -954,7 +961,7 @@ describe(PersonService.name, () => {
     });
 
     it('repairs previously merged faces when people identity maintenance runs', async () => {
-      const { sut, ctx } = setup();
+      const { ctx } = setup();
       const assetRepo = ctx.get(AssetRepository);
       const faceIdentityRepo = ctx.get(FaceIdentityRepository);
       const jobMock = ctx.getMock(JobRepository);
@@ -995,7 +1002,9 @@ describe(PersonService.name, () => {
       expect(bucketsBeforeRepair.reduce((total, bucket) => total + Number(bucket.count), 0)).toBe(1);
 
       jobMock.queue.mockResolvedValue();
-      await expect(sut.handleFaceIdentityBackfill({ stage: 'person' })).resolves.toBe(JobStatus.Success);
+      await expect(
+        ctx.getService(FaceIdentityMaintenanceService).handleFaceIdentityBackfill({ stage: 'person' }),
+      ).resolves.toBe(JobStatus.Success);
 
       const sourceLink = await ctx.database
         .selectFrom('face_identity_face')
@@ -1021,7 +1030,7 @@ describe(PersonService.name, () => {
       const { sut } = setup();
       const auth = factory.auth();
       const personId = factory.uuid();
-      await expect(sut.delete(auth, personId)).rejects.toThrow('Not found or no person.delete access');
+      await expect(sut.delete(auth, personId, {})).rejects.toThrow('Not found or no person.delete access');
     });
 
     it('should delete the person', async () => {
@@ -1036,7 +1045,7 @@ describe(PersonService.name, () => {
       await expect(personRepo.getByGroupId(person)).resolves.toEqual(
         expect.objectContaining({ personGroupId: person.personGroupId }),
       );
-      await expect(sut.delete(auth, person.personGroupId)).resolves.toBeUndefined();
+      await expect(sut.delete(auth, person.personGroupId, {})).resolves.toBeUndefined();
       await expect(personRepo.getByGroupId(person)).resolves.toBeUndefined();
 
       expect(jobMock.queue).toHaveBeenCalledWith({
@@ -1201,7 +1210,7 @@ describe(PersonService.name, () => {
       const jobRepo = ctx.getMock(JobRepository);
       ctx.getMock(StorageRepository).unlink.mockResolvedValue();
       jobRepo.waitForQueueCompletion.mockResolvedValue();
-      jobRepo.getJobCounts.mockResolvedValue({ active: 0, waiting: 0, completed: 0, delayed: 0, failed: 0, paused: 0 });
+      jobRepo.getJobCounts.mockResolvedValue({ active: 0, waiting: 0, completed: 0, delayed: 0, failed: 0 });
       jobRepo.queueAll.mockResolvedValue();
       // removeAllPersonGroups queues a FileDelete job per chunk of deleted people; this test doesn't
       // assert on it, so it only needs a resolved value the way setupFaceRecognition() does above.
@@ -1221,7 +1230,9 @@ describe(PersonService.name, () => {
 
       await sut.handleQueueRecognizeFaces({ force: true });
 
-      await expect(ctx.database.selectFrom('person').selectAll().execute()).resolves.toHaveLength(0);
+      await expect(
+        ctx.database.selectFrom('person').selectAll().select(personSidecarColumns()).execute(),
+      ).resolves.toHaveLength(0);
       expect(jobRepo.queueAll).toHaveBeenCalledWith(
         expect.objectContaining([
           { name: JobName.FacialRecognition, data: { id: assetFace.id, deferred: false, skipSharedSpaceMatch: true } },
@@ -1241,7 +1252,7 @@ describe(PersonService.name, () => {
       const jobRepo = ctx.getMock(JobRepository);
       ctx.getMock(StorageRepository).unlink.mockResolvedValue();
       jobRepo.waitForQueueCompletion.mockResolvedValue();
-      jobRepo.getJobCounts.mockResolvedValue({ active: 0, waiting: 0, completed: 0, delayed: 0, failed: 0, paused: 0 });
+      jobRepo.getJobCounts.mockResolvedValue({ active: 0, waiting: 0, completed: 0, delayed: 0, failed: 0 });
       jobRepo.queueAll.mockResolvedValue();
       // removeAllPersonGroups queues a FileDelete job per chunk of deleted people; this test doesn't
       // assert on it, so it only needs a resolved value the way setupFaceRecognition() does above.
@@ -1261,7 +1272,9 @@ describe(PersonService.name, () => {
 
       await sut.handleQueueRecognizeFaces({ force: true, clusterGroupId: user.clusterGroupId });
 
-      await expect(ctx.database.selectFrom('person').selectAll().execute()).resolves.toHaveLength(1);
+      await expect(
+        ctx.database.selectFrom('person').selectAll().select(personSidecarColumns()).execute(),
+      ).resolves.toHaveLength(1);
       expect(jobRepo.queueAll).toHaveBeenCalledWith(
         expect.objectContaining([
           { name: JobName.FacialRecognition, data: { id: assetFace.id, deferred: false, skipSharedSpaceMatch: true } },
@@ -2099,23 +2112,27 @@ describe(PersonService.name, () => {
   // per-face thumbnail route, so this is a metadata leak, but it is the same rule.
   describe('getFacesForPicker locked-folder visibility', () => {
     it('omits faces on locked assets from a non-elevated owner', async () => {
-      const { sut, ctx } = setup();
+      const { ctx } = setup();
       const { user, person, timelineAsset } = await seedPersonAcrossVisibilities(ctx);
 
-      const result = await sut.getFacesForPicker(factory.auth({ user: { id: user.id } }), person.personGroupId, {
-        page: 1,
-        size: 50,
-      });
+      const result = await ctx
+        .getService(GalleryPeopleService)
+        .getFacesForPicker(factory.auth({ user: { id: user.id } }), person.personGroupId, {
+          page: 1,
+          size: 50,
+        });
 
       expect(result.faces.map((face) => face.assetId)).toEqual([timelineAsset.id]);
     });
 
     it('includes faces on locked assets for an elevated owner', async () => {
-      const { sut, ctx } = setup();
+      const { ctx } = setup();
       const { user, person, timelineAsset, lockedAsset } = await seedPersonAcrossVisibilities(ctx);
 
       const auth = factory.auth({ user: { id: user.id }, session: { hasElevatedPermission: true } });
-      const result = await sut.getFacesForPicker(auth, person.personGroupId, { page: 1, size: 50 });
+      const result = await ctx
+        .getService(GalleryPeopleService)
+        .getFacesForPicker(auth, person.personGroupId, { page: 1, size: 50 });
 
       expect(result.faces.map((face) => face.assetId).toSorted()).toEqual(
         [timelineAsset.id, lockedAsset.id].toSorted(),
@@ -2228,7 +2245,7 @@ describe(PersonService.name, () => {
     });
   });
 
-  // D14/Slice 9: confirm's claim -> reassign -> resolveAssignedFace -> identity-relink chain must be one
+  // D14/Slice 9: confirm's claim -> reassign -> drain -> identity-relink chain must be one
   // atomic unit. Before this slice each write autocommitted separately, so a crash/failure between the
   // reassign and the relink left the face pointed at the new person WITHOUT a manual identity link (a torn
   // write) and the claimed pending row gone for good — the exact defect class executeRepair's per-route
@@ -2279,7 +2296,7 @@ describe(PersonService.name, () => {
       expect(seeded.status).toBe('pending');
 
       // The LAST write in the chain fails.
-      vi.spyOn(faceIdentityRepo, 'replaceFaceIdentity').mockRejectedValueOnce(new Error('relink failed'));
+      vi.spyOn(faceIdentityRepo, 'replaceFaceIdentities').mockRejectedValueOnce(new Error('relink failed'));
 
       await expect(faceSuggestion.confirmFaceSuggestion(auth, p.personGroupId, face.id)).rejects.toThrow(
         'relink failed',
@@ -2349,6 +2366,43 @@ describe(PersonService.name, () => {
         .where('id', '=', queryFace.id)
         .executeTakeFirstOrThrow();
       expect(row.personGroupId).toBe(person.personGroupId);
+    });
+  });
+
+  describe('handleRecognizeFaces soft-deleted faces', () => {
+    it('never assigns a face to a person through a soft-deleted face', async () => {
+      const { sut, ctx } = setupRecognition();
+      const { user } = await ctx.newUser();
+      const { person } = await ctx.newPerson({ ownerId: user.id, name: 'Deleted' });
+      const embedding = newEmbedding();
+
+      // The person's only face was deleted (asset_face.deletedAt set, personGroupId and face_search row kept).
+      const { asset: deletedAsset } = await ctx.newAsset({ ownerId: user.id });
+      const { assetFace: deletedFace } = await ctx.newAssetFace({
+        assetId: deletedAsset.id,
+        personGroupId: person.personGroupId,
+        sourceType: SourceType.MachineLearning,
+        deletedAt: new Date(),
+      });
+      await ctx.database.insertInto('face_search').values({ faceId: deletedFace.id, embedding }).execute();
+
+      const { asset: queryAsset } = await ctx.newAsset({ ownerId: user.id, visibility: AssetVisibility.Timeline });
+      const { assetFace: queryFace } = await ctx.newAssetFace({
+        assetId: queryAsset.id,
+        personGroupId: null,
+        sourceType: SourceType.MachineLearning,
+      });
+      await ctx.database.insertInto('face_search').values({ faceId: queryFace.id, embedding }).execute();
+
+      await sut.handleRecognizeFaces({ id: queryFace.id, deferred: true });
+
+      const row = await ctx.database
+        .selectFrom('asset_face')
+        .select('personGroupId')
+        .where('id', '=', queryFace.id)
+        .executeTakeFirstOrThrow();
+      expect(row.personGroupId).not.toBeNull();
+      expect(row.personGroupId).not.toBe(person.personGroupId);
     });
   });
 });

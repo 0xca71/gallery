@@ -91,7 +91,6 @@ describe('transformFaceBoundingBox', () => {
         { action: AssetEditAction.Rotate, parameters: { angle: 12.5 } },
       ];
       const result = transformFaceBoundingBox(baseFace, edits, baseDimensions);
-
       expect(result.imageWidth).toBe(800);
       expect(result.imageHeight).toBe(640);
       expect(result.boundingBoxX2).toBeGreaterThan(result.boundingBoxX1);

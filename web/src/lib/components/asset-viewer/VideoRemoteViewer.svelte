@@ -1,10 +1,9 @@
 <script lang="ts">
-  import { castManager, CastState } from '$lib/managers/cast-manager.svelte';
-  import { handleError } from '$lib/utils/handle-error';
-  import { Icon, IconButton } from '@immich/ui';
+  import { CastState, castManager } from '#lib/managers/cast-manager.svelte.ts';
+  import { handleError } from '#lib/utils/handle-error.ts';
+  import { Icon, IconButton, LoadingSpinner } from '@immich/ui';
   import { mdiCastConnected, mdiPause, mdiPlay } from '@mdi/js';
   import { t } from 'svelte-i18n';
-  import LoadingSpinner from '$lib/components/shared-components/LoadingSpinner.svelte';
 
   interface Props {
     poster: string;
@@ -24,7 +23,7 @@
         break;
       }
       case CastState.IDLE: {
-        await cast(assetFileUrl, true);
+        await cast(true);
         break;
       }
       default: {
@@ -36,7 +35,7 @@
 
   $effect(() => {
     if (assetFileUrl) {
-      void cast(assetFileUrl);
+      void cast();
     }
   });
 
@@ -48,11 +47,11 @@
     previousPlayerState = castManager.castState;
   });
 
-  const cast = async (url: string, force: boolean = false) => {
-    if (!url || !castManager.isCasting) {
+  const cast = async (force: boolean = false) => {
+    if (!assetFileUrl || !castManager.isCasting) {
       return;
     }
-    const fullUrl = new URL(url, location.href);
+    const fullUrl = new URL(assetFileUrl, location.href);
 
     try {
       await castManager.loadMedia(fullUrl.href, force);

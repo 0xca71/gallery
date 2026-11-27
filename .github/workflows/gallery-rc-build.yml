@@ -12,7 +12,6 @@ name: Release Candidate Build
 # the target branch/tag/SHA).
 
 on:
-  # Automatic RC builds disabled for personal-use CI.
   workflow_dispatch:
     inputs:
       rc_tag:
@@ -31,6 +30,11 @@ on:
         description: 'Also build the CPU machine-learning image under the same RC tag.'
         required: false
         default: false
+        type: boolean
+      use_cache:
+        description: 'Read and write the shared GHA build cache. Turn off for code from outside the repository: the cache scopes are shared with the release builds, so an untrusted build must never write to them.'
+        required: false
+        default: true
         type: boolean
   workflow_call:
     inputs:
@@ -53,6 +57,11 @@ on:
         required: false
         default: false
         type: boolean
+      use_cache:
+        description: 'Read and write the shared GHA build cache. Turn off for code from outside the repository: the cache scopes are shared with the release builds, so an untrusted build must never write to them.'
+        required: false
+        default: true
+        type: boolean
 
 concurrency:
   group: ${{ github.workflow }}-${{ inputs.rc_tag }}
@@ -62,6 +71,7 @@ permissions: {}
 
 jobs:
   validate:
+    if: ${{ github.repository == 'open-noodle/gallery' }}
     name: Validate RC tag
     runs-on: ubuntu-latest
     permissions: {}
@@ -83,6 +93,7 @@ jobs:
           echo "RC tag OK: $RC_TAG"
 
   build-server:
+    if: ${{ github.repository == 'open-noodle/gallery' }}
     name: Build Server (${{ matrix.platform }})
     needs: validate
     runs-on: ${{ matrix.runner }}
@@ -153,8 +164,8 @@ jobs:
             BUILD_SOURCE_REF=${{ github.ref_name }}
             BUILD_SOURCE_COMMIT=${{ steps.prepare.outputs.source-commit }}
           outputs: type=image,"name=ghcr.io/open-noodle/gallery-server",push-by-digest=true,name-resolution=short,push=true
-          cache-from: type=gha,scope=server-${{ steps.prepare.outputs.platform-pair }}
-          cache-to: type=gha,scope=server-${{ steps.prepare.outputs.platform-pair }},mode=max
+          cache-from: ${{ inputs.use_cache && format('type=gha,scope=server-{0}', steps.prepare.outputs.platform-pair) || '' }}
+          cache-to: ${{ inputs.use_cache && format('type=gha,scope=server-{0},mode=max', steps.prepare.outputs.platform-pair) || '' }}
 
       - name: Export digest
         run: | # zizmor: ignore[template-injection]
@@ -171,6 +182,7 @@ jobs:
           retention-days: 1
 
   merge-server:
+    if: ${{ github.repository == 'open-noodle/gallery' }}
     name: Merge Server Manifest
     needs: [validate, build-server]
     runs-on: ubuntu-latest
@@ -207,7 +219,7 @@ jobs:
   build-ml:
     name: Build ML (${{ matrix.platform }})
     needs: validate
-    if: ${{ inputs.build_ml }}
+    if: ${{ github.repository == 'open-noodle/gallery' && (inputs.build_ml) }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -268,8 +280,8 @@ jobs:
             BUILD_SOURCE_REF=${{ github.ref_name }}
             BUILD_SOURCE_COMMIT=${{ steps.prepare.outputs.source-commit }}
           outputs: type=image,"name=ghcr.io/open-noodle/gallery-ml",push-by-digest=true,name-resolution=short,push=true
-          cache-from: type=gha,scope=rc-ml-cpu-${{ steps.prepare.outputs.platform-pair }}
-          cache-to: type=gha,scope=rc-ml-cpu-${{ steps.prepare.outputs.platform-pair }},mode=max
+          cache-from: ${{ inputs.use_cache && format('type=gha,scope=rc-ml-cpu-{0}', steps.prepare.outputs.platform-pair) || '' }}
+          cache-to: ${{ inputs.use_cache && format('type=gha,scope=rc-ml-cpu-{0},mode=max', steps.prepare.outputs.platform-pair) || '' }}
 
       - name: Export digest
         run: | # zizmor: ignore[template-injection]
@@ -288,7 +300,7 @@ jobs:
   merge-ml:
     name: Merge ML Manifest
     needs: [validate, build-ml]
-    if: ${{ inputs.build_ml }}
+    if: ${{ github.repository == 'open-noodle/gallery' && (inputs.build_ml) }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -323,7 +335,7 @@ jobs:
   summary:
     name: RC Ready
     needs: [merge-server, merge-ml]
-    if: ${{ always() && needs.merge-server.result == 'success' && (!inputs.build_ml || needs.merge-ml.result == 'success') }}
+    if: ${{ github.repository == 'open-noodle/gallery' && (always() && needs.merge-server.result == 'success' && (!inputs.build_ml || needs.merge-ml.result == 'success')) }}
     runs-on: ubuntu-latest
     permissions: {}
     steps:

@@ -17,6 +17,7 @@ Gallery checks the caller's role on every endpoint. The three roles (Owner, Edit
 - **Shared face recognition.** People detected across the space are browsable by all members.
 - **Activity log.** A feed of everything that happened in the space: photos added or removed, members joining or leaving, settings changes.
 - **New since last visit.** See what changed since you last opened a space, with badges and timeline dividers.
+- **A badge on photos in a space.** A thumbnail shows when its photo is in one of your spaces: the Spaces icon in the space's color, or with a count when it is in several. You can turn it off. See [Seeing Which Photos Are in a Space](#seeing-which-photos-are-in-a-space).
 - **Map view.** Browse a space's geotagged photos on an interactive map.
 - **Search within a space.** Smart search scoped to a single space's assets.
 - **Connected libraries.** Admins can link external libraries to spaces, which pulls in every photo the library holds.
@@ -25,28 +26,29 @@ Gallery checks the caller's role on every endpoint. The three roles (Owner, Edit
 
 ## Roles and Permissions
 
-| Permission                  | Owner | Editor | Viewer |
-| --------------------------- | ----- | ------ | ------ |
-| View assets in space        | Yes   | Yes    | Yes    |
-| Download assets             | Yes   | Yes    | Yes    |
-| Add own assets to space     | Yes   | Yes    | No     |
-| Remove assets from space    | Yes   | Yes    | No     |
-| Set cover photo             | Yes   | Yes    | No     |
-| Rename / edit space details | Yes   | Yes    | No     |
-| Invite/remove members       | Yes   | No     | No     |
-| Change member roles         | Yes   | No     | No     |
-| Toggle face recognition     | Yes   | No     | No     |
-| Change space color          | Yes   | Yes    | No     |
-| Delete the space            | Yes   | No     | No     |
-| Leave the space             | No    | Yes    | Yes    |
-| Search within space         | Yes   | Yes    | Yes    |
-| Create a public share link  | Yes   | Yes    | No\*   |
-| View activity log           | Yes   | Yes    | Yes    |
-| View space on map           | Yes   | Yes    | Yes    |
-| Manage people (name, merge) | Yes   | Yes    | No     |
-| Show/hide people            | Yes   | Yes    | No     |
-| Toggle timeline integration | Yes   | Yes    | Yes    |
-| Link/unlink libraries\*     | Yes   | Yes    | No     |
+| Permission                  | Owner | Editor            | Viewer |
+| --------------------------- | ----- | ----------------- | ------ |
+| View assets in space        | Yes   | Yes               | Yes    |
+| Download assets             | Yes   | Yes               | Yes    |
+| Add own assets to space     | Yes   | Yes               | No     |
+| Remove assets from space    | Yes   | Yes               | No     |
+| Set cover photo             | Yes   | Yes               | No     |
+| Rename / edit space details | Yes   | Yes               | No     |
+| Add members                 | Yes   | When allowed [^1] | No     |
+| Change viewer/editor roles  | Yes   | When allowed [^1] | No     |
+| Remove members              | Yes   | No                | No     |
+| Toggle face recognition     | Yes   | No                | No     |
+| Change space color          | Yes   | Yes               | No     |
+| Delete the space            | Yes   | No                | No     |
+| Leave the space             | No    | Yes               | Yes    |
+| Search within space         | Yes   | Yes               | Yes    |
+| Create a public share link  | Yes   | Yes               | No\*   |
+| View activity log           | Yes   | Yes               | Yes    |
+| View space on map           | Yes   | Yes               | Yes    |
+| Manage people (name, merge) | Yes   | Yes               | No     |
+| Show/hide people            | Yes   | Yes               | No     |
+| Toggle timeline integration | Yes   | Yes               | Yes    |
+| Link/unlink libraries\*     | Yes   | Yes               | No     |
 
 \* Requires server admin privileges in addition to the space role.
 
@@ -84,7 +86,7 @@ The banner carries a progress bar and disappears once all three steps are done. 
 
 ## Adding Members
 
-From the space detail page, the Owner can invite other users:
+From the space detail page, the Owner can add other users. Editors can too, when the server or the space allows it (see [Editors managing members](#editors-managing-members)).
 
 ### Web
 
@@ -166,7 +168,20 @@ For the full walkthrough (linking versus creating, cross-owner contributions, pe
 
 1. Open the space.
 2. Long-press to select photos.
-3. Tap **Remove from Space** in the bottom sheet.
+3. Tap **Remove from space** in the bottom sheet.
+
+### From the Photos timeline
+
+You can also remove photos from a space without opening it, from **Photos** on the web and in the mobile app. Select the photos (the [space badge](#seeing-which-photos-are-in-a-space) shows which ones are in a space), then:
+
+- If the selection is in one space you own or edit, the action reads **Remove from** followed by the space's name.
+- If it is in several, **Remove from a space…** lets you choose the space, with how many of the selected photos each one holds.
+
+The removal works as it does inside the space: the web asks you to confirm, the mobile app does not. Only spaces where you are an Owner or Editor are offered.
+
+### Photos that stay
+
+Only photos added to the space directly can be removed this way. A photo that is in the space because it belongs to a linked album, or to a connected library, stays: Gallery tells you which album to remove it from, or that a library brings it (remove it from the library's folder, or unlink the library).
 
 ## Stacked Photos
 
@@ -228,6 +243,48 @@ Hiding asks for confirmation and states how many photos it will actually remove 
 That is the usual surprise: a photo can be in a linked album _and_ in a linked external library, or added to the space directly as well. Hiding the album alone changes nothing for those photos until the other path is hidden too, so hide the whole space (or unlink the library) if you want them all gone.
 
 > Timeline integration cannot be combined with archive, favorites, or trash filters.
+
+## Editors Managing Members
+
+By default only Owners manage membership. Two opt-in permissions let Editors help, and both start off:
+
+- **Editors can add members.** An Editor can add people to the space. They are added as **Viewers**.
+- **Editors can switch members between viewer and editor.** An Editor can promote a Viewer to Editor or set an Editor back to Viewer. Adding someone directly as an Editor needs this permission as well as the first one.
+
+A server administrator sets the default for every space under **Administration → Settings → Server** (_Let space editors add members_ and _Let space editors change member roles_). Each space's Owner can override the default for that space on the **Members** page, with a choice of **Server default**, **On** or **Off** for each permission. The page shows what the server default currently is.
+
+An Editor can never:
+
+- make someone an Owner, or change an Owner's role
+- change their own role
+- remove members
+- change these two permissions
+
+Those stay with the Owner, and a server administrator who is not a member of the space gets no extra access. Activity entries for new members record who added them.
+
+[^1]: Off by default. See [Editors managing members](#editors-managing-members).
+
+## Seeing Which Photos Are in a Space
+
+A photo that is in at least one of your spaces carries a small badge in the top-left corner of its thumbnail, on the web and in the mobile app. Like the other marks on a thumbnail, it is an icon drawn on the photo:
+
+- **One space:** the Spaces icon in the space's color.
+- **Several spaces:** a white Spaces icon with the number of spaces. On small thumbnails in the mobile app, the icon without the number.
+
+Every way into a space counts: added directly, in a linked album, or in a connected library. Spaces and albums you hid from your timeline count too, since the photo is still in them and their members can still see it. Only spaces you are a member of count, and an album linked to a space puts the badge on all of its photos.
+
+The badge does not appear inside a space (its photos, people, map and search), in the trash, the locked folder or shared links. When you select a photo, or point at it on the web, the selection checkmark takes the corner.
+
+The badges follow the changes you make, including a new space color. On the web, other members' changes show when you move to another page; the mobile app follows them as it syncs.
+
+### Turning the Badges Off
+
+The badges are on by default. If you prefer thumbnails without them, turn off **Show space icons on photos**:
+
+- **Web:** [`Account Settings > App Settings`](https://my.immich.app/user-settings?isOpen=app-settings).
+- **Mobile app:** **Settings > Photo Grid**.
+
+The setting is remembered on each device: turning it off in one browser or app leaves the badges on your other devices. It changes only what you see; your photos stay in their spaces.
 
 ## Renaming and Editing Space Details
 
@@ -429,6 +486,7 @@ Each space can have an assigned color, chosen during creation or changed later b
 
 - Gradient backgrounds on space cards (when no cover photo or collage is available)
 - Hero banner gradients on the space detail page
+- The badge on the thumbnails of photos that are in a single space
 
 Ten colors are available, matching the user avatar color palette.
 

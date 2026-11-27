@@ -1,16 +1,42 @@
+import { ProjectionType } from '#lib/constants.ts';
 import {
-  AssetEditAction,
+  getGalleryAssetActions,
+  getGalleryAssetBulkActions,
+  type GalleryAssetActionOptions,
+  type GalleryAssetBulkActionOptions,
+} from '#lib/gallery/asset-actions.ts';
+import { resetLibraryView } from '#lib/gallery/library-view/library-view.svelte.ts';
+import { animateRemoval, celebrate } from '#lib/gallery/motion/index.ts';
+import { assetMultiSelectManager } from '#lib/managers/asset-multi-select-manager.svelte.ts';
+import { assetViewerManager } from '#lib/managers/asset-viewer-manager.svelte.ts';
+import { authManager } from '#lib/managers/auth-manager.svelte.ts';
+import { eventManager } from '#lib/managers/event-manager.svelte.ts';
+import type { TimelineAsset } from '#lib/managers/timeline-manager/types.ts';
+import AssetAddToAlbumModal from '#lib/modals/AssetAddToAlbumModal.svelte';
+import AssetTagModal from '#lib/modals/AssetTagModal.svelte';
+import ProfileImageCropperModal from '#lib/modals/ProfileImageCropperModal.svelte';
+import SharedLinkCreateModal from '#lib/modals/SharedLinkCreateModal.svelte';
+import { removeAssetFromAlbumMutation } from '#lib/queries/album.query.ts';
+import { executeMutation, readPreloadedQuery } from '#lib/queries/client.ts';
+import { getUserConfigQuery } from '#lib/queries/config-user.query.ts';
+import { Route } from '#lib/route.ts';
+import { SlideshowState, slideshowStore } from '#lib/stores/slideshow.store.ts';
+import { downloadUrl, getAssetMediaUrl, getSharedLink, sleep } from '#lib/utils.ts';
+import type { OnFavorite } from '#lib/utils/actions.ts';
+import { handleError } from '#lib/utils/handle-error.ts';
+import { getFormatter } from '#lib/utils/i18n.ts';
+import {
   AssetJobName,
   AssetMediaSize,
   AssetTypeEnum,
   AssetVisibility,
-  editAsset,
-  getAssetEdits,
+  bulkTagAssets,
   getAssetInfo,
-  removeAssetEdits,
   runAssetJobs,
   updateAsset,
-  type AssetEditActionItemDto,
+  updateAssetFavorites,
+  updateAssets,
+  type AlbumResponseDto,
   type AssetJobsDto,
   type AssetResponseDto,
 } from '@immich/sdk';
@@ -18,6 +44,8 @@ import { modalManager, toastManager, type ActionItem } from '@immich/ui';
 import {
   mdiAccountCircleOutline,
   mdiAlertOutline,
+  mdiArchiveArrowDownOutline,
+  mdiArchiveArrowUpOutline,
   mdiCogRefreshOutline,
   mdiCompare,
   mdiContentCopy,
@@ -29,6 +57,7 @@ import {
   mdiHeart,
   mdiHeartOutline,
   mdiImageRefreshOutline,
+  mdiImageRemoveOutline,
   mdiImageSearch,
   mdiInformationOutline,
   mdiMagnifyMinusOutline,
@@ -37,46 +66,23 @@ import {
   mdiMotionPlayOutline,
   mdiPlus,
   mdiPresentationPlay,
-  mdiRotateLeft,
-  mdiRotateRight,
   mdiShareVariantOutline,
+  mdiTagMultipleOutline,
   mdiTagPlusOutline,
   mdiTune,
 } from '@mdi/js';
-import type { MessageFormatter } from 'svelte-i18n';
+import { t, type MessageFormatter } from 'svelte-i18n';
+import { get } from 'svelte/store';
 import { goto } from '$app/navigation';
-import { ProjectionType } from '$lib/constants';
-import { assetMultiSelectManager } from '$lib/managers/asset-multi-select-manager.svelte';
-import { assetViewerManager } from '$lib/managers/asset-viewer-manager.svelte';
-import { authManager } from '$lib/managers/auth-manager.svelte';
-import { eventManager } from '$lib/managers/event-manager.svelte';
-import { featureFlagsManager } from '$lib/managers/feature-flags-manager.svelte';
-import AssetAddToCollectionModal from '$lib/modals/AssetAddToCollectionModal.svelte';
-import AssetTagModal from '$lib/modals/AssetTagModal.svelte';
-import ProfileImageCropperModal from '$lib/modals/ProfileImageCropperModal.svelte';
-import SharedLinkCreateModal from '$lib/modals/SharedLinkCreateModal.svelte';
-import { Route } from '$lib/route';
-import { SlideshowState, slideshowStore } from '$lib/stores/slideshow.store';
-import { waitForWebsocketEvent } from '$lib/stores/websocket';
-import { getAssetMediaUrl, getSharedLink, sleep } from '$lib/utils';
-import { downloadUrl } from '$lib/utils';
-import { handleError } from '$lib/utils/handle-error';
-import { getFormatter } from '$lib/utils/i18n';
 
 export const getAssetBulkActions = (
   $t: MessageFormatter,
-  {
-    restrictToSpaceId,
-  }: {
-    /**
-     * Set when the selection contains assets the user does not own: the add-to-collection
-     * picker then offers only albums linked to this space, because those are the only targets
-     * that can accept the non-owned assets (#764 contribution).
-     */
-    restrictToSpaceId?: string;
-  } = {},
+  album?: AlbumResponseDto,
+  gallery?: GalleryAssetBulkActionOptions,
 ) => {
+  const assetIds = assetMultiSelectManager.assets.map((asset) => asset.id);
   const ownedAssets = assetMultiSelectManager.ownedAssets;
+  const isAlbumOwner = album?.albumUsers[0].user.id === authManager.user.id;
 
   const onAction = async (name: AssetJobName) => {
     await handleRunAssetJob({ name, assetIds: ownedAssets.map(({ id }) => id) });
@@ -84,14 +90,61 @@ export const getAssetBulkActions = (
   };
 
   const AddToAlbum: ActionItem = {
-    title: $t('add_to_album_or_space'),
+    title: $t('add_to_album'),
     icon: mdiPlus,
     shortcuts: [{ key: 'l' }],
-    onAction: () =>
-      modalManager.show(AssetAddToCollectionModal, {
-        assetIds: assetMultiSelectManager.assets.map((asset) => asset.id),
-        restrictToSpaceId,
-      }),
+    onAction: () => modalManager.show(AssetAddToAlbumModal, { assetIds }),
+  };
+
+  const Archive: ActionItem = {
+    title: $t('to_archive'),
+    icon: mdiArchiveArrowDownOutline,
+    shortcuts: [{ key: 'a', shift: true }],
+    $if: () => assetMultiSelectManager.isAllUserOwned && !assetMultiSelectManager.isAllArchived,
+    onAction: async () => {
+      const assets = ownedAssets.filter((asset) => asset.visibility !== AssetVisibility.Archive);
+      if (await handleSetVisibility(assets, AssetVisibility.Archive)) {
+        assetMultiSelectManager.clear();
+      }
+    },
+  };
+
+  const CreateSharedLink: ActionItem = {
+    title: $t('share'),
+    icon: mdiShareVariantOutline,
+    onAction: () => modalManager.show(SharedLinkCreateModal, { assetIds }),
+  };
+
+  const RemoveFromAlbum: ActionItem = {
+    title: $t('remove_from_album'),
+    icon: mdiImageRemoveOutline,
+    shortcuts: [{ key: 'l', shift: true }],
+    $if: () => !!album && (isAlbumOwner || assetMultiSelectManager.isAllUserOwned),
+    onAction: () => handleBulkRemoveAssetsFromAlbum(assetIds, album!),
+  };
+
+  const Tag: ActionItem = {
+    title: $t('tag'),
+    icon: mdiTagMultipleOutline,
+    $if: () => authManager.preferences.tags.enabled && assetMultiSelectManager.isAllUserOwned,
+    onAction: async () => {
+      if (await modalManager.show(AssetTagModal, { assetIds })) {
+        assetMultiSelectManager.clear();
+      }
+    },
+    shortcuts: { key: 't' },
+  };
+
+  const Unarchive: ActionItem = {
+    title: $t('unarchive'),
+    icon: mdiArchiveArrowUpOutline,
+    shortcuts: [{ key: 'a', shift: true }],
+    $if: () => assetMultiSelectManager.isAllUserOwned && assetMultiSelectManager.isAllArchived,
+    onAction: async () => {
+      if (await handleSetVisibility(ownedAssets, AssetVisibility.Timeline)) {
+        assetMultiSelectManager.clear();
+      }
+    },
   };
 
   const RefreshFacesJob: ActionItem = {
@@ -119,51 +172,36 @@ export const getAssetBulkActions = (
     $if: () => ownedAssets.every((asset) => asset.isVideo),
   };
 
-  return { AddToAlbum, RefreshFacesJob, RefreshMetadataJob, RegenerateThumbnailJob, TranscodeVideoJob };
+  return getGalleryAssetBulkActions($t, gallery, {
+    AddToAlbum,
+    Archive,
+    CreateSharedLink,
+    RemoveFromAlbum,
+    Tag,
+    Unarchive,
+    RefreshFacesJob,
+    RefreshMetadataJob,
+    RegenerateThumbnailJob,
+    TranscodeVideoJob,
+  });
 };
 
 export const getAssetActions = (
   $t: MessageFormatter,
   asset: AssetResponseDto & { stackPrimaryAssetId?: string },
-  {
-    space,
-  }: {
-    /**
-     * The shared space this asset is being viewed through, when the viewer sits on a space
-     * surface. Drives the add-to-album gating below; absent everywhere else.
-     */
-    space?: { id: string; canWrite: boolean };
-  } = {},
+  album?: AlbumResponseDto,
+  gallery?: GalleryAssetActionOptions,
 ) => {
   const sharedLink = getSharedLink();
   const authUser = authManager.authenticated ? authManager.user : undefined;
   const isOwner = !!(authUser && authUser.id === asset.ownerId);
-  const smartSearchEnabled = featureFlagsManager.value.smartSearch;
-
-  // Server-side `Permission.AssetShare` is owner ∪ partner only, so album or space membership grants
-  // no share access. Gating on `authUser` alone offered a shared-album/space viewer a button that
-  // `POST /shared-links` then rejected with "Not found or no asset.share access" (#871).
-  //
-  // `|| !asset.ownerId`: a `showMetadata: false` shared link returns SanitizedAssetResponseDto, which
-  // omits `ownerId` altogether, so ownership is unknowable client-side there — treat unknown as
-  // shareable rather than hiding the button from the owner of the asset they linked.
-  const canShare = !!authUser && (isOwner || !asset.ownerId);
-
-  // #889: an asset the caller does not own reaches an album only through the #764 contribution
-  // path, which the server accepts solely for albums linked to a space where the caller is
-  // Owner/Editor. Offering the ordinary picker there lists nothing but targets the server must
-  // reject, so on a space surface the picker is narrowed to that space's albums — and dropped
-  // entirely for a space Viewer, who has no contribution path at all. Mirrors the multi-select
-  // rule in `getSelectionCapabilities`. Off a space surface `space` is undefined and nothing
-  // changes: partner-shared assets do land in the caller's own album (Permission.AssetShare),
-  // and the viewer cannot evaluate that from the DTO.
-  const canAddToAlbum = isOwner || space === undefined || space.canWrite;
-  const restrictToSpaceId = !isOwner && space?.canWrite ? space.id : undefined;
+  const isAlbumOwner = !!(authUser && authUser.id === album?.albumUsers.at(0)?.user.id);
+  const smartSearchEnabled = !!authUser && readPreloadedQuery(getUserConfigQuery()).machineLearning.clip.enabled;
 
   const Share: ActionItem = {
     title: $t('share'),
     icon: mdiShareVariantOutline,
-    $if: () => canShare && !asset.isTrashed && asset.visibility !== AssetVisibility.Locked,
+    $if: () => !!(authUser && !asset.isTrashed && asset.visibility !== AssetVisibility.Locked),
     onAction: () => modalManager.show(SharedLinkCreateModal, { assetIds: [asset.id] }),
   };
 
@@ -228,12 +266,28 @@ export const getAssetActions = (
     shortcuts: [{ key: 'f' }],
   };
 
+  const Rate: ActionItem = {
+    title: $t('rate_asset'),
+    description: $t('rate_asset_description'),
+    $if: () => isOwner && authManager.preferences.ratings.enabled,
+    onAction: ({ event }) => handleRate(asset, event instanceof KeyboardEvent ? Number(event.key) : NaN),
+    shortcuts: [0, 1, 2, 3, 4, 5].map((key) => ({ key: String(key) })),
+  };
+
   const AddToAlbum: ActionItem = {
-    title: $t('add_to_album_or_space'),
+    title: $t('add_to_album'),
     icon: mdiPlus,
     shortcuts: [{ key: 'l' }],
-    $if: () => canAddToAlbum && asset.visibility !== AssetVisibility.Locked && !asset.isTrashed,
-    onAction: () => modalManager.show(AssetAddToCollectionModal, { assetIds: [asset.id], restrictToSpaceId }),
+    $if: () => asset.visibility !== AssetVisibility.Locked && !asset.isTrashed,
+    onAction: () => modalManager.show(AssetAddToAlbumModal, { assetIds: [asset.id] }),
+  };
+
+  const RemoveFromAlbum: ActionItem = {
+    title: $t('remove_from_album'),
+    icon: mdiImageRemoveOutline,
+    shortcuts: [{ key: 'l', shift: true }],
+    $if: () => !!album && (isOwner || isAlbumOwner),
+    onAction: () => handleRemoveAssetsFromAlbum([asset.id], album!),
   };
 
   const Offline: ActionItem = {
@@ -281,29 +335,6 @@ export const getAssetActions = (
     shortcuts: { key: 't' },
   };
 
-  const canEditImage = () =>
-    !sharedLink &&
-    isOwner &&
-    asset.type === AssetTypeEnum.Image &&
-    !asset.livePhotoVideoId &&
-    asset.exifInfo?.projectionType !== ProjectionType.EQUIRECTANGULAR &&
-    !asset.originalPath.toLowerCase().endsWith('.insp') &&
-    !asset.originalPath.toLowerCase().endsWith('.gif') &&
-    !asset.originalPath.toLowerCase().endsWith('.svg');
-
-  const canEditVideo = () => {
-    if (sharedLink || !isOwner || asset.type !== AssetTypeEnum.Video || asset.livePhotoVideoId) {
-      return false;
-    }
-    // Duration must be known and >= 2 seconds
-    if (!asset.duration) {
-      return false;
-    }
-    return asset.duration >= 2000;
-  };
-
-  const canEdit = () => canEditImage() || canEditVideo();
-
   const TagPeople: ActionItem = {
     title: $t('tag_people'),
     icon: mdiFaceRecognition,
@@ -315,7 +346,15 @@ export const getAssetActions = (
   const Edit: ActionItem = {
     title: $t('editor'),
     icon: mdiTune,
-    $if: canEdit,
+    $if: () =>
+      !sharedLink &&
+      isOwner &&
+      asset.type === AssetTypeEnum.Image &&
+      !asset.livePhotoVideoId &&
+      asset.exifInfo?.projectionType !== ProjectionType.EQUIRECTANGULAR &&
+      !asset.originalPath.toLowerCase().endsWith('.insp') &&
+      !asset.originalPath.toLowerCase().endsWith('.gif') &&
+      !asset.originalPath.toLowerCase().endsWith('.svg'),
     onAction: () => assetViewerManager.openEditor(),
     shortcuts: [{ key: 'e' }],
   };
@@ -331,7 +370,10 @@ export const getAssetActions = (
     title: $t('view_in_timeline'),
     icon: mdiImageSearch,
     $if: () => isOwner && asset.visibility !== AssetVisibility.Locked && !asset.isArchived && !asset.isTrashed,
-    onAction: () => goto(Route.photos({ at: asset.stackPrimaryAssetId ?? asset.id })),
+    onAction: () => {
+      resetLibraryView();
+      return goto(Route.photos({ at: asset.stackPrimaryAssetId ?? asset.id }));
+    },
   };
 
   const ViewSimilar: ActionItem = {
@@ -340,27 +382,6 @@ export const getAssetActions = (
     $if: () =>
       asset.visibility !== AssetVisibility.Locked && !asset.isArchived && !asset.isTrashed && smartSearchEnabled,
     onAction: () => goto(Route.search({ queryAssetId: asset.stackPrimaryAssetId ?? asset.id })),
-  };
-
-  const RotateRight: ActionItem = {
-    title: $t('rotate_right'),
-    icon: mdiRotateRight,
-    $if: canEditImage,
-    onAction: () => handleQuickRotate(asset, 90),
-  };
-
-  const RotateLeft: ActionItem = {
-    title: $t('rotate_left'),
-    icon: mdiRotateLeft,
-    $if: canEditImage,
-    onAction: () => handleQuickRotate(asset, 270),
-  };
-
-  const Rotate180: ActionItem = {
-    title: $t('rotate_180'),
-    icon: mdiRotateRight,
-    $if: canEditImage,
-    onAction: () => handleQuickRotate(asset, 180),
   };
 
   const RefreshFacesJob: ActionItem = {
@@ -388,7 +409,7 @@ export const getAssetActions = (
     $if: () => asset.type === AssetTypeEnum.Video,
   };
 
-  return {
+  return getGalleryAssetActions($t, asset, gallery, {
     Share,
     Download,
     DownloadOriginal,
@@ -397,10 +418,12 @@ export const getAssetActions = (
     Info,
     Favorite,
     Unfavorite,
+    Rate,
     PlayMotionPhoto,
     StopMotionPhoto,
     PlaySlideshow,
     AddToAlbum,
+    RemoveFromAlbum,
     ZoomIn,
     ZoomOut,
     Copy,
@@ -410,14 +433,11 @@ export const getAssetActions = (
     SetProfilePicture,
     ViewInTimeline,
     ViewSimilar,
-    RotateRight,
-    RotateLeft,
-    Rotate180,
     RefreshFacesJob,
     RefreshMetadataJob,
     RegenerateThumbnailJob,
     TranscodeVideoJob,
-  };
+  });
 };
 
 export const handleDownloadAsset = async (asset: AssetResponseDto, { edited }: { edited: boolean }) => {
@@ -473,6 +493,7 @@ export const handleDownloadAsset = async (asset: AssetResponseDto, { edited }: {
 const handleFavorite = async (asset: AssetResponseDto) => {
   const $t = await getFormatter();
 
+  celebrate('favorite');
   try {
     const response = await updateAsset({ id: asset.id, updateAssetDto: { isFavorite: true } });
     toastManager.primary($t('added_to_favorites'));
@@ -494,6 +515,153 @@ const handleUnfavorite = async (asset: AssetResponseDto) => {
   }
 };
 
+export const toggleFavoriteAssets = async (
+  assets: Pick<AssetResponseDto, 'id' | 'isFavorite'>[],
+  isFavorite: boolean,
+  onFavorite?: OnFavorite,
+) => {
+  const ids = assets.map((a) => a.id);
+  const $t = get(t);
+
+  try {
+    if (ids.length > 0) {
+      // Gallery #763: favorites are per user; this route also accepts assets the caller can only view.
+      await updateAssetFavorites({ assetFavoriteUpdateDto: { ids, isFavorite } });
+    }
+
+    for (const asset of assets) {
+      asset.isFavorite = isFavorite;
+    }
+
+    onFavorite?.(ids, isFavorite);
+
+    toastManager.primary(
+      isFavorite
+        ? $t('added_to_favorites_count', { values: { count: ids.length } })
+        : $t('removed_from_favorites_count', { values: { count: ids.length } }),
+    );
+  } catch (error) {
+    handleError(error, $t('errors.unable_to_add_remove_favorites', { values: { favorite: isFavorite } }));
+  }
+};
+
+const handleRate = async (asset: AssetResponseDto, rating: number) => {
+  const $t = await getFormatter();
+
+  if (Number.isNaN(rating)) {
+    toastManager.info($t('rate_asset_description'));
+    return;
+  }
+
+  const newRating = rating === 0 ? null : rating;
+  if (asset.exifInfo && asset.exifInfo.rating === newRating) {
+    return;
+  }
+
+  try {
+    const response = await updateAsset({ id: asset.id, updateAssetDto: { rating: newRating } });
+    eventManager.emit('AssetUpdate', response);
+  } catch (error) {
+    handleError(error, $t('errors.unable_to_set_rating'));
+  }
+};
+
+export const handleTagAssets = async (assetIds: string[], tagIds: string[]) => {
+  const $t = await getFormatter();
+
+  try {
+    const response = await bulkTagAssets({ tagBulkAssetsDto: { assetIds, tagIds } });
+    toastManager.primary($t('tagged_assets', { values: { count: response.count } }));
+    eventManager.emit('AssetsTag', assetIds);
+    return true;
+  } catch (error) {
+    handleError(error, $t('errors.failed_to_tag_assets'));
+    return false;
+  }
+};
+
+const handleSetVisibility = async (assets: TimelineAsset[], visibility: AssetVisibility) => {
+  const $t = await getFormatter();
+  const ids = assets.map((asset) => asset.id);
+
+  try {
+    await updateAssets({ assetBulkUpdateDto: { ids, visibility } });
+
+    if (visibility === AssetVisibility.Archive) {
+      animateRemoval(ids, 'archive');
+      toastManager.primary({
+        description: $t('archived_count', { values: { count: assets.length } }),
+        button: (close) => ({
+          label: $t('undo'),
+          onclick: () => {
+            close();
+            void undoArchiveAssets(assets);
+          },
+        }),
+      });
+      eventManager.emit('AssetsArchive', ids);
+    } else {
+      // Timeline
+      toastManager.primary($t('unarchived_count', { values: { count: assets.length } }));
+      eventManager.emit('AssetsUnarchive', assets);
+    }
+  } catch (error) {
+    handleError(
+      error,
+      $t('errors.unable_to_archive_unarchive', { values: { archived: visibility === AssetVisibility.Archive } }),
+    );
+    return false;
+  }
+
+  return true;
+};
+
+const undoArchiveAssets = async (assets: TimelineAsset[]) => {
+  const $t = await getFormatter();
+  try {
+    const ids = assets.map((a) => a.id);
+    await updateAssets({
+      assetBulkUpdateDto: { ids, visibility: AssetVisibility.Timeline },
+    });
+
+    for (const asset of assets) {
+      asset.visibility = AssetVisibility.Timeline;
+    }
+    toastManager.success($t('unarchived_count', { values: { count: assets.length } }));
+    eventManager.emit('AssetsUnarchive', assets);
+    eventManager.emit('AssetsUndoArchive', assets);
+  } catch (error) {
+    handleError(error, $t('errors.unable_to_archive_unarchive', { values: { archived: false } }));
+  }
+};
+
+const handleBulkRemoveAssetsFromAlbum = async (assetIds: string[], album: AlbumResponseDto) => {
+  const $t = await getFormatter();
+
+  const isConfirmed = await modalManager.showDialog({
+    prompt: $t('remove_assets_album_confirmation', { values: { count: assetIds.length } }),
+  });
+
+  if (!isConfirmed) {
+    return;
+  }
+
+  await handleRemoveAssetsFromAlbum(assetIds, album);
+  assetMultiSelectManager.clear();
+};
+
+const handleRemoveAssetsFromAlbum = async (assetIds: string[], album: AlbumResponseDto) => {
+  const $t = await getFormatter();
+
+  await executeMutation(removeAssetFromAlbumMutation, [{ id: album.id, bulkIdsDto: { ids: assetIds } }], {
+    onSuccess: (results) => {
+      const count = results.filter(({ success }) => success).length;
+      toastManager.primary($t('assets_removed_count', { values: { count } }));
+      eventManager.emit('AlbumRemoveAssets', { assetIds, albumIds: [album.id] });
+    },
+  });
+};
+
 const getAssetJobMessage = ($t: MessageFormatter, job: AssetJobName) => {
   const messages: Record<AssetJobName, string> = {
     [AssetJobName.RefreshFaces]: $t('refreshing_faces'),
@@ -513,49 +681,5 @@ const handleRunAssetJob = async (dto: AssetJobsDto) => {
     toastManager.primary(getAssetJobMessage($t, dto.name));
   } catch (error) {
     handleError(error, $t('errors.unable_to_submit_job'));
-  }
-};
-
-export const normalizeAngle = (angle: number): number => ((angle % 360) + 360) % 360;
-
-export const mergeRotation = (
-  existingEdits: AssetEditActionItemDto[],
-  additionalAngle: number,
-): AssetEditActionItemDto[] => {
-  const otherEdits = existingEdits.filter((e) => e.action !== AssetEditAction.Rotate);
-  const existingRotate = existingEdits.find((e) => e.action === AssetEditAction.Rotate);
-  const existingAngle = (existingRotate?.parameters as { angle?: number })?.angle ?? 0;
-  const merged = normalizeAngle(existingAngle + additionalAngle);
-
-  if (merged === 0) {
-    return otherEdits;
-  }
-
-  return [...otherEdits, { action: AssetEditAction.Rotate, parameters: { angle: merged } }];
-};
-
-const handleQuickRotate = async (asset: AssetResponseDto, angle: number) => {
-  const $t = await getFormatter();
-
-  try {
-    const existing = await getAssetEdits({ id: asset.id });
-    const edits = mergeRotation(
-      existing.edits.map(({ action, parameters }) => ({ action, parameters })),
-      angle,
-    );
-
-    const editCompleted = waitForWebsocketEvent('AssetEditReadyV2', (event) => event.asset.id === asset.id, 10_000);
-
-    await (edits.length === 0
-      ? removeAssetEdits({ id: asset.id })
-      : editAsset({ id: asset.id, assetEditsCreateDto: { edits } }));
-    await editCompleted;
-
-    const refreshedAsset = await getAssetInfo({ id: asset.id });
-    assetViewerManager.setAsset(refreshedAsset);
-    eventManager.emit('AssetUpdate', refreshedAsset);
-    eventManager.emit('AssetEditsApplied', asset.id);
-  } catch (error) {
-    handleError(error, $t('rotate_error'));
   }
 };

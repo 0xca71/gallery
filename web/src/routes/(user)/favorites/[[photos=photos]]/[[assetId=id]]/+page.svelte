@@ -1,32 +1,26 @@
 <script lang="ts">
-  import UserPageLayout from '$lib/components/layouts/UserPageLayout.svelte';
-  import ButtonContextMenu from '$lib/components/shared-components/context-menu/ButtonContextMenu.svelte';
-  import EmptyPlaceholder from '$lib/components/shared-components/EmptyPlaceholder.svelte';
-  import ArchiveAction from '$lib/components/timeline/actions/ArchiveAction.svelte';
-  import ChangeDate from '$lib/components/timeline/actions/ChangeDateAction.svelte';
-  import ChangeDescription from '$lib/components/timeline/actions/ChangeDescriptionAction.svelte';
-  import ChangeLocation from '$lib/components/timeline/actions/ChangeLocationAction.svelte';
-  import CreateSharedLink from '$lib/components/timeline/actions/CreateSharedLinkAction.svelte';
-  import DeleteAssets from '$lib/components/timeline/actions/DeleteAssetsAction.svelte';
-  import DownloadAction from '$lib/components/timeline/actions/DownloadAction.svelte';
-  import FavoriteAction from '$lib/components/timeline/actions/FavoriteAction.svelte';
-  import RotateAction from '$lib/components/timeline/actions/RotateAction.svelte';
-  import SelectAllAssets from '$lib/components/timeline/actions/SelectAllAction.svelte';
-  import SetVisibilityAction from '$lib/components/timeline/actions/SetVisibilityAction.svelte';
-  import TagAction from '$lib/components/timeline/actions/TagAction.svelte';
-  import AssetSelectControlBar from '$lib/components/timeline/AssetSelectControlBar.svelte';
-  import Timeline from '$lib/components/timeline/Timeline.svelte';
-  import TimelineRouteGroupingBar from '$lib/components/timeline/TimelineRouteGroupingBar.svelte';
-  import SearchAddAllToCollectionModal from '$lib/modals/SearchAddAllToCollectionModal.svelte';
-  import { lang } from '$lib/stores/preferences.store';
-  import { assetMultiSelectManager } from '$lib/managers/asset-multi-select-manager.svelte';
-  import { authManager } from '$lib/managers/auth-manager.svelte';
-  import { TimelineManager } from '$lib/managers/timeline-manager/timeline-manager.svelte';
-  import type { TimelineGrouping, TimelineTemporalAnchor } from '$lib/managers/timeline-manager/types';
-  import { getAssetBulkActions } from '$lib/services/asset.service';
-  import { getTimelineBucketZoomTarget, type ActivatableTimelineBucket } from '$lib/utils/timeline-zoom-navigation';
-  import { getTimelineTopVisibleAnchor } from '$lib/managers/timeline-manager/timeline-anchor';
-  import { ActionButton, CommandPaletteDefaultProvider, modalManager } from '@immich/ui';
+  import ActionMenuItem from '#lib/components/ActionMenuItem.svelte';
+  import UserPageLayout from '#lib/components/layouts/UserPageLayout.svelte';
+  import EmptyPlaceholder from '#lib/components/shared-components/EmptyPlaceholder.svelte';
+  import ButtonContextMenu from '#lib/components/shared-components/context-menu/ButtonContextMenu.svelte';
+  import AssetSelectControlBar from '#lib/components/timeline/AssetSelectControlBar.svelte';
+  import Timeline from '#lib/components/timeline/Timeline.svelte';
+  import TimelineRouteGroupingBar from '#lib/components/timeline/TimelineRouteGroupingBar.svelte';
+  import ChangeDate from '#lib/components/timeline/actions/ChangeDateAction.svelte';
+  import ChangeDescription from '#lib/components/timeline/actions/ChangeDescriptionAction.svelte';
+  import ChangeLocation from '#lib/components/timeline/actions/ChangeLocationAction.svelte';
+  import DeleteAssets from '#lib/components/timeline/actions/DeleteAssetsAction.svelte';
+  import DownloadAction from '#lib/components/timeline/actions/DownloadAction.svelte';
+  import FavoriteAction from '#lib/components/timeline/actions/FavoriteAction.svelte';
+  import RotateAction from '#lib/components/timeline/actions/RotateAction.svelte';
+  import SelectAllAssets from '#lib/components/timeline/actions/SelectAllAction.svelte';
+  import SetVisibilityAction from '#lib/components/timeline/actions/SetVisibilityAction.svelte';
+  import { timelineGroupingProps } from '#lib/gallery/filtered-timeline/timeline-grouping.svelte.ts';
+  import { assetMultiSelectManager } from '#lib/managers/asset-multi-select-manager.svelte.ts';
+  import { TimelineManager } from '#lib/managers/timeline-manager/timeline-manager.svelte.ts';
+  import { getAssetBulkActions } from '#lib/services/asset.service.ts';
+  import { AssetVisibility } from '@immich/sdk';
+  import { ActionButton, CommandPaletteDefaultProvider } from '@immich/ui';
   import { mdiDotsVertical } from '@mdi/js';
   import { t } from 'svelte-i18n';
   import type { PageData } from './$types';
@@ -38,25 +32,28 @@
   let { data }: Props = $props();
 
   let timelineManager = $state<TimelineManager>() as TimelineManager;
-
-  const handleAddAllToCollection = () => {
-    void modalManager.show(SearchAddAllToCollectionModal, {
-      terms: { isFavorite: true },
-      total: timelineManager?.assetCount ?? 0,
-      smartSearchEnabled: false,
-      language: $lang,
-    });
-  };
-  let timelineGrouping = $state<TimelineGrouping>('day');
-  let temporalAnchor = $state<TimelineTemporalAnchor | undefined>();
-  const baseTimelineOptions = { isFavorite: true, withStacked: true };
+  const timelineGrouping = timelineGroupingProps(() => timelineManager, { addAllTerms: { isFavorite: true } });
+  // #763: favorites are a per-user overlay, so this page is cross-scope like the Photos timeline
+  // favorites filter (see buildPhotosTimelineOptions). Without these, a favorite a member placed on
+  // another member's Space asset — which the overlay explicitly permits — would be unreachable here.
+  // Access is still enforced per request: the server recomputes timelineSpaceIds from current
+  // membership, so losing Space access drops the asset even though the overlay row survives.
+  //
+  // `visibility` is required, not incidental: timeline.service.ts rejects withPartners/
+  // withSharedSpaces outright (400) when visibility is undefined, because undefined resolves to
+  // withDefaultVisibility = Archive+Timeline and would expose other users' ARCHIVED assets. An
+  // earlier attempt at this fix added the two flags alone and 400'd every request on this page,
+  // which is why it was reverted. Matching buildPhotosTimelineOptions keeps the two favorite
+  // surfaces consistent; the trade-off is that an archived favorite of your own no longer appears
+  // here, exactly as it already does not under the /photos favorites chip.
   const options = $derived({
-    ...baseTimelineOptions,
-    grouping: timelineGrouping,
+    isFavorite: true,
+    withStacked: true,
+    withPartners: true,
+    withSharedSpaces: true,
+    visibility: AssetVisibility.Timeline,
+    grouping: timelineGrouping.grouping,
   });
-  const hideGroupingControls = $derived(
-    assetMultiSelectManager.selectionActive || (timelineManager?.isInitialized && timelineManager.assetCount === 0),
-  );
 
   const handleEscape = () => {
     if (!assetMultiSelectManager.selectionActive) {
@@ -71,36 +68,10 @@
     timelineManager.removeAssets(assetIds);
     assetMultiSelectManager.clear();
   };
-
-  function handleTimelineGroupingChange(grouping: TimelineGrouping) {
-    const anchor = getTimelineTopVisibleAnchor(timelineManager);
-    timelineGrouping = grouping;
-    temporalAnchor = anchor;
-  }
-
-  function handleTimelineBucketActivate(bucket: ActivatableTimelineBucket) {
-    if (assetMultiSelectManager.selectionActive) {
-      return;
-    }
-
-    const result = getTimelineBucketZoomTarget(bucket);
-    if (!result) {
-      return;
-    }
-
-    timelineGrouping = result.grouping;
-    temporalAnchor = result.anchor;
-  }
 </script>
 
 <UserPageLayout hideNavbar={assetMultiSelectManager.selectionActive} title={data.meta.title} scrollbar={false}>
-  <TimelineRouteGroupingBar
-    grouping={timelineGrouping}
-    hidden={hideGroupingControls}
-    resultCount={timelineManager?.assetCount ?? 0}
-    onGroupingChange={handleTimelineGroupingChange}
-    onAddAllToCollection={handleAddAllToCollection}
-  />
+  <TimelineRouteGroupingBar {...timelineGrouping.barProps} />
   <Timeline
     enableRouting={true}
     withStacked={true}
@@ -108,11 +79,7 @@
     {options}
     assetInteraction={assetMultiSelectManager}
     onEscape={handleEscape}
-    {temporalAnchor}
-    onTimelineBucketActivate={handleTimelineBucketActivate}
-    onTemporalAnchorResolved={() => (temporalAnchor = undefined)}
-    grouping={timelineGrouping}
-    onGroupingChange={handleTimelineGroupingChange}
+    {...timelineGrouping.timelineProps}
   >
     {#snippet empty()}
       <EmptyPlaceholder text={$t('no_favorites_message')} class="mx-auto mt-10" />
@@ -123,10 +90,10 @@
 <!-- Multiselection mode app bar -->
 {#if assetMultiSelectManager.selectionActive}
   <AssetSelectControlBar>
-    {@const Actions = getAssetBulkActions($t)}
+    {const Actions = $derived(getAssetBulkActions($t))}
     <CommandPaletteDefaultProvider name={$t('assets')} actions={Object.values(Actions)} />
     <FavoriteAction removeFavorite onFavorite={(assetIds) => timelineManager.removeAssets(assetIds)} />
-    <CreateSharedLink />
+    <ActionButton action={Actions.CreateSharedLink} />
     <SelectAllAssets {timelineManager} assetInteraction={assetMultiSelectManager} />
     <ActionButton action={Actions.AddToAlbum} />
     <ButtonContextMenu icon={mdiDotsVertical} title={$t('menu')}>
@@ -135,14 +102,9 @@
       <ChangeDate menuItem />
       <ChangeDescription menuItem />
       <ChangeLocation menuItem />
-      <ArchiveAction
-        menuItem
-        unarchive={assetMultiSelectManager.isAllArchived}
-        onArchive={(ids, visibility) => timelineManager.update(ids, (asset) => (asset.visibility = visibility))}
-      />
-      {#if authManager.preferences.tags.enabled}
-        <TagAction menuItem />
-      {/if}
+      <ActionMenuItem action={Actions.Archive} />
+      <ActionMenuItem action={Actions.Unarchive} />
+      <ActionMenuItem action={Actions.Tag} />
       <SetVisibilityAction menuItem onVisibilitySet={handleSetVisibility} />
       <DeleteAssets
         menuItem

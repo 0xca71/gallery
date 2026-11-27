@@ -2,12 +2,13 @@ import { schemaDiff, schemaFromCode, schemaFromDatabase } from '@immich/sql-tool
 import { ConflictException, Injectable } from '@nestjs/common';
 import AsyncLock from 'async-lock';
 import { Kysely, Transaction, sql } from 'kysely';
-import { Migrator } from 'kysely/migration';
+import { FileMigrationProvider, Migrator } from 'kysely/migration';
 import { InjectKysely } from 'nestjs-kysely';
+import { readdir } from 'node:fs/promises';
 import { join } from 'node:path';
+import { setTimeout } from 'node:timers/promises';
 import { diff } from 'semver';
 import z from 'zod';
-import type { ExtensionVersion, VectorExtension } from 'src/types.js';
 import {
   EXTENSION_NAMES,
   POSTGRES_VERSION_RANGE,
@@ -22,12 +23,14 @@ import { GenerateSql } from 'src/decorators.js';
 import { DatabaseExtension, DatabaseLock, VectorIndex } from 'src/enum.js';
 import { ConfigRepository } from 'src/repositories/config.repository.js';
 import { LoggingRepository } from 'src/repositories/logging.repository.js';
-import { CompositeMigrationProvider } from 'src/schema/composite-migration-provider.js';
 import { immich_uuid_v7 } from 'src/schema/functions.js';
+import { migrateGalleryToLatest, revertLastGalleryMigration } from 'src/schema/gallery-migration-ledger.js';
 // eslint-disable-next-line import-x/no-duplicates
 import 'src/schema/index.js'; // make sure all schema definitions are imported for schemaFromCode
+
 // eslint-disable-next-line import-x/no-duplicates
 import { DB } from 'src/schema/index.js';
+import type { ExtensionVersion, VectorExtension } from 'src/types.js';
 import { getKyselyConfig, vectorIndexQuery } from 'src/utils/database.js';
 
 export let cachedVectorExtension: VectorExtension | undefined;
@@ -120,11 +123,13 @@ export class DatabaseRepository {
   async createExtension(extension: DatabaseExtension): Promise<void> {
     this.logger.log(`Creating ${EXTENSION_NAMES[extension]} extension`);
     await sql`CREATE EXTENSION IF NOT EXISTS ${sql.raw(extension)} CASCADE`.execute(this.db);
-    if (extension === DatabaseExtension.VectorChord) {
-      const dbName = sql.id(await this.getDatabaseName());
-      await sql`ALTER DATABASE ${dbName} SET vchordrq.probes = 1`.execute(this.db);
-      await sql`SET vchordrq.probes = 1`.execute(this.db);
+    if (extension !== DatabaseExtension.VectorChord) {
+      return;
     }
+
+    const dbName = sql.id(await this.getDatabaseName());
+    await sql`ALTER DATABASE ${dbName} SET vchordrq.probes = 1`.execute(this.db);
+    await sql`SET vchordrq.probes = 1`.execute(this.db);
   }
 
   async dropExtension(extension: DatabaseExtension): Promise<void> {
@@ -252,7 +257,8 @@ export class DatabaseRepository {
       await sql`
         ALTER TABLE ${sql.raw(table)}
         ALTER COLUMN embedding
-        SET DATA TYPE vector(${sql.raw(String(dimSize))})`.execute(tx);
+        SET DATA TYPE vector(${sql.raw(String(dimSize))})
+      `.execute(tx);
       await sql.raw(vectorIndexQuery({ vectorExtension, table, indexName, lists })).execute(tx);
     });
     this.logger.log(`Reindexed ${indexName}`);
@@ -277,8 +283,19 @@ export class DatabaseRepository {
     return rows[0].db;
   }
 
-  getMigrations() {
-    return this.db.selectFrom('kysely_migrations').select(['name', 'timestamp']).orderBy('name', 'asc').execute();
+  async getMigrations() {
+    // schema-check can run before any split build has booted (or after its first boot rolled back).
+    const { rows } = await sql<{ exists: boolean }>`
+      SELECT to_regclass('gallery_migrations') IS NOT NULL AS "exists"
+    `.execute(this.db);
+    let query = this.db
+      .withTables<{ gallery_migrations: DB['kysely_migrations'] }>()
+      .selectFrom('kysely_migrations')
+      .select(['name', 'timestamp']);
+    if (rows[0].exists) {
+      query = query.unionAll((eb) => eb.selectFrom('gallery_migrations').select(['name', 'timestamp']));
+    }
+    return query.orderBy('name', 'asc').execute();
   }
 
   async getSchemaDrift() {
@@ -299,6 +316,7 @@ export class DatabaseRepository {
       functions: { ignoreExtra: false },
       parameters: { ignoreExtra: true },
       extensions: { ignoreExtra: true },
+      ignorePrefixes: ['futo_backups_'],
     });
 
     return drift;
@@ -374,7 +392,7 @@ export class DatabaseRepository {
     if (count < 128_000) {
       return 1;
     }
-    // eslint-disable-next-line unicorn/prefer-minimal-ternary
+
     return count < 2_048_000 ? 1 << (32 - Math.clz32(count / 1000)) : 1 << (33 - Math.clz32(Math.sqrt(count)));
   }
 
@@ -393,9 +411,7 @@ export class DatabaseRepository {
   async runMigrations(): Promise<number> {
     this.logger.log('Running migrations');
 
-    const migrator = this.createMigrator();
-
-    const { error, results = [] } = await migrator.migrateToLatest();
+    const { error, results = [] } = await migrateGalleryToLatest(this.db, (db) => this.createMigrator(db), this.logger);
 
     for (const result of results) {
       if (result.status === 'Success') {
@@ -488,8 +504,7 @@ export class DatabaseRepository {
     lockDatabase?: Kysely<DB>,
     wait = true,
   ): Promise<R> {
-    // Lock sessions use a separate pool. Holding every application-pool connection while
-    // callbacks wait for their SQL transactions would otherwise deadlock different assets.
+    // Use a separate pool so a held lock cannot exhaust connections needed by the callback's transaction.
     const runner =
       lockDatabase ??
       (this.assetLockDatabase ??= new Kysely<DB>(getKyselyConfig(this.configRepository.getEnv().database.config)));
@@ -515,7 +530,7 @@ export class DatabaseRepository {
       if (!wait) {
         throw new ConflictException('Asset file is being processed by another worker');
       }
-      await new Promise<void>((resolve) => setTimeout(resolve, 250));
+      await setTimeout(250);
     }
   }
 
@@ -546,15 +561,12 @@ export class DatabaseRepository {
     await sql`SELECT pg_advisory_unlock(${lock})`.execute(connection);
   }
 
-  // gallery-fork: upstream removed this in #30772 as unused on their side. The fork keeps it
-  // because it is the ONLY way to exercise revert against the composite (upstream +
-  // migrations-gallery) provider — `sql-tools`' own revert reads a single directory, so it cannot
-  // cover the fork's interleaved chain. See database-migration.service.spec.ts scenarios D and G.
+  // gallery-fork: upstream removed this as unused on their side. `sql-tools`' own revert only knows
+  // `kysely_migrations`, so this is the only revert that reaches the `gallery_migrations` ledger.
   async revertLastMigration(): Promise<string | undefined> {
     this.logger.debug('Reverting last migration');
 
-    const migrator = this.createMigrator();
-    const { error, results } = await migrator.migrateDown();
+    const { error, results } = await revertLastGalleryMigration(this.db, (db) => this.createMigrator(db));
 
     for (const result of results ?? []) {
       if (result.status === 'Success') {
@@ -579,16 +591,20 @@ export class DatabaseRepository {
     return reverted.migrationName;
   }
 
-  private createMigrator(): Migrator {
+  private createMigrator(db: Kysely<DB> = this.db): Migrator {
     return new Migrator({
-      db: this.db,
+      db,
       migrationLockTableName: 'kysely_migrations_lock',
+      // Gallery databases that tracked upstream between releases recorded some upstream migrations
+      // out of name order (e.g. ChangeDurationToInteger, re-timestamped upstream).
       allowUnorderedMigrations: true,
       migrationTableName: 'kysely_migrations',
-      provider: new CompositeMigrationProvider([
-        join(import.meta.dirname, '..', 'schema/migrations'),
-        join(import.meta.dirname, '..', 'schema/migrations-gallery'),
-      ]),
+      provider: new FileMigrationProvider({
+        fs: { readdir },
+        path: { join },
+        import: (filePath) => import(filePath),
+        migrationFolder: join(import.meta.dirname, '..', 'schema/migrations'),
+      }),
     });
   }
 }

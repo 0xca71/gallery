@@ -1,7 +1,11 @@
 import { Kysely } from 'kysely';
 import type { AuthDto } from 'src/dtos/auth.dto.js';
-import { FilterSuggestionsResponseDto, SearchSuggestionType } from 'src/dtos/search.dto.js';
+import { SearchSuggestionType } from 'src/dtos/search.dto.js';
 import { AlbumUserRole, AssetOrder, AssetVisibility, SearchOrderField, SharedSpaceRole } from 'src/enum.js';
+import { FilterSuggestionsResponseDto } from 'src/gallery/dtos/search.dto.js';
+import { FaceSearchRepository } from 'src/gallery/repositories/face-search.repository.js';
+import { FilterSuggestionRepository } from 'src/gallery/repositories/filter-suggestion.repository.js';
+import { SmartFacetRepository } from 'src/gallery/repositories/smart-facet.repository.js';
 import { AccessRepository } from 'src/repositories/access.repository.js';
 import { AssetRepository } from 'src/repositories/asset.repository.js';
 import { DatabaseRepository } from 'src/repositories/database.repository.js';
@@ -15,8 +19,8 @@ import { TagRepository } from 'src/repositories/tag.repository.js';
 import { DB } from 'src/schema/index.js';
 import { SearchService } from 'src/services/search.service.js';
 import { upsertTags } from 'src/utils/tag.js';
-import { createTwoOwnerSpace } from 'test/medium/fixtures/two-owner-space.js';
 import { newMediumService } from 'test/medium.factory.js';
+import { createTwoOwnerSpace } from 'test/medium/fixtures/two-owner-space.js';
 import { factory } from 'test/small.factory.js';
 import { getKyselyDB } from 'test/utils.js';
 
@@ -24,6 +28,7 @@ let defaultDatabase: Kysely<DB>;
 
 const unitVector = (index: number) => JSON.stringify(Array.from({ length: 512 }, (_, i) => (i === index ? 1 : 0)));
 
+// eslint-disable-next-line unicorn/no-unnecessary-parameters
 const setup = (db?: Kysely<DB>) => {
   return newMediumService(SearchService, {
     database: db || defaultDatabase,
@@ -35,7 +40,10 @@ const setup = (db?: Kysely<DB>) => {
       // faceIdentityRepository.resolveScopedPersonTokens — wire it real so the resolver runs (returns no
       // scoped tokens for a plain personId) instead of throwing on an undefined repo.
       FaceIdentityRepository,
+      FilterSuggestionRepository,
       SearchRepository,
+      FaceSearchRepository,
+      SmartFacetRepository,
       SharedSpaceRepository,
       PartnerRepository,
       PersonRepository,
@@ -253,6 +261,22 @@ describe(SearchService.name, () => {
     ]);
   });
 
+  it('should not return hidden assets', async () => {
+    const { sut, ctx } = setup();
+    const { user } = await ctx.newUser();
+
+    const { asset: visibleAsset } = await ctx.newAsset({ ownerId: user.id });
+    await ctx.newExif({ assetId: visibleAsset.id, fileSizeInByte: 1000 });
+    const { asset: hiddenAsset } = await ctx.newAsset({ ownerId: user.id, visibility: AssetVisibility.Hidden });
+    await ctx.newExif({ assetId: hiddenAsset.id, fileSizeInByte: 2000 });
+
+    const auth = factory.auth({ user: { id: user.id } });
+
+    await expect(sut.searchLargeAssets(auth, { size: 250 })).resolves.toEqual([
+      expect.objectContaining({ id: visibleAsset.id }),
+    ]);
+  });
+
   describe('searchStatistics', () => {
     it('should return statistics when filtering by personIds', async () => {
       const { sut, ctx } = setup();
@@ -294,6 +318,31 @@ describe(SearchService.name, () => {
       const result = await sut.searchStatistics(auth, { visibility: AssetVisibility.Locked });
 
       expect(result).toEqual({ total: 0 });
+    });
+
+    it('should not return locked assets of partner in elevated session without a visibility filter', async () => {
+      const { sut, ctx } = setup();
+      const { user } = await ctx.newUser();
+      const { user: partner } = await ctx.newUser();
+
+      await ctx.newPartner({ sharedById: partner.id, sharedWithId: user.id });
+
+      await ctx.newAsset({ ownerId: user.id, visibility: AssetVisibility.Locked });
+      await ctx.newAsset({ ownerId: partner.id, visibility: AssetVisibility.Locked });
+      await ctx.newAsset({ ownerId: partner.id });
+
+      const auth = factory.auth({ user: { id: user.id }, session: { hasElevatedPermission: true } });
+
+      await expect(sut.searchStatistics(auth, {})).resolves.toEqual({ total: 2 });
+
+      const response = await sut.searchMetadata(auth, { size: 250, withStacked: false });
+      expect(response.assets.items.map(({ ownerId, visibility }) => ({ ownerId, visibility }))).toEqual(
+        expect.arrayContaining([
+          { ownerId: user.id, visibility: AssetVisibility.Locked },
+          { ownerId: partner.id, visibility: AssetVisibility.Timeline },
+        ]),
+      );
+      expect(response.assets.items).toHaveLength(2);
     });
   });
 
@@ -397,6 +446,31 @@ describe(SearchService.name, () => {
       });
 
       expect(result.map((person) => person.name)).toEqual([]);
+    });
+  });
+
+  // #763 slice 1b Task 2 — mapAsset now reads `isFavoriteForUser` exclusively; searchMetadata must
+  // project the per-user overlay for the CALLER, not the asset owner.
+  describe('isFavoriteForUser projection (#763)', () => {
+    it('E1 — a space member sees their own favorite in searchMetadata, independent of the owner', async () => {
+      const { sut, ctx } = setup();
+      const { user: owner } = await ctx.newUser();
+      const { user: member } = await ctx.newUser();
+      const { space } = await ctx.newSharedSpace({ createdById: owner.id });
+      const { asset } = await ctx.newAsset({ ownerId: owner.id });
+      await ctx.newSharedSpaceAsset({ spaceId: space.id, assetId: asset.id, addedById: owner.id });
+      await ctx.newSharedSpaceMember({ spaceId: space.id, userId: owner.id, role: 'owner' });
+      await ctx.newSharedSpaceMember({ spaceId: space.id, userId: member.id, role: 'viewer' });
+
+      await ctx.database.insertInto('asset_favorite').values({ userId: member.id, assetId: asset.id }).execute();
+
+      const memberAuth = factory.auth({ user: { id: member.id } });
+      const memberResult = await sut.searchMetadata(memberAuth, { size: 250, spaceId: space.id });
+      expect(memberResult.assets.items).toEqual([expect.objectContaining({ id: asset.id, isFavorite: true })]);
+
+      const ownerAuth = factory.auth({ user: { id: owner.id } });
+      const ownerResult = await sut.searchMetadata(ownerAuth, { size: 250, spaceId: space.id });
+      expect(ownerResult.assets.items).toEqual([expect.objectContaining({ id: asset.id, isFavorite: false })]);
     });
   });
 
@@ -986,17 +1060,7 @@ describe(SearchService.name, () => {
     });
   });
 
-  // ─── UPSTREAM SEARCH V3 — DORMANT ───────────────────────────────
-  // These are upstream's own V3 tests (immich-30179). Gallery keeps the search endpoints on the
-  // legacy builder and rejects the structured shape, so the service-level cases here exercise a
-  // path that now 400s by design; the reachable contract is covered by the "new shape routing"
-  // describe in src/services/search.service.spec.ts.
-  //
-  // Skipped rather than deleted: V3 itself is carried dormant and byte-compatible with upstream so
-  // its changes keep auto-merging, and these tests are what will validate the builder when we adopt
-  // it. Re-enable in the same change that restores the dispatch.
-  // See specs/2026-07-23-search-v3-coexistence-design.md.
-  describe.skip('new search shape', () => {
+  describe('new search shape', () => {
     it('should filter by an exif field and return a cursor-less single page', async () => {
       const { sut, ctx } = setup();
       const { user } = await ctx.newUser();
@@ -1216,6 +1280,51 @@ describe(SearchService.name, () => {
     });
   });
 
+  // Gallery's hooks on the structured search: the same RBAC as the flat search (the viewer-scope oracle compares
+  // the two per actor); these pin the re-gates that oracle does not seed.
+  describe('new search shape: Gallery scope', () => {
+    it("should keep the owner's hidden and trashed album assets from an album viewer", async () => {
+      const { sut, ctx } = setup();
+      const { user: owner } = await ctx.newUser();
+      const { user: viewer } = await ctx.newUser();
+      const { asset: shown } = await ctx.newAsset({ ownerId: owner.id });
+      const { asset: hidden } = await ctx.newAsset({ ownerId: owner.id, visibility: AssetVisibility.Hidden });
+      const { asset: trashed } = await ctx.newAsset({ ownerId: owner.id, deletedAt: new Date() });
+      const { album } = await ctx.newAlbum({ ownerId: owner.id }, [shown.id, hidden.id, trashed.id]);
+      await ctx.newAlbumUser({ albumId: album.id, userId: viewer.id, role: AlbumUserRole.Viewer });
+
+      const response = await sut.searchMetadata(factory.auth({ user: { id: viewer.id } }), {
+        size: 250,
+        filter: { albumIds: { any: [album.id] } },
+      });
+
+      expect(response.assets.items.map(({ id }) => id)).toEqual([shown.id]);
+    });
+
+    it("should widen to a member's spaces without their owner-private assets, and mark only the viewer's favourites", async () => {
+      const { sut, ctx } = setup();
+      const { user: owner } = await ctx.newUser();
+      const { user: member } = await ctx.newUser();
+      const { space } = await ctx.newSharedSpace({ createdById: owner.id });
+      await ctx.newSharedSpaceMember({ spaceId: space.id, userId: member.id, role: SharedSpaceRole.Viewer });
+      const { asset: shared } = await ctx.newAsset({ ownerId: owner.id, isFavorite: true });
+      const { asset: hidden } = await ctx.newAsset({ ownerId: owner.id, visibility: AssetVisibility.Hidden });
+      const { asset: trashed } = await ctx.newAsset({ ownerId: owner.id, deletedAt: new Date() });
+      for (const asset of [shared, hidden, trashed]) {
+        await ctx.newSharedSpaceAsset({ spaceId: space.id, assetId: asset.id, addedById: owner.id });
+      }
+      const auth = factory.auth({ user: { id: member.id } });
+
+      await expect(sut.searchMetadata(auth, { size: 250, filter: {} })).resolves.toMatchObject({
+        assets: { items: [] },
+      });
+      const response = await sut.searchMetadata(auth, { size: 250, withSharedSpaces: true, filter: {} });
+      expect(response.assets.items).toEqual([expect.objectContaining({ id: shared.id, isFavorite: false })]);
+      await expect(
+        sut.searchMetadata(auth, { size: 250, withSharedSpaces: true, filter: { isFavorite: { eq: true } } }),
+      ).resolves.toMatchObject({ assets: { items: [] } });
+    });
+  });
   describe('getFilterSuggestions', () => {
     it('should return countries from the user assets', async () => {
       const { sut, ctx } = setup();
@@ -1861,26 +1970,26 @@ describe(SearchService.name, () => {
   });
 
   /**
-   * The `ownerId` (contributor) filter on the SEARCH/MAP query builder.
-   *
-   * `ownerId` lives on BaseSearchSchema (search.dto.ts), so metadata/random/smart/statistics all
-   * inherit it, and `GET /gallery/map/markers` forwards it too — five endpoints whose ONLY
-   * implementation of the filter is a single clause in searchAssetBuilder (database.ts):
-   *
-   *     .$if(options.ownerId !== undefined, (qb) => qb.where('asset.ownerId', '=', asUuid(options.ownerId!)))
-   *
-   * That is a DIFFERENT builder from the timeline's withTimeBucketAssetFilters (asset.repository.ts),
-   * whose equivalent contract is pinned by E20/E21/E21b/E21c in timeline.service.spec.ts. Until these
-   * tests existed, the whole 4,799-test unit suite stayed green with the clause above mutated to
-   * `.$if(false, …)`, and the only guards against merging ownerId into the `userIds` SCOPING
-   * predicate — a cross-owner widening leak — were service-level MOCK assertions, which a
-   * repository-level change bypasses entirely.
-   *
-   * Two mutations must break something here:
-   *   1. drop the AND  → a stranger's ownerId returns the caller's whole visible scope, not [].
-   *   2. anyUuid([...userIds, ownerId]) → the stranger's OWN assets come back. A real leak.
-   * Every assertion below is paired with a NON-EMPTY BASELINE, or "returns []" would prove nothing.
-   */
+  The `ownerId` (contributor) filter on the SEARCH/MAP query builder.
+  
+  `ownerId` lives on BaseSearchSchema (search.dto.ts), so metadata/random/smart/statistics all
+  inherit it, and `GET /gallery/map/markers` forwards it too — five endpoints whose ONLY
+  implementation of the filter is a single clause in searchAssetBuilder (database.ts):
+  
+      .$if(options.ownerId !== undefined, (qb) => qb.where('asset.ownerId', '=', asUuid(options.ownerId!)))
+  
+  That is a DIFFERENT builder from the timeline's withTimeBucketAssetFilters (asset.repository.ts),
+  whose equivalent contract is pinned by E20/E21/E21b/E21c in timeline.service.spec.ts. Until these
+  tests existed, the whole 4,799-test unit suite stayed green with the clause above mutated to
+  `.$if(false, …)`, and the only guards against merging ownerId into the `userIds` SCOPING
+  predicate — a cross-owner widening leak — were service-level MOCK assertions, which a
+  repository-level change bypasses entirely.
+  
+  Two mutations must break something here:
+    1. drop the AND  → a stranger's ownerId returns the caller's whole visible scope, not [].
+    2. anyUuid([...userIds, ownerId]) → the stranger's OWN assets come back. A real leak.
+  Every assertion below is paired with a NON-EMPTY BASELINE, or "returns []" would prove nothing.
+  */
   describe('contextual filters — ownerId (searchAssetBuilder)', () => {
     it('narrows a Space search to one contributor', async () => {
       const { sut, ctx } = setup();
@@ -1956,12 +2065,12 @@ describe(SearchService.name, () => {
     });
 
     /**
-     * THE OTHER WIDENING VECTOR. The userIds clause that ANDs on the personal path
-     * (`!!options.userIds && !options.spaceId && !options.timelineSpaceIds`) is switched OFF once
-     * `withSharedSpaces` populates timelineSpaceIds — a different OR-group takes over. An
-     * implementer who merged ownerId into userIds inside THAT group would still pass every test
-     * above. These two are the E21b/E21c twins for the search path. Do not delete them.
-     */
+    THE OTHER WIDENING VECTOR. The userIds clause that ANDs on the personal path
+    (`!!options.userIds && !options.spaceId && !options.timelineSpaceIds`) is switched OFF once
+    `withSharedSpaces` populates timelineSpaceIds — a different OR-group takes over. An
+    implementer who merged ownerId into userIds inside THAT group would still pass every test
+    above. These two are the E21b/E21c twins for the search path. Do not delete them.
+    */
     it('E21b twin: ownerId of a stranger under withSharedSpaces returns EMPTY (the real leak vector)', async () => {
       const { sut, ctx } = setup();
       const { viewer, annaAsset, benAsset } = await createTwoOwnerSpace(ctx);

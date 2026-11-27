@@ -1,11 +1,11 @@
 <script lang="ts">
+  import { dateRangeOptions, type RandomFilterState } from '#lib/utils/explore-random.ts';
+  import { handleError } from '#lib/utils/handle-error.ts';
   import { getAllAlbums, type AlbumResponseDto } from '@immich/sdk';
   import { DatePicker, IconButton } from '@immich/ui';
   import { mdiShuffle, mdiTune } from '@mdi/js';
-  import { t } from 'svelte-i18n';
   import { DateTime } from 'luxon';
-  import { handleError } from '$lib/utils/handle-error';
-  import { dateRangeOptions, type RandomFilterState } from '$lib/utils/explore-random';
+  import { t } from 'svelte-i18n';
 
   let {
     filter = $bindable(),
@@ -44,7 +44,6 @@
           class="ms-2 rounded-sm border p-2 dark:bg-immich-dark-gray"
           bind:value={filter.mediaType}
           disabled={loading}
-          onchange={onrefresh}
         >
           <option value="all">{$t('all')}</option>
           <option value="image">{$t('photos')}</option>
@@ -58,7 +57,6 @@
           class="ms-2 max-w-56 rounded-sm border p-2 dark:bg-immich-dark-gray"
           bind:value={filter.albumId}
           disabled={loading || albumsLoading}
-          onchange={onrefresh}
         >
           <option value="">{$t('all_albums')}</option>
           {#each albums as album (album.id)}
@@ -73,11 +71,6 @@
           class="ms-2 rounded-sm border p-2 dark:bg-immich-dark-gray"
           bind:value={filter.dateRange}
           disabled={loading}
-          onchange={() => {
-            if (filter.dateRange !== 'custom') {
-              onrefresh();
-            }
-          }}
         >
           {#each dateRangeOptions as range (range)}
             <option value={range}>{$t(`explore_random_range_${range}`)}</option>
@@ -93,7 +86,6 @@
             maxDate={DateTime.now()}
             onChange={(date) => {
               filter.takenAfter = date?.toISODate() ?? '';
-              onrefresh();
             }}
           />
         </label>
@@ -104,7 +96,6 @@
             maxDate={DateTime.now()}
             onChange={(date) => {
               filter.takenBefore = date?.toISODate() ?? '';
-              onrefresh();
             }}
           />
         </label>

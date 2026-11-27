@@ -21,8 +21,22 @@ name: Pre-release Gallery Server
 # The workflow file must exist on that ref for workflow_dispatch to run it there.
 
 on:
+  # Automatic runs disabled for this standalone private fork.
   workflow_dispatch:
-    # Disabled for personal-use CI; keep the file for easy re-enable.
+    inputs:
+      version:
+        description: 'Pre-release version tag (e.g. v5.0.0-rc.0). Must be v<N>.<N>.<N>-rc.<N>.'
+        required: true
+        type: string
+      commit:
+        description: 'Commit SHA to release up to (default: HEAD of the triggering ref). Must be an ancestor of the ref.'
+        required: false
+        type: string
+      build_ml_rocm:
+        description: 'Build & publish the ROCm ML image (gallery-ml:<rc>-rocm) on the self-hosted `gallery-rocm` runner. Uncheck to skip (e.g. runner offline).'
+        required: false
+        type: boolean
+        default: true
 
 concurrency:
   group: gallery-prerelease-${{ inputs.version }}
@@ -32,6 +46,7 @@ permissions: {}
 
 jobs:
   version:
+    if: ${{ github.repository == 'open-noodle/gallery' }}
     name: Validate version & resolve commit
     runs-on: ubuntu-latest
     permissions:
@@ -92,6 +107,7 @@ jobs:
           echo "Pre-releasing $INPUT_VERSION from $sha"
 
   build-server:
+    if: ${{ github.repository == 'open-noodle/gallery' }}
     name: Build Server (${{ matrix.platform }})
     needs: version
     runs-on: ${{ matrix.runner }}
@@ -167,6 +183,7 @@ jobs:
           retention-days: 1
 
   merge-server:
+    if: ${{ github.repository == 'open-noodle/gallery' }}
     name: Merge Server Manifest
     needs: [version, build-server]
     runs-on: ubuntu-latest
@@ -202,6 +219,7 @@ jobs:
           docker buildx imagetools create -t "${IMAGE}:${VERSION}" ${sources}
 
   build-ml:
+    if: ${{ github.repository == 'open-noodle/gallery' }}
     name: Build ML ${{ matrix.device }} (${{ matrix.platform }})
     needs: version
     runs-on: ${{ matrix.runner }}
@@ -280,6 +298,7 @@ jobs:
           retention-days: 1
 
   merge-ml:
+    if: ${{ github.repository == 'open-noodle/gallery' }}
     name: Merge ML Manifest (${{ matrix.device }})
     needs: [version, build-ml]
     runs-on: ubuntu-latest
@@ -331,7 +350,7 @@ jobs:
   # never blocks the RC. Uncheck the `build_ml_rocm` dispatch input to skip.
   build-ml-rocm:
     name: Build ML rocm (linux/amd64)
-    if: ${{ inputs.build_ml_rocm }}
+    if: ${{ github.repository == 'open-noodle/gallery' && (inputs.build_ml_rocm) }}
     needs: version
     runs-on: gallery-rocm
     timeout-minutes: 180
@@ -407,7 +426,7 @@ jobs:
 
   merge-ml-rocm:
     name: Merge ML Manifest (rocm)
-    if: ${{ inputs.build_ml_rocm }}
+    if: ${{ github.repository == 'open-noodle/gallery' && (inputs.build_ml_rocm) }}
     needs: [version, build-ml-rocm]
     runs-on: ubuntu-latest
     permissions:
@@ -443,6 +462,7 @@ jobs:
           docker buildx imagetools create -t "${IMAGE}:${VERSION}${SUFFIX}" ${sources}
 
   tag-and-release:
+    if: ${{ github.repository == 'open-noodle/gallery' }}
     name: Create Git Tag and GitHub Pre-release
     needs: [version, merge-server, merge-ml]
     runs-on: ubuntu-latest
@@ -504,6 +524,28 @@ jobs:
               echo "**Full changelog:** [\`${prev_tag}...${VERSION}\`](https://github.com/${REPO}/compare/${prev_tag}...${VERSION})"
             fi
           } > /tmp/prerelease-notes.md
+
+          # Credit the authors of the Gallery PRs in this RC, the same way the server release does
+          # (gallery-release-server-only.yml): diff the upstream bases ("chore: version v" commits) so a
+          # rebase does not re-list fork commits that already shipped in prev_tag, keep only lines with
+          # our own PR number (1-4 digits), and let the helper look up the authors. It prints nothing on
+          # any lookup problem, and `|| true` backs that up: thanks are not worth a failed pre-release.
+          if [[ -n "$prev_tag" ]]; then
+            base_new=$(git log --format=%H --grep='^chore: version v' -1 "$SHA" || true)
+            base_old=$(git log --format=%H --grep='^chore: version v' -1 "$prev_tag" || true)
+            if [[ -n "$base_new" && -n "$base_old" ]]; then
+              shipped=$(mktemp)
+              git log --pretty=format:'%s' "${base_old}..${prev_tag}" > "$shipped"
+              gallery_all=$(git log --pretty=format:'%s' "${base_new}..${SHA}" \
+                | { if [[ -s "$shipped" ]]; then grep -Fxv -f "$shipped"; else cat; fi; } \
+                | awk '{ if (match($0, /\(#[0-9]+\)$/)) { n = substr($0, RSTART+2, RLENGTH-3) + 0; if (n < 10000) print } }' || true)
+              rm -f "$shipped"
+              contributors=$(printf '%s\n' "$gallery_all" | node .github/scripts/release-contributors.mjs || true)
+              if [[ -n "$contributors" ]]; then
+                printf '\n%s\n' "$contributors" >> /tmp/prerelease-notes.md
+              fi
+            fi
+          fi
 
           # Idempotent on re-runs: edit the existing release, else create it.
           # --prerelease (never --latest) keeps it off the "Latest" badge and

@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { type Kysely, sql } from 'kysely';
+import { sql, type Kysely } from 'kysely';
 import { jsonArrayFrom, jsonObjectFrom } from 'kysely/helpers/postgres';
 import { InjectKysely } from 'nestjs-kysely';
 import { columns } from 'src/database.js';
@@ -234,23 +234,23 @@ export class AssetJobRepository {
 
   @GenerateSql({ params: [DummyValue.UUID] })
   getForDetectFacesJob(id: string) {
-    return (
-      this.db
-        .selectFrom('asset')
-        .select(['asset.id', 'asset.visibility'])
-        .$call(withExifInner)
+    return this.db
+      .selectFrom('asset')
+      .select(['asset.id', 'asset.visibility'])
+      .$call(withExifInner)
+      .select((eb) =>
         // Local variant of withFaces(eb, true, true) that also computes `isPet`. handleDetectFaces
         // needs it to keep pet faces out of the stale-face sweep and the IoU match (F4); withFaces
         // itself stays untouched for its other, read-only callers.
-        .select((eb) =>
-          jsonArrayFrom(
-            eb
-              .selectFrom('asset_face')
-              .selectAll('asset_face')
-              .select((inner) => petFacePredicate(inner).as('isPet'))
-              .whereRef('asset_face.assetId', '=', 'asset.id'),
-          ).as('faces'),
-        )
+        jsonArrayFrom(
+          eb
+            .selectFrom('asset_face')
+            .selectAll('asset_face')
+            .select((inner) => petFacePredicate(inner).as('isPet'))
+            .whereRef('asset_face.assetId', '=', 'asset.id'),
+        ).as('faces'),
+      )
+      .select((eb) =>
         // Fork divergence from immich-31240, which orders `isEdited desc` to prefer the EDITED
         // render. Detected boxes are stored verbatim as `asset_face.boundingBox*` +
         // `imageWidth/imageHeight`, and every consumer treats that pair as ORIGINAL-image space:
@@ -262,27 +262,25 @@ export class AssetJobRepository {
         // an edited asset matched two and the job bailed out); we keep that and pin the unedited
         // render, matching `getForOcr` and `getForPetDetection`, which both use
         // `withFilePath(..., isEdited = false)`.
-        .select((eb) =>
-          jsonObjectFrom(
-            eb
-              .selectFrom('asset_file')
-              .select(columns.assetFiles)
-              .whereRef('asset_file.assetId', '=', 'asset.id')
-              .where('asset_file.type', '=', sql.lit(AssetFileType.Preview))
-              .where('asset_file.isEdited', '=', sql.lit(false))
-              .limit(sql.lit(1)),
-          ).as('previewFile'),
-        )
-        .where('asset.id', '=', id)
-        .executeTakeFirst()
-    );
+        jsonObjectFrom(
+          eb
+            .selectFrom('asset_file')
+            .select(columns.assetFiles)
+            .whereRef('asset_file.assetId', '=', 'asset.id')
+            .where('asset_file.type', '=', sql.lit(AssetFileType.Preview))
+            .where('asset_file.isEdited', '=', sql.lit(false))
+            .limit(sql.lit(1)),
+        ).as('previewFile'),
+      )
+      .where('asset.id', '=', id)
+      .executeTakeFirst();
   }
 
   @GenerateSql({ params: [DummyValue.UUID] })
   getForOcr(id: string) {
     return this.db
       .selectFrom('asset')
-      .select((eb) => ['asset.visibility', withFilePath(eb, AssetFileType.Preview).as('previewFile')])
+      .select((eb) => ['asset.ownerId', 'asset.visibility', withFilePath(eb, AssetFileType.Preview).as('previewFile')])
       .where('asset.id', '=', id)
       .executeTakeFirst();
   }
@@ -445,11 +443,7 @@ export class AssetJobRepository {
 
   @GenerateSql({ params: [DummyValue.DATE], stream: true })
   streamForDeletedJob(trashedBefore: Date) {
-    return this.db
-      .selectFrom('asset')
-      .select(['id', 'isOffline'])
-      .where('asset.deletedAt', '<=', trashedBefore)
-      .stream();
+    return this.db.selectFrom('asset').select(['id']).where('asset.deletedAt', '<=', trashedBefore).stream();
   }
 
   @GenerateSql({ params: [], stream: true })
@@ -491,30 +485,6 @@ export class AssetJobRepository {
         qb
           .innerJoin('asset_job_status', 'asset_job_status.assetId', 'asset.id')
           .where('asset_job_status.ocrAt', 'is', null),
-      )
-      .where('asset.deletedAt', 'is', null)
-      .where('asset.visibility', '!=', AssetVisibility.Hidden)
-      .stream();
-  }
-
-  @GenerateSql({ params: [DummyValue.UUID] })
-  getForPetDetection(id: string) {
-    return this.db
-      .selectFrom('asset')
-      .select((eb) => ['asset.ownerId', 'asset.visibility', withFilePath(eb, AssetFileType.Preview).as('previewFile')])
-      .where('asset.id', '=', id)
-      .executeTakeFirst();
-  }
-
-  @GenerateSql({ params: [], stream: true })
-  streamForPetDetectionJob(force?: boolean) {
-    return this.db
-      .selectFrom('asset')
-      .select(['asset.id'])
-      .$if(!force, (qb) =>
-        qb
-          .innerJoin('asset_job_status', 'asset_job_status.assetId', 'asset.id')
-          .where('asset_job_status.petsDetectedAt', 'is', null),
       )
       .where('asset.deletedAt', 'is', null)
       .where('asset.visibility', '!=', AssetVisibility.Hidden)

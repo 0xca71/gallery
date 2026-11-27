@@ -1,31 +1,24 @@
-import { BadRequestException, HttpException, HttpStatus, Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable } from '@nestjs/common';
 import { Insertable } from 'kysely';
-import { createReadStream } from 'node:fs';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { isAbsolute, join } from 'node:path';
 import sanitize from 'sanitize-filename';
-import type { ClassConstructor, GenerateThumbnailOptions, ImageDimensions } from 'src/types.js';
-import { FACE_THUMBNAIL_SIZE, SALT_ROUNDS } from 'src/constants.js';
+import { SALT_ROUNDS } from 'src/constants.js';
 import { StorageCore } from 'src/cores/storage.core.js';
-import { AssetFace, UserAdmin } from 'src/database.js';
+import { UserAdmin } from 'src/database.js';
+import { mapLoginResponse } from 'src/dtos/auth.dto.js';
 import { SystemConfig } from 'src/dtos/config.dto.js';
-import { AssetEditAction, type CropParameters } from 'src/dtos/editing.dto.js';
-import { AssetFileType, CacheControl, ImageFormat } from 'src/enum.js';
-import { computePhysicalUsage } from 'src/gallery/storage-usage.js';
-import { RangeNotSatisfiableError, ServeStrategy } from 'src/interfaces/storage-backend.interface.js';
+import { GalleryRepositories } from 'src/gallery/repositories/index.js';
+import { GalleryBaseService } from 'src/gallery/services/gallery-base.service.js';
 import { AccessRepository } from 'src/repositories/access.repository.js';
 import { ActivityRepository } from 'src/repositories/activity.repository.js';
 import { AlbumUserRepository } from 'src/repositories/album-user.repository.js';
 import { AlbumRepository } from 'src/repositories/album.repository.js';
 import { ApiKeyRepository } from 'src/repositories/api-key.repository.js';
 import { AppRepository } from 'src/repositories/app.repository.js';
-import { AssetEditSaveRepository } from 'src/repositories/asset-edit-save.repository.js';
 import { AssetEditRepository } from 'src/repositories/asset-edit.repository.js';
 import { AssetFileRepository } from 'src/repositories/asset-file.repository.js';
 import { AssetJobRepository } from 'src/repositories/asset-job.repository.js';
 import { AssetRepository } from 'src/repositories/asset.repository.js';
-import { ClassificationRepository } from 'src/repositories/classification.repository.js';
+import { AuthChallengeRepository } from 'src/repositories/auth-challenge.repository.js';
 import { ClusterGroupRepository } from 'src/repositories/cluster-group.repository.js';
 import { ConfigRepository } from 'src/repositories/config.repository.js';
 import { CronRepository } from 'src/repositories/cron.repository.js';
@@ -35,11 +28,6 @@ import { DownloadRepository } from 'src/repositories/download.repository.js';
 import { DuplicateRepository } from 'src/repositories/duplicate.repository.js';
 import { EmailRepository } from 'src/repositories/email.repository.js';
 import { EventRepository } from 'src/repositories/event.repository.js';
-import { FaceIdentityRepository } from 'src/repositories/face-identity.repository.js';
-import { FacePersonVerdictRepository } from 'src/repositories/face-person-verdict.repository.js';
-import { FaceRepairDeclineRepository } from 'src/repositories/face-repair-decline.repository.js';
-import { FaceRepairScanRepository } from 'src/repositories/face-repair-scan.repository.js';
-import { FaceRepairRepository } from 'src/repositories/face-repair.repository.js';
 import { IntegrityRepository } from 'src/repositories/integrity.repository.js';
 import { JobRepository } from 'src/repositories/job.repository.js';
 import { LibraryRepository } from 'src/repositories/library.repository.js';
@@ -54,6 +42,8 @@ import { NotificationRepository } from 'src/repositories/notification.repository
 import { OAuthRepository } from 'src/repositories/oauth.repository.js';
 import { OcrRepository } from 'src/repositories/ocr.repository.js';
 import { PartnerRepository } from 'src/repositories/partner.repository.js';
+import { PasskeyRepository } from 'src/repositories/passkey.repository.js';
+import { PersonUserRepository } from 'src/repositories/person-user.repository.js';
 import { PersonRepository } from 'src/repositories/person.repository.js';
 import { PluginRepository } from 'src/repositories/plugin.repository.js';
 import { ProcessRepository } from 'src/repositories/process.repository.js';
@@ -62,9 +52,7 @@ import { ServerInfoRepository } from 'src/repositories/server-info.repository.js
 import { SessionRepository } from 'src/repositories/session.repository.js';
 import { SharedLinkAssetRepository } from 'src/repositories/shared-link-asset.repository.js';
 import { SharedLinkRepository } from 'src/repositories/shared-link.repository.js';
-import { SharedSpaceRepository } from 'src/repositories/shared-space.repository.js';
 import { StackRepository } from 'src/repositories/stack.repository.js';
-import { StorageMigrationRepository } from 'src/repositories/storage-migration.repository.js';
 import { StorageRepository } from 'src/repositories/storage.repository.js';
 import { SyncCheckpointRepository } from 'src/repositories/sync-checkpoint.repository.js';
 import { SyncRepository } from 'src/repositories/sync.repository.js';
@@ -72,33 +60,25 @@ import { SystemMetadataRepository } from 'src/repositories/system-metadata.repos
 import { TagRepository } from 'src/repositories/tag.repository.js';
 import { TelemetryRepository } from 'src/repositories/telemetry.repository.js';
 import { TrashRepository } from 'src/repositories/trash.repository.js';
-import { UserGroupRepository } from 'src/repositories/user-group.repository.js';
 import { UserRepository } from 'src/repositories/user.repository.js';
 import { VersionHistoryRepository } from 'src/repositories/version-history.repository.js';
 import { VideoStreamRepository } from 'src/repositories/video-stream.repository.js';
 import { ViewRepository } from 'src/repositories/view-repository.js';
+import { WebAuthnRepository } from 'src/repositories/webauthn.repository.js';
 import { WebsocketRepository } from 'src/repositories/websocket.repository.js';
 import { WorkflowRepository } from 'src/repositories/workflow.repository.js';
 import { UserTable } from 'src/schema/tables/user.table.js';
-import { FaceVerdictService } from 'src/services/face-verdict.service.js';
-import { IdentityMergePropagationService } from 'src/services/identity-merge-propagation.service.js';
-import { AccessRequest, checkAccess, requireAccess } from 'src/utils/access.js';
-import { getConfig, updateConfig } from 'src/utils/config.js';
+import type { LoginDetails } from 'src/services/auth.service.js';
+import type { ClassConstructor } from 'src/types.js';
 import {
-  ContentDisposition,
-  ImmichFileResponse,
-  ImmichMediaResponse,
-  ImmichRedirectResponse,
-  ImmichStreamResponse,
-} from 'src/utils/file.js';
-import { clamp } from 'src/utils/misc.js';
-
-type FaceThumbnailBounds = {
-  x1: number;
-  y1: number;
-  x2: number;
-  y2: number;
-};
+  AccessPersonRequest,
+  AccessRequest,
+  checkAccess,
+  checkPersonAccess,
+  requireAccess,
+  requirePersonAccess,
+} from 'src/utils/access.js';
+import { getConfig, updateConfig } from 'src/utils/config.js';
 
 export const BASE_SERVICE_DEPENDENCIES = [
   LoggingRepository,
@@ -110,12 +90,11 @@ export const BASE_SERVICE_DEPENDENCIES = [
   AppRepository,
   AssetRepository,
   AssetEditRepository,
-  AssetEditSaveRepository,
   AssetFileRepository,
   AssetJobRepository,
+  AuthChallengeRepository,
   ClusterGroupRepository,
   ConfigRepository,
-  ClassificationRepository,
   CronRepository,
   CryptoRepository,
   DatabaseRepository,
@@ -123,11 +102,6 @@ export const BASE_SERVICE_DEPENDENCIES = [
   DuplicateRepository,
   EmailRepository,
   EventRepository,
-  FaceIdentityRepository,
-  FaceRepairRepository,
-  FaceRepairScanRepository,
-  FaceRepairDeclineRepository,
-  FacePersonVerdictRepository,
   IntegrityRepository,
   JobRepository,
   LibraryRepository,
@@ -141,7 +115,9 @@ export const BASE_SERVICE_DEPENDENCIES = [
   OAuthRepository,
   OcrRepository,
   PartnerRepository,
+  PasskeyRepository,
   PersonRepository,
+  PersonUserRepository,
   PluginRepository,
   ProcessRepository,
   SearchRepository,
@@ -149,9 +125,7 @@ export const BASE_SERVICE_DEPENDENCIES = [
   SessionRepository,
   SharedLinkRepository,
   SharedLinkAssetRepository,
-  SharedSpaceRepository,
   StackRepository,
-  StorageMigrationRepository,
   StorageRepository,
   SyncRepository,
   SyncCheckpointRepository,
@@ -159,20 +133,19 @@ export const BASE_SERVICE_DEPENDENCIES = [
   TagRepository,
   TelemetryRepository,
   TrashRepository,
-  UserGroupRepository,
   UserRepository,
   VersionHistoryRepository,
   VideoStreamRepository,
   ViewRepository,
+  WebAuthnRepository,
   WebsocketRepository,
   WorkflowRepository,
+  GalleryRepositories,
 ] as const;
 
 @Injectable()
-export class BaseService {
+export class BaseService extends GalleryBaseService {
   protected storageCore: StorageCore;
-  protected identityMergePropagationService: IdentityMergePropagationService;
-  protected faceVerdictService: FaceVerdictService;
 
   constructor(
     protected logger: LoggingRepository,
@@ -184,12 +157,11 @@ export class BaseService {
     protected appRepository: AppRepository,
     protected assetRepository: AssetRepository,
     protected assetEditRepository: AssetEditRepository,
-    protected assetEditSaveRepository: AssetEditSaveRepository,
     protected assetFileRepository: AssetFileRepository,
     protected assetJobRepository: AssetJobRepository,
+    protected authChallengeRepository: AuthChallengeRepository,
     protected clusterGroupRepository: ClusterGroupRepository,
     protected configRepository: ConfigRepository,
-    protected classificationRepository: ClassificationRepository,
     protected cronRepository: CronRepository,
     protected cryptoRepository: CryptoRepository,
     protected databaseRepository: DatabaseRepository,
@@ -197,11 +169,6 @@ export class BaseService {
     protected duplicateRepository: DuplicateRepository,
     protected emailRepository: EmailRepository,
     protected eventRepository: EventRepository,
-    protected faceIdentityRepository: FaceIdentityRepository,
-    protected faceRepairRepository: FaceRepairRepository,
-    protected faceRepairScanRepository: FaceRepairScanRepository,
-    protected faceRepairDeclineRepository: FaceRepairDeclineRepository,
-    protected facePersonVerdictRepository: FacePersonVerdictRepository,
     protected integrityRepository: IntegrityRepository,
     protected jobRepository: JobRepository,
     protected libraryRepository: LibraryRepository,
@@ -215,7 +182,9 @@ export class BaseService {
     protected oauthRepository: OAuthRepository,
     protected ocrRepository: OcrRepository,
     protected partnerRepository: PartnerRepository,
+    protected passkeyRepository: PasskeyRepository,
     protected personRepository: PersonRepository,
+    protected personUserRepository: PersonUserRepository,
     protected pluginRepository: PluginRepository,
     protected processRepository: ProcessRepository,
     protected searchRepository: SearchRepository,
@@ -223,9 +192,7 @@ export class BaseService {
     protected sessionRepository: SessionRepository,
     protected sharedLinkRepository: SharedLinkRepository,
     protected sharedLinkAssetRepository: SharedLinkAssetRepository,
-    protected sharedSpaceRepository: SharedSpaceRepository,
     protected stackRepository: StackRepository,
-    protected storageMigrationRepository: StorageMigrationRepository,
     protected storageRepository: StorageRepository,
     protected syncRepository: SyncRepository,
     protected syncCheckpointRepository: SyncCheckpointRepository,
@@ -233,14 +200,16 @@ export class BaseService {
     protected tagRepository: TagRepository,
     protected telemetryRepository: TelemetryRepository,
     protected trashRepository: TrashRepository,
-    protected userGroupRepository: UserGroupRepository,
     protected userRepository: UserRepository,
     protected versionRepository: VersionHistoryRepository,
     protected videoStreamRepository: VideoStreamRepository,
     protected viewRepository: ViewRepository,
+    protected webAuthnRepository: WebAuthnRepository,
     protected websocketRepository: WebsocketRepository,
     protected workflowRepository: WorkflowRepository,
+    protected galleryRepositories: GalleryRepositories,
   ) {
+    super();
     this.logger.setContext(this.constructor.name);
     this.storageCore = StorageCore.create(
       assetRepository,
@@ -252,20 +221,7 @@ export class BaseService {
       systemMetadataRepository,
       this.logger,
     );
-    this.identityMergePropagationService = new IdentityMergePropagationService({
-      databaseRepository,
-      faceIdentityRepository,
-      jobRepository,
-      logger: this.logger,
-      personRepository,
-      sharedSpaceRepository,
-    });
-    this.faceVerdictService = new FaceVerdictService({
-      faceIdentityRepository,
-      facePersonVerdictRepository,
-      faceRepairDeclineRepository,
-      logger: this.logger,
-    });
+    this.initGallery();
   }
 
   static create<T extends ClassConstructor<typeof BaseService>>(Service: T, ctx: BaseService) {
@@ -279,12 +235,11 @@ export class BaseService {
       ctx.appRepository,
       ctx.assetRepository,
       ctx.assetEditRepository,
-      ctx.assetEditSaveRepository,
       ctx.assetFileRepository,
       ctx.assetJobRepository,
+      ctx.authChallengeRepository,
       ctx.clusterGroupRepository,
       ctx.configRepository,
-      ctx.classificationRepository,
       ctx.cronRepository,
       ctx.cryptoRepository,
       ctx.databaseRepository,
@@ -292,11 +247,6 @@ export class BaseService {
       ctx.duplicateRepository,
       ctx.emailRepository,
       ctx.eventRepository,
-      ctx.faceIdentityRepository,
-      ctx.faceRepairRepository,
-      ctx.faceRepairScanRepository,
-      ctx.faceRepairDeclineRepository,
-      ctx.facePersonVerdictRepository,
       ctx.integrityRepository,
       ctx.jobRepository,
       ctx.libraryRepository,
@@ -310,7 +260,9 @@ export class BaseService {
       ctx.oauthRepository,
       ctx.ocrRepository,
       ctx.partnerRepository,
+      ctx.passkeyRepository,
       ctx.personRepository,
+      ctx.personUserRepository,
       ctx.pluginRepository,
       ctx.processRepository,
       ctx.searchRepository,
@@ -318,9 +270,7 @@ export class BaseService {
       ctx.sessionRepository,
       ctx.sharedLinkRepository,
       ctx.sharedLinkAssetRepository,
-      ctx.sharedSpaceRepository,
       ctx.stackRepository,
-      ctx.storageMigrationRepository,
       ctx.storageRepository,
       ctx.syncRepository,
       ctx.syncCheckpointRepository,
@@ -328,13 +278,14 @@ export class BaseService {
       ctx.tagRepository,
       ctx.telemetryRepository,
       ctx.trashRepository,
-      ctx.userGroupRepository,
       ctx.userRepository,
       ctx.versionRepository,
       ctx.videoStreamRepository,
       ctx.viewRepository,
+      ctx.webAuthnRepository,
       ctx.websocketRepository,
       ctx.workflowRepository,
+      ctx.galleryRepositories,
     );
 
     service.logger.setContext(BaseService.name);
@@ -370,6 +321,14 @@ export class BaseService {
     return checkAccess(this.accessRepository, request);
   }
 
+  requirePersonAccess(request: AccessPersonRequest) {
+    return requirePersonAccess(this.accessRepository, request);
+  }
+
+  checkPersonAccess(request: AccessPersonRequest) {
+    return checkPersonAccess(this.accessRepository, request);
+  }
+
   async isSetupAvailable(): Promise<boolean> {
     const { setup } = this.configRepository.getEnv();
     return setup.allow && !(await this.userRepository.hasAdmin());
@@ -378,303 +337,6 @@ export class BaseService {
   async requireSetupAvailable(): Promise<void> {
     if (!(await this.isSetupAvailable())) {
       throw new BadRequestException('Admin setup is not available');
-    }
-  }
-
-  /**
-   * @param options.acceptsRanges set by callers whose route forwards the client's `Range`
-   *        header, so the response may advertise `Accept-Ranges: bytes`.
-   * @param options.range the client's raw `Range` header, when the route forwards one.
-   *        The backend decides whether to honor it: disk serves ranges through express,
-   *        and S3 in redirect mode leaves them to S3 — so it only changes the S3 proxy
-   *        stream path, which previously ignored ranges entirely.
-   */
-  protected async serveFromBackend(
-    filePath: string,
-    contentType: string,
-    cacheControl: CacheControl,
-    fileName?: string,
-    disposition: ContentDisposition = 'inline',
-    options: { range?: string; acceptsRanges?: boolean } = {},
-  ): Promise<ImmichMediaResponse> {
-    // lazy import to avoid circular dependency (StorageService extends BaseService)
-    const { StorageService } = await import('./storage.service.js');
-    const backend = StorageService.resolveBackendForKey(filePath);
-    let strategy: ServeStrategy;
-    try {
-      strategy = await backend.getServeStrategy(filePath, {
-        contentType,
-        cacheControl,
-        fileName,
-        disposition,
-        range: options.range,
-      });
-    } catch (error) {
-      if (error instanceof RangeNotSatisfiableError) {
-        throw new HttpException('Requested range not satisfiable', HttpStatus.REQUESTED_RANGE_NOT_SATISFIABLE);
-      }
-      throw error;
-    }
-    const responseDisposition = disposition === 'inline' ? undefined : disposition;
-
-    switch (strategy.type) {
-      case 'file': {
-        return new ImmichFileResponse({
-          path: strategy.path,
-          contentType,
-          cacheControl,
-          fileName,
-          disposition: responseDisposition,
-        });
-      }
-      case 'redirect': {
-        return new ImmichRedirectResponse({
-          url: strategy.url,
-          cacheControl: CacheControl.PrivateWithoutCache,
-        });
-      }
-      case 'stream': {
-        return new ImmichStreamResponse({
-          stream: strategy.stream,
-          contentType,
-          length: strategy.length,
-          contentRange: strategy.contentRange,
-          acceptsRanges: options.acceptsRanges,
-          cacheControl,
-          fileName,
-          disposition: responseDisposition,
-        });
-      }
-    }
-  }
-
-  /**
-   * For assets on S3 backends, download to a local temp file for processing by
-   * tools that require a filesystem path (ffmpeg, exiftool, sharp). Caller is
-   * responsible for catching `downloadToTemp` errors or letting them propagate.
-   *
-   * @param filePath absolute disk path OR S3 relative key (anything that might
-   *                 come from a DB column such as `asset.originalPath`).
-   * @returns { localPath, cleanup } — cleanup is a no-op for disk paths and
-   *          removes the temp file for S3-sourced paths. Always call cleanup
-   *          in a `finally` block.
-   */
-  protected async ensureLocalFile(filePath: string): Promise<{ localPath: string; cleanup: () => Promise<void> }> {
-    if (isAbsolute(filePath)) {
-      return { localPath: filePath, cleanup: async () => {} };
-    }
-    // lazy import to avoid circular dependency (StorageService extends BaseService)
-    const { StorageService } = await import('./storage.service.js');
-    const backend = StorageService.resolveBackendForKey(filePath);
-    const { tempPath, cleanup } = await backend.downloadToTemp(filePath);
-    return { localPath: tempPath, cleanup };
-  }
-
-  /**
-   * Returns something ffmpeg/ffprobe can read directly: an absolute path as-is,
-   * or a presigned URL for a storage-backend key. Unlike ensureLocalFile this
-   * does NOT download the object, so it is safe to call inside a request handler.
-   */
-  protected async getProbeInput(filePath: string): Promise<string> {
-    if (isAbsolute(filePath)) {
-      return filePath;
-    }
-    // lazy import to avoid circular dependency (StorageService extends BaseService)
-    const { StorageService } = await import('./storage.service.js');
-    return StorageService.resolveBackendForKey(filePath).getReadableUrl(filePath);
-  }
-
-  protected async getFaceThumbnailSource(assetId: string): Promise<string | null> {
-    const preview = await this.assetRepository.getForThumbnail(assetId, AssetFileType.Preview, false);
-    if (preview.path) {
-      return preview.path;
-    }
-
-    const thumbnail = await this.assetRepository.getForThumbnail(assetId, AssetFileType.Thumbnail, false);
-    return thumbnail.path ?? null;
-  }
-
-  protected async generateFaceThumbnailResponse(face: AssetFace, sourcePath: string): Promise<ImmichMediaResponse> {
-    const { image } = await this.getConfig({ withCache: true });
-    const source = await this.ensureLocalFile(sourcePath);
-    const tempDir = await mkdtemp(join(tmpdir(), 'gallery-face-thumbnail-'));
-    const outputPath = join(tempDir, 'thumbnail.jpeg');
-
-    try {
-      const { data: decodedImage, info } = await this.mediaRepository.decodeImage(source.localPath, {
-        colorspace: image.colorspace,
-        processInvalidImages: process.env.IMMICH_PROCESS_INVALID_IMAGES === 'true',
-      });
-
-      const thumbnailOptions: GenerateThumbnailOptions = {
-        colorspace: image.colorspace,
-        format: ImageFormat.Jpeg,
-        raw: info,
-        quality: image.thumbnail.quality,
-        progressive: false,
-        processInvalidImages: false,
-        size: FACE_THUMBNAIL_SIZE,
-        edits: [
-          {
-            action: AssetEditAction.Crop,
-            parameters: this.getFaceThumbnailCrop(
-              {
-                old: { width: face.imageWidth, height: face.imageHeight },
-                new: { width: info.width, height: info.height },
-              },
-              {
-                x1: face.boundingBoxX1,
-                y1: face.boundingBoxY1,
-                x2: face.boundingBoxX2,
-                y2: face.boundingBoxY2,
-              },
-            ),
-          },
-        ],
-      };
-
-      await this.mediaRepository.generateThumbnail(decodedImage, thumbnailOptions, outputPath);
-    } catch (error) {
-      await rm(tempDir, { recursive: true, force: true });
-      throw error;
-    } finally {
-      await source.cleanup();
-    }
-
-    const cleanup = () => {
-      void rm(tempDir, { recursive: true, force: true }).catch(() => {});
-    };
-    const stream = createReadStream(outputPath);
-    stream.once('close', cleanup);
-    stream.once('error', cleanup);
-
-    return new ImmichStreamResponse({
-      stream,
-      contentType: 'image/jpeg',
-      // A face crop is immutable for a given faceId (the bounding box and source preview don't change), so let
-      // the browser cache it (B5). Without this the review grid re-fetched — and the server re-decoded, cropped
-      // and re-encoded — every visible tile on every visit.
-      cacheControl: CacheControl.PrivateWithCache,
-    });
-  }
-
-  private getFaceThumbnailCrop(
-    dims: { old: ImageDimensions; new: ImageDimensions },
-    { x1, y1, x2, y2 }: FaceThumbnailBounds,
-  ): CropParameters {
-    if (
-      !this.hasPositiveDimensions(dims.old) ||
-      !this.hasPositiveDimensions(dims.new) ||
-      [x1, y1, x2, y2].some((value) => !Number.isFinite(value)) ||
-      x2 <= x1 ||
-      y2 <= y1
-    ) {
-      return this.getCenteredFaceThumbnailCrop(dims.new);
-    }
-
-    const clampedX1 = clamp(x1, 0, dims.old.width);
-    const clampedY1 = clamp(y1, 0, dims.old.height);
-    const clampedX2 = clamp(x2, 0, dims.old.width);
-    const clampedY2 = clamp(y2, 0, dims.old.height);
-
-    const widthScale = dims.new.width / dims.old.width;
-    const heightScale = dims.new.height / dims.old.height;
-
-    const halfWidth = (widthScale * (clampedX2 - clampedX1)) / 2;
-    const halfHeight = (heightScale * (clampedY2 - clampedY1)) / 2;
-
-    const middleX = Math.round(widthScale * clampedX1 + halfWidth);
-    const middleY = Math.round(heightScale * clampedY1 + halfHeight);
-    const targetHalfSize = Math.floor(Math.max(halfWidth, halfHeight) * 1.1);
-    const newHalfSize = Math.min(
-      middleX - Math.max(0, middleX - targetHalfSize),
-      middleY - Math.max(0, middleY - targetHalfSize),
-      Math.min(dims.new.width - 1, middleX + targetHalfSize) - middleX,
-      Math.min(dims.new.height - 1, middleY + targetHalfSize) - middleY,
-    );
-
-    const crop = {
-      x: middleX - newHalfSize,
-      y: middleY - newHalfSize,
-      width: newHalfSize * 2,
-      height: newHalfSize * 2,
-    };
-
-    return this.hasValidCrop(crop) ? crop : this.getCenteredFaceThumbnailCrop(dims.new);
-  }
-
-  private hasPositiveDimensions(dimensions: ImageDimensions) {
-    return (
-      Number.isFinite(dimensions.width) &&
-      dimensions.width > 0 &&
-      Number.isFinite(dimensions.height) &&
-      dimensions.height > 0
-    );
-  }
-
-  private hasValidCrop(crop: CropParameters) {
-    return (
-      Number.isFinite(crop.x) &&
-      crop.x >= 0 &&
-      Number.isFinite(crop.y) &&
-      crop.y >= 0 &&
-      Number.isFinite(crop.width) &&
-      crop.width > 0 &&
-      Number.isFinite(crop.height) &&
-      crop.height > 0
-    );
-  }
-
-  private getCenteredFaceThumbnailCrop(dimensions: ImageDimensions): CropParameters {
-    const width = this.toPositiveInteger(dimensions.width, FACE_THUMBNAIL_SIZE);
-    const height = this.toPositiveInteger(dimensions.height, FACE_THUMBNAIL_SIZE);
-    const size = Math.min(width, height);
-
-    return {
-      x: Math.floor((width - size) / 2),
-      y: Math.floor((height - size) / 2),
-      width: size,
-      height: size,
-    };
-  }
-
-  private toPositiveInteger(value: number, fallback: number) {
-    const rounded = Math.floor(value);
-    return Number.isFinite(rounded) && rounded > 0 ? rounded : fallback;
-  }
-
-  // Gallery-fork: upstream calls userRepository.syncUsage() directly from its two call sites
-  // (user.service.ts handleUserSyncUsage and user-admin.service.ts). The fork routes both through
-  // here so a single admin toggle can decide what quotaUsageInBytes means: upstream's originals-only
-  // sum, or a physical walk that also counts thumbnails and transcodes. Either way the column holds
-  // the figure the admin asked for, so display and quota enforcement need no knowledge of the
-  // setting. The walk's own logic lives in src/gallery/storage-usage.ts.
-  protected async syncUsage(id?: string): Promise<void> {
-    // The walk is expensive — hundreds of thousands of stat calls on a large install — so the
-    // default path stays exactly as cheap as upstream's single statement.
-    const { storageUsage } = await this.getConfig({ withCache: false });
-    if (!storageUsage.includeDerivatives) {
-      await this.userRepository.syncUsage(id);
-      return;
-    }
-
-    // Deliberately either/or: running upstream's statement here too would immediately overwrite
-    // the physical figure with the originals-only one.
-    // lazy import to avoid circular dependency (StorageService extends BaseService)
-    const { StorageService } = await import('./storage.service.js');
-    const s3 = StorageService.getS3Backend();
-    const users = id
-      ? [await this.userRepository.get(id, { withDeleted: false })].filter((user): user is UserAdmin => !!user)
-      : await this.userRepository.getList({ withDeleted: false });
-
-    for (const user of users) {
-      const usage = await computePhysicalUsage({
-        user,
-        assetRepository: this.assetRepository,
-        storageRepository: this.storageRepository,
-        s3,
-      });
-      await this.userRepository.setUsage(user.id, usage);
     }
   }
 
@@ -697,7 +359,7 @@ export class BaseService {
       payload.password = await this.cryptoRepository.hashBcrypt(payload.password, SALT_ROUNDS);
     }
     if (payload.storageLabel) {
-      payload.storageLabel = sanitize(payload.storageLabel.replaceAll('.', ''));
+      payload.storageLabel = sanitize(payload.storageLabel);
     }
 
     const clusterGroup = await this.clusterGroupRepository.create();
@@ -706,5 +368,27 @@ export class BaseService {
     await this.eventRepository.emit('UserCreate', user);
 
     return user;
+  }
+
+  protected async createLoginResponse(
+    user: UserAdmin,
+    loginDetails: LoginDetails,
+    oauthSid?: string,
+    oauthBearerToken?: string,
+  ) {
+    const token = this.cryptoRepository.randomBytesAsText(32);
+    const hashed = this.cryptoRepository.hashSha256(token);
+
+    await this.sessionRepository.create({
+      token: hashed,
+      deviceOS: loginDetails.deviceOS,
+      deviceType: loginDetails.deviceType,
+      appVersion: loginDetails.appVersion,
+      userId: user.id,
+      oauthSid: oauthSid ?? null,
+      oauthBearerToken: oauthBearerToken ?? null,
+    });
+
+    return mapLoginResponse(user, token);
   }
 }

@@ -1,23 +1,14 @@
-import { Readable } from 'node:stream';
+import { GalleryMachineLearningRepository } from 'src/gallery/repositories/gallery-machine-learning.repository.js';
 import { LoggingRepository } from 'src/repositories/logging.repository.js';
 import { MachineLearningRepository, ModelTask, ModelType } from 'src/repositories/machine-learning.repository.js';
 import { automock } from 'test/utils.js';
 
-const mockReadFile = vi.fn();
-
-vi.mock('node:fs/promises', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('node:fs/promises')>();
-  return {
-    ...actual,
-    readFile: (...args: unknown[]) => mockReadFile(...args),
-  };
-});
-
-const mockResolveBackendForKey = vi.fn();
+const mockReadAll = vi.fn();
+const mockBackendFor = vi.fn(() => ({ readAll: mockReadAll }));
 
 vi.mock('src/services/storage.service', () => ({
   StorageService: {
-    resolveBackendForKey: (...args: unknown[]) => mockResolveBackendForKey(...args),
+    backendFor: (...args: unknown[]) => mockBackendFor(...(args as [])),
   },
 }));
 
@@ -27,7 +18,7 @@ vi.stubGlobal('fetch', mockFetch);
 const clipConfig = { modelName: 'ViT-B-32__openai', enabled: true, maxDistance: 0 };
 
 describe(MachineLearningRepository.name, () => {
-  let sut: MachineLearningRepository;
+  let sut: GalleryMachineLearningRepository;
   let originalCloseConnections: string | undefined;
 
   const mlUrl = 'http://ml-server:3003';
@@ -45,6 +36,18 @@ describe(MachineLearningRepository.name, () => {
       maxDistance: 0.5,
       minFaces: 1,
       suggestions: { enabled: false, maxDistance: 0.7 },
+      video: {
+        enabled: false,
+        sampleInterval: 2,
+        sceneDetection: true,
+        maxFrames: 1800,
+        tiledDetection: false,
+        maxDistance: 0.5,
+        minFaceSize: 20,
+        minSightings: 1,
+        createPeople: true,
+        minRecognitionScore: 0.75,
+      },
     },
     ocr: {
       enabled: false,
@@ -57,12 +60,30 @@ describe(MachineLearningRepository.name, () => {
       enabled: false,
       modelName: 'rfdetr-nano',
       minScore: 0.6,
+      video: {
+        enabled: false,
+        sampleInterval: 2,
+        sceneDetection: true,
+        maxFrames: 900,
+        maxDistance: 0.55,
+        minSightings: 2,
+      },
     },
     petRecognition: {
       enabled: false,
       modelName: 'pet-recognition-base',
       maxDistance: 0.55,
       minFaces: 1,
+    },
+    spatialScene: {
+      enabled: false,
+      modelName: 'depth-anything-v2-small',
+      offer: 'suitable' as const,
+      minBoundarySharpness: 0.03,
+      minEdgeDensity: 0.02,
+      minForegroundRatio: 0.01,
+      maxForegroundRatio: 0.75,
+      minFaceHeight: 0.03,
     },
   };
 
@@ -71,7 +92,7 @@ describe(MachineLearningRepository.name, () => {
   };
 
   const createSut = () =>
-    new MachineLearningRepository(
+    new GalleryMachineLearningRepository(
       // eslint-disable-next-line no-sparse-arrays
       automock(LoggingRepository, { args: [, { getEnv: () => ({}) }], strict: false }),
     );
@@ -94,56 +115,22 @@ describe(MachineLearningRepository.name, () => {
   });
 
   describe('getFormData', () => {
-    it('should read from filesystem for absolute (disk) paths', async () => {
-      const imageData = Buffer.from('disk-image-data');
-      mockReadFile.mockResolvedValue(imageData);
-
-      const clipResponse = { [ModelTask.SEARCH]: 'mock-embedding', imageHeight: 100, imageWidth: 100 };
-      mockFetch.mockResolvedValue({ ok: true, json: () => Promise.resolve(clipResponse) });
-
-      await sut.encodeImage('/data/upload/thumbs/user1/ab/cd/preview.webp', clipConfig);
-
-      expect(mockReadFile).toHaveBeenCalledWith('/data/upload/thumbs/user1/ab/cd/preview.webp');
-    });
-
-    it('should stream from S3 backend for relative paths', async () => {
+    it('should read the image through its storage backend', async () => {
       const imageData = Buffer.from('s3-image-data');
-      const mockStream = Readable.from([imageData]);
-      const mockBackend = {
-        get: vi.fn().mockResolvedValue({ stream: mockStream }),
-      };
-      mockResolveBackendForKey.mockReturnValue(mockBackend);
+      mockReadAll.mockResolvedValue(imageData);
 
       const clipResponse = { [ModelTask.SEARCH]: 'mock-embedding', imageHeight: 100, imageWidth: 100 };
       mockFetch.mockResolvedValue({ ok: true, json: () => Promise.resolve(clipResponse) });
 
       await sut.encodeImage('thumbs/user1/ab/cd/preview.webp', clipConfig);
 
-      expect(mockReadFile).not.toHaveBeenCalled();
-      expect(mockResolveBackendForKey).toHaveBeenCalledWith('thumbs/user1/ab/cd/preview.webp');
-      expect(mockBackend.get).toHaveBeenCalledWith('thumbs/user1/ab/cd/preview.webp');
-    });
-
-    it('should not call S3 backend for absolute (disk) paths', async () => {
-      const imageData = Buffer.from('disk-image-data');
-      mockReadFile.mockResolvedValue(imageData);
-
-      const clipResponse = { [ModelTask.SEARCH]: 'mock-embedding', imageHeight: 100, imageWidth: 100 };
-      mockFetch.mockResolvedValue({ ok: true, json: () => Promise.resolve(clipResponse) });
-
-      await sut.encodeImage('/data/upload/thumbs/user1/ab/cd/preview.webp', clipConfig);
-
-      expect(mockResolveBackendForKey).not.toHaveBeenCalled();
-      expect(mockReadFile).toHaveBeenCalledWith('/data/upload/thumbs/user1/ab/cd/preview.webp');
+      expect(mockBackendFor).toHaveBeenCalledWith('thumbs/user1/ab/cd/preview.webp');
+      expect(mockReadAll).toHaveBeenCalledWith('thumbs/user1/ab/cd/preview.webp');
     });
 
     it('should send correct binary payload from S3 stream', async () => {
       const imageData = Buffer.from('s3-image-binary-content');
-      const mockStream = Readable.from([imageData]);
-      const mockBackend = {
-        get: vi.fn().mockResolvedValue({ stream: mockStream }),
-      };
-      mockResolveBackendForKey.mockReturnValue(mockBackend);
+      mockReadAll.mockResolvedValue(imageData);
 
       const clipResponse = { [ModelTask.SEARCH]: 'mock-embedding', imageHeight: 100, imageWidth: 100 };
       mockFetch.mockResolvedValue({ ok: true, json: () => Promise.resolve(clipResponse) });
@@ -164,35 +151,13 @@ describe(MachineLearningRepository.name, () => {
       expect(blobBuffer).toEqual(imageData);
     });
 
-    it('should handle multi-chunk S3 streams', async () => {
-      const chunk1 = Buffer.from('chunk-1-');
-      const chunk2 = Buffer.from('chunk-2-');
-      const chunk3 = Buffer.from('chunk-3');
-      const mockStream = Readable.from([chunk1, chunk2, chunk3]);
-      const mockBackend = {
-        get: vi.fn().mockResolvedValue({ stream: mockStream }),
-      };
-      mockResolveBackendForKey.mockReturnValue(mockBackend);
-
-      const clipResponse = { [ModelTask.SEARCH]: 'mock-embedding', imageHeight: 100, imageWidth: 100 };
-      mockFetch.mockResolvedValue({ ok: true, json: () => Promise.resolve(clipResponse) });
-
-      await sut.encodeImage('thumbs/user1/preview.webp', clipConfig);
-
-      const [, options] = mockFetch.mock.calls[0];
-      const formData = options.body as FormData;
-      const imageBlob = formData.get('image') as Blob;
-      const blobBuffer = Buffer.from(await imageBlob.arrayBuffer());
-      expect(blobBuffer).toEqual(Buffer.concat([chunk1, chunk2, chunk3]));
-    });
-
     it('should handle text payloads without image path logic', async () => {
       const textResponse = { [ModelTask.SEARCH]: 'mock-text-embedding' };
       mockFetch.mockResolvedValue({ ok: true, json: () => Promise.resolve(textResponse) });
 
       await sut.encodeText('search query', { modelName: 'ViT-B-32__openai' });
 
-      expect(mockReadFile).not.toHaveBeenCalled();
+      expect(mockReadAll).not.toHaveBeenCalled();
 
       const [, options] = mockFetch.mock.calls[0];
       const formData = options.body as FormData;
@@ -204,11 +169,7 @@ describe(MachineLearningRepository.name, () => {
   describe('encodeImage', () => {
     it('should send correct CLIP visual request with S3 path', async () => {
       const imageData = Buffer.from('s3-clip-image');
-      const mockStream = Readable.from([imageData]);
-      const mockBackend = {
-        get: vi.fn().mockResolvedValue({ stream: mockStream }),
-      };
-      mockResolveBackendForKey.mockReturnValue(mockBackend);
+      mockReadAll.mockResolvedValue(imageData);
 
       const clipResponse = { [ModelTask.SEARCH]: 'encoded-embedding-string', imageHeight: 200, imageWidth: 300 };
       mockFetch.mockResolvedValue({ ok: true, json: () => Promise.resolve(clipResponse) });
@@ -225,7 +186,7 @@ describe(MachineLearningRepository.name, () => {
 
     it('should return CLIP embedding with disk path', async () => {
       const imageData = Buffer.from('disk-clip-image');
-      mockReadFile.mockResolvedValue(imageData);
+      mockReadAll.mockResolvedValue(imageData);
 
       const clipResponse = { [ModelTask.SEARCH]: 'disk-embedding', imageHeight: 100, imageWidth: 100 };
       mockFetch.mockResolvedValue({ ok: true, json: () => Promise.resolve(clipResponse) });
@@ -233,18 +194,14 @@ describe(MachineLearningRepository.name, () => {
       const result = await sut.encodeImage('/data/upload/preview.webp', clipConfig);
 
       expect(result).toBe('disk-embedding');
-      expect(mockReadFile).toHaveBeenCalledWith('/data/upload/preview.webp');
+      expect(mockReadAll).toHaveBeenCalledWith('/data/upload/preview.webp');
     });
   });
 
   describe('detectFaces', () => {
     it('should detect faces with S3 path', async () => {
       const imageData = Buffer.from('s3-face-image');
-      const mockStream = Readable.from([imageData]);
-      const mockBackend = {
-        get: vi.fn().mockResolvedValue({ stream: mockStream }),
-      };
-      mockResolveBackendForKey.mockReturnValue(mockBackend);
+      mockReadAll.mockResolvedValue(imageData);
 
       const faceResponse = {
         [ModelTask.FACIAL_RECOGNITION]: [
@@ -265,8 +222,8 @@ describe(MachineLearningRepository.name, () => {
       expect(result.imageHeight).toBe(480);
       expect(result.imageWidth).toBe(640);
 
-      expect(mockResolveBackendForKey).toHaveBeenCalledWith('thumbs/user1/face-preview.webp');
-      expect(mockBackend.get).toHaveBeenCalledWith('thumbs/user1/face-preview.webp');
+      expect(mockBackendFor).toHaveBeenCalledWith('thumbs/user1/face-preview.webp');
+      expect(mockReadAll).toHaveBeenCalledWith('thumbs/user1/face-preview.webp');
 
       const [, options] = mockFetch.mock.calls[0];
       const formData = options.body as FormData;
@@ -281,7 +238,7 @@ describe(MachineLearningRepository.name, () => {
 
     it('should detect faces with disk path', async () => {
       const imageData = Buffer.from('disk-face-image');
-      mockReadFile.mockResolvedValue(imageData);
+      mockReadAll.mockResolvedValue(imageData);
 
       const faceResponse = {
         [ModelTask.FACIAL_RECOGNITION]: [
@@ -299,7 +256,7 @@ describe(MachineLearningRepository.name, () => {
 
       expect(result.faces).toHaveLength(1);
       expect(result.faces[0].score).toBe(0.88);
-      expect(mockReadFile).toHaveBeenCalledWith('/data/upload/thumbs/preview.webp');
+      expect(mockReadAll).toHaveBeenCalledWith('/data/upload/thumbs/preview.webp');
     });
   });
 
@@ -309,7 +266,7 @@ describe(MachineLearningRepository.name, () => {
     // (`detection`) under `pet-detection`, byte-identical to today's request shape.
     it('sends only the detection entry when recognition is not requested (regression guard)', async () => {
       const imageData = Buffer.from('disk-pet-image');
-      mockReadFile.mockResolvedValue(imageData);
+      mockReadAll.mockResolvedValue(imageData);
 
       const petResponse = {
         [ModelTask.PET_DETECTION]: [{ boundingBox: { x1: 1, y1: 2, x2: 3, y2: 4 }, score: 0.9, label: 'dog' }],
@@ -333,7 +290,7 @@ describe(MachineLearningRepository.name, () => {
 
     it('sends both detection and recognition entries when recognition is requested', async () => {
       const imageData = Buffer.from('disk-pet-image');
-      mockReadFile.mockResolvedValue(imageData);
+      mockReadAll.mockResolvedValue(imageData);
 
       const petResponse = {
         [ModelTask.PET_DETECTION]: [
@@ -368,7 +325,7 @@ describe(MachineLearningRepository.name, () => {
 
     it('maps embedding through onto each parsed pet', async () => {
       const imageData = Buffer.from('disk-pet-image');
-      mockReadFile.mockResolvedValue(imageData);
+      mockReadAll.mockResolvedValue(imageData);
 
       const petResponse = {
         [ModelTask.PET_DETECTION]: [
@@ -397,7 +354,7 @@ describe(MachineLearningRepository.name, () => {
 
     it('pin: parses a pet with no embedding field (older ML service) as embedding: undefined', async () => {
       const imageData = Buffer.from('disk-pet-image');
-      mockReadFile.mockResolvedValue(imageData);
+      mockReadAll.mockResolvedValue(imageData);
 
       const petResponse = {
         [ModelTask.PET_DETECTION]: [{ boundingBox: { x1: 1, y1: 2, x2: 3, y2: 4 }, score: 0.9, label: 'dog' }],
@@ -418,7 +375,7 @@ describe(MachineLearningRepository.name, () => {
 
     it('a response missing the pet-detection key parses as an empty pets array (red against the pre-guard code)', async () => {
       const imageData = Buffer.from('disk-pet-image');
-      mockReadFile.mockResolvedValue(imageData);
+      mockReadAll.mockResolvedValue(imageData);
 
       // Simulates a misbehaving/older ML service that omits the response key entirely — must not
       // crash the caller's `pets.filter(...)` (pet-detection.service.ts).
@@ -434,11 +391,7 @@ describe(MachineLearningRepository.name, () => {
   describe('ocr', () => {
     it('should perform OCR with S3 path', async () => {
       const imageData = Buffer.from('s3-ocr-image');
-      const mockStream = Readable.from([imageData]);
-      const mockBackend = {
-        get: vi.fn().mockResolvedValue({ stream: mockStream }),
-      };
-      mockResolveBackendForKey.mockReturnValue(mockBackend);
+      mockReadAll.mockResolvedValue(imageData);
 
       const ocrResponse = {
         [ModelTask.OCR]: { text: ['hello'], box: [1, 2, 3, 4], boxScore: [0.9], textScore: [0.85] },
@@ -455,15 +408,15 @@ describe(MachineLearningRepository.name, () => {
       });
 
       expect(result.text).toEqual(['hello']);
-      expect(mockResolveBackendForKey).toHaveBeenCalledWith('upload/user1/preview.webp');
-      expect(mockBackend.get).toHaveBeenCalledWith('upload/user1/preview.webp');
+      expect(mockBackendFor).toHaveBeenCalledWith('upload/user1/preview.webp');
+      expect(mockReadAll).toHaveBeenCalledWith('upload/user1/preview.webp');
     });
   });
 
   describe('predict error handling', () => {
     it('should throw when all ML server URLs fail', async () => {
       const imageData = Buffer.from('image-data');
-      mockReadFile.mockResolvedValue(imageData);
+      mockReadAll.mockResolvedValue(imageData);
 
       mockFetch.mockRejectedValue(new Error('Connection refused'));
 
@@ -472,17 +425,13 @@ describe(MachineLearningRepository.name, () => {
 
     it('should throw when all ML server URLs fail with S3 path', async () => {
       const imageData = Buffer.from('s3-image');
-      const mockStream = Readable.from([imageData]);
-      const mockBackend = {
-        get: vi.fn().mockResolvedValue({ stream: mockStream }),
-      };
-      mockResolveBackendForKey.mockReturnValue(mockBackend);
+      mockReadAll.mockResolvedValue(imageData);
 
       mockFetch.mockRejectedValue(new Error('Connection refused'));
 
       await expect(sut.encodeImage('thumbs/user1/preview.webp', clipConfig)).rejects.toThrow('failed for all URLs');
 
-      expect(mockBackend.get).toHaveBeenCalledWith('thumbs/user1/preview.webp');
+      expect(mockReadAll).toHaveBeenCalledWith('thumbs/user1/preview.webp');
     });
   });
 
@@ -596,7 +545,7 @@ describe(MachineLearningRepository.name, () => {
           json: () => Promise.resolve({ [ModelTask.SEARCH]: 'x', imageHeight: 1, imageWidth: 1 }),
         });
       });
-      mockReadFile.mockResolvedValue(Buffer.from('img'));
+      mockReadAll.mockResolvedValue(Buffer.from('img'));
       await sut.encodeImage('/data/upload/thumbs/a/b/c.webp', clipConfig);
       expect(signalsUsed[0]).toBeUndefined();
     });

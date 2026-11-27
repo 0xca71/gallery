@@ -1,11 +1,6 @@
-import { AlbumUserRole, type AlbumResponseDto } from '@immich/sdk';
-import * as sdk from '@immich/sdk';
-import { orderBy } from 'lodash-es';
-import { t } from 'svelte-i18n';
-import { get } from 'svelte/store';
-import { goto } from '$app/navigation';
-import { eventManager } from '$lib/managers/event-manager.svelte';
-import { Route } from '$lib/route';
+import { createAlbumMutation } from '#lib/queries/album.query.ts';
+import { executeMutation } from '#lib/queries/client.ts';
+import { Route } from '#lib/route.ts';
 import {
   AlbumFilter,
   AlbumGroupBy,
@@ -14,57 +9,42 @@ import {
   albumViewSettings,
   locale,
   type AlbumViewSettings,
-} from '$lib/stores/preferences.store';
-import { handleError } from '$lib/utils/handle-error';
+} from '#lib/stores/preferences.store.ts';
+import { AlbumUserRole, type AlbumResponseDto } from '@immich/sdk';
+import { orderBy } from 'lodash-es';
+import { get, type Writable } from 'svelte/store';
+import { goto } from '$app/navigation';
 
 /**
- * -------------------------
- * Albums General Management
- * -------------------------
- */
-export const createAlbum = async (name?: string, assetIds?: string[]) => {
-  try {
-    const newAlbum: AlbumResponseDto = await sdk.createAlbum({
-      createAlbumDto: {
-        albumName: name ?? '',
-        assetIds,
-      },
-    });
-    eventManager.emit('AlbumCreate', newAlbum);
-    return newAlbum;
-  } catch (error) {
-    const $t = get(t);
-    handleError(error, $t('errors.failed_to_create_album'));
-  }
-};
-
-export const createAlbumAndRedirect = async (name?: string, assetIds?: string[]) => {
-  const newAlbum = await createAlbum(name, assetIds);
-  if (newAlbum) {
-    await goto(Route.viewAlbum(newAlbum));
-  }
-};
+-------------------------
+Albums General Management
+-------------------------
+*/
+export const createAlbumAndRedirect = (name?: string, assetIds?: string[]) =>
+  executeMutation(createAlbumMutation, [{ createAlbumDto: { albumName: name ?? '', assetIds } }], {
+    onSuccess: (album) => void goto(Route.viewAlbum(album)),
+  });
 
 /**
- * Whether `userId` may edit `album`'s metadata.
- *
- * Mirrors the server's `Permission.AlbumUpdate` (owner ∪ shared-with-editor,
- * `server/src/utils/access.ts:208-216`). Deletion is server-side owner-only
- * (`AlbumDelete`, :218-220). Sharing (`AlbumShare`, :222-230) is *also* owner ∪
- * editor server-side, but this UI deliberately keeps sharing owner-gated — the
- * stricter check is always safe, since it can never offer an action the server
- * would refuse. Callers must keep using their own ownership check for sharing.
- */
+Whether `userId` may edit `album`'s metadata.
+
+Mirrors the server's `Permission.AlbumUpdate` (owner ∪ shared-with-editor,
+`server/src/utils/access.ts:208-216`). Deletion is server-side owner-only
+(`AlbumDelete`, :218-220). Sharing (`AlbumShare`, :222-230) is *also* owner ∪
+editor server-side, but this UI deliberately keeps sharing owner-gated — the
+stricter check is always safe, since it can never offer an action the server
+would refuse. Callers must keep using their own ownership check for sharing.
+*/
 export const isAlbumEditor = (album: AlbumResponseDto, userId: string) =>
   album.albumUsers.some(
     ({ user, role }) => user.id === userId && (role === AlbumUserRole.Owner || role === AlbumUserRole.Editor),
   );
 
 /**
- * -------------
- * Album Sorting
- * -------------
- */
+-------------
+Album Sorting
+-------------
+*/
 export interface AlbumSortOptionMetadata {
   id: AlbumSortBy;
   defaultOrder: SortOrder;
@@ -117,10 +97,10 @@ export const findFilterOption = (filter: string) => {
 };
 
 /**
- * --------------
- * Album Grouping
- * --------------
- */
+--------------
+Album Grouping
+--------------
+*/
 export interface AlbumGroup {
   id: string;
   name: string;
@@ -171,26 +151,28 @@ export const getSelectedAlbumGroupOption = (settings: AlbumViewSettings) => {
 };
 
 /**
- * ----------------------------
- * Album Groups Collapse/Expand
- * ----------------------------
- */
-const getCollapsedAlbumGroups = (settings: AlbumViewSettings) => {
+----------------------------
+Album Groups Collapse/Expand
+----------------------------
+*/
+// Gallery: the store parameter lets the space album list reuse these with its own settings store.
+type GroupSettings = Pick<AlbumViewSettings, 'groupBy' | 'collapsedGroups'>;
+const getCollapsedAlbumGroups = (settings: GroupSettings) => {
   settings.collapsedGroups ??= {};
   const { collapsedGroups, groupBy } = settings;
   collapsedGroups[groupBy] ??= [];
   return collapsedGroups[groupBy];
 };
 
-export const isAlbumGroupCollapsed = (settings: AlbumViewSettings, groupId: string) => {
+export const isAlbumGroupCollapsed = (settings: GroupSettings, groupId: string) => {
   if (settings.groupBy === AlbumGroupBy.None) {
     return false;
   }
   return getCollapsedAlbumGroups(settings).includes(groupId);
 };
 
-export const toggleAlbumGroupCollapsing = (groupId: string) => {
-  const settings = get(albumViewSettings);
+export const toggleAlbumGroupCollapsing = (groupId: string, store: Writable<GroupSettings> = albumViewSettings) => {
+  const settings = get(store);
   if (settings.groupBy === AlbumGroupBy.None) {
     return;
   }
@@ -203,11 +185,11 @@ export const toggleAlbumGroupCollapsing = (groupId: string) => {
     // Expand
     collapsedGroups.splice(groupIndex, 1);
   }
-  albumViewSettings.set(settings);
+  store.set(settings);
 };
 
-export const collapseAllAlbumGroups = (groupIds: string[]) => {
-  albumViewSettings.update((settings) => {
+export const collapseAllAlbumGroups = (groupIds: string[], store: Writable<GroupSettings> = albumViewSettings) => {
+  store.update((settings) => {
     const collapsedGroups = getCollapsedAlbumGroups(settings);
     collapsedGroups.length = 0;
     collapsedGroups.push(...groupIds);
@@ -215,8 +197,8 @@ export const collapseAllAlbumGroups = (groupIds: string[]) => {
   });
 };
 
-export const expandAllAlbumGroups = () => {
-  collapseAllAlbumGroups([]);
+export const expandAllAlbumGroups = (store: Writable<GroupSettings> = albumViewSettings) => {
+  collapseAllAlbumGroups([], store);
 };
 
 interface AlbumSortOption {

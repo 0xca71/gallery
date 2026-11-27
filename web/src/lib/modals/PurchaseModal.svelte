@@ -1,5 +1,5 @@
 <script lang="ts">
-  import PurchaseContent from '$lib/components/shared-components/purchasing/PurchaseContent.svelte';
+  import PurchaseContent from '#lib/components/shared-components/purchasing/PurchaseContent.svelte';
   import { Modal, ModalBody } from '@immich/ui';
 
   interface Props {

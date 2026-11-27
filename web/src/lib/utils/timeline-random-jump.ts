@@ -1,4 +1,4 @@
-import type { TimelineManager } from '$lib/managers/timeline-manager/timeline-manager.svelte';
+import type { TimelineManager } from '#lib/managers/timeline-manager/timeline-manager.svelte.ts';
 
 type RandomTimeline = Pick<TimelineManager, 'assetCount' | 'getRandomAsset'>;
 

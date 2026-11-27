@@ -24,7 +24,7 @@ void main() {
   final callPattern = RegExp(r"'([a-z0-9_]+)'\.tr?\(");
 
   test('every localisation key referenced in the spaces feature exists in en.json', () {
-    final en = jsonDecode(File('../i18n/en.json').readAsStringSync()) as Map<String, dynamic>;
+    final en = jsonDecode(File('../i18n/gallery/merged/en.json').readAsStringSync()) as Map<String, dynamic>;
 
     final missing = <String, Set<String>>{};
     var scannedFiles = 0;
@@ -58,6 +58,39 @@ void main() {
           'these keys are used in the spaces UI but are not defined in i18n/en.json, so they '
           'render as the raw key: ${missing.entries.map((e) => '${e.key} (${e.value.join(', ')})').join('; ')}',
     );
+  });
+
+  // Hard-coded English in the shapes these files use for user-facing text: a Text literal, a
+  // toast message, a tooltip or field label, or a ternary branch inside one of them.
+  // `Text(` may be followed by a line break, so the files are matched whole.
+  final englishLiteralPattern = RegExp(
+    r"(?:\bText\(\s*|\bmsg: |\btooltip: |\blabelText: |\bhintText: |\? )'[A-Z][a-z]",
+  );
+
+  test('the spaces feature has no hard-coded English user-facing strings', () {
+    final found = <String>[];
+    for (final dir in [...scannedDirs, 'lib/widgets/spaces']) {
+      for (final entity in Directory(dir).listSync(recursive: true)) {
+        if (entity is! File || !entity.path.endsWith('.dart')) {
+          continue;
+        }
+        final source = entity.readAsStringSync();
+        for (final match in englishLiteralPattern.allMatches(source)) {
+          final line = '\n'.allMatches(source.substring(0, match.start)).length + 1;
+          found.add('${entity.path}:$line: ${match.group(0)!.replaceAll(RegExp(r'\s+'), ' ')}');
+        }
+      }
+    }
+
+    expect(found, isEmpty, reason: 'use a key from i18n/gallery/en.json instead:\n${found.join('\n')}');
+  });
+
+  test('the English literal pattern matches the shapes it guards', () {
+    expect(englishLiteralPattern.hasMatch("title: const Text('Members'),"), isTrue);
+    expect(englishLiteralPattern.hasMatch("msg: 'Space deleted',"), isTrue);
+    expect(englishLiteralPattern.hasMatch("Text(isLeaving ? 'Leave Space' : 'Remove Member')"), isTrue);
+    expect(englishLiteralPattern.hasMatch("Text(\n  'Syncing photos.',\n)"), isTrue);
+    expect(englishLiteralPattern.hasMatch('title: Text(context.t.members),'), isFalse);
   });
 
   // Proves the check above can actually fail — otherwise a broken regex or a bad path would make

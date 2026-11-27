@@ -2,7 +2,6 @@ import { CronExpression } from '@nestjs/schedule';
 import { validateCronExpression } from 'cron';
 import { createZodDto } from 'nestjs-zod';
 import z from 'zod';
-import type { DeepPartial } from 'src/types.js';
 import {
   AudioCodec,
   AudioCodecSchema,
@@ -33,19 +32,26 @@ import {
   VideoContainerSchema,
 } from 'src/enum.js';
 import {
+  GalleryBackupS3Schema,
   GalleryClassificationSchema,
   GalleryClipExtension,
-  GalleryFaceSuggestionSchema,
+  GalleryFacialRecognitionExtension,
   GalleryMemoriesSchema,
   GalleryPetDetectionSchema,
   GalleryPetRecognitionSchema,
   GalleryServerExtension,
+  GallerySpatialSceneSchema,
   GalleryStorageUsageSchema,
+  galleryBackupDatabaseDefaults,
+  galleryFacialRecognitionDefaults,
   galleryJobDefaults,
   galleryMachineLearningDefaults,
   galleryServerDefaults,
   galleryTopLevelDefaults,
-} from 'src/gallery/config.dto.js';
+} from 'src/gallery/dtos/config.dto.js';
+import { GalleryDataSaverVideoSchema, galleryDataSaverVideoDefaults } from 'src/gallery/dtos/data-saver-video.dto.js';
+import { GalleryPublicConfigExtension } from 'src/gallery/dtos/server.dto.js';
+import type { DeepPartial } from 'src/types.js';
 
 const { Admin, User, Public } = ConfigVisibility;
 
@@ -71,6 +77,18 @@ const cronExpressionSchema = z
     }
   })
   .describe('Cron expression');
+
+const httpsDomain = (label: string) =>
+  z
+    .url({ protocol: /^https$/, hostname: z.regexes.domain })
+    .normalize()
+    .refine((url) => {
+      try {
+        return new URL(url).href === `${new URL(url).origin}/`;
+      } catch {
+        return true;
+      }
+    }, `${label} must not include a path, query, or fragment`);
 
 const emptyOrUrl = (error: string) =>
   z.string().refine((url) => url.length === 0 || z.url().safeParse(url).success, { error });
@@ -129,7 +147,7 @@ const AdminConfigFFmpegSchema = z
     tonemap: ToneMappingSchema,
     realtime: z
       .object({
-        enabled: configBool.describe('Enable real-time HLS transcoding (alpha)').meta({ visibility: User }),
+        enabled: configBool.describe('Enable real-time HLS transcoding (alpha)').meta({ visibility: Public }),
         videoCodecs: z
           .array(VideoCodecSchema)
           .describe('Video codecs to use for real-time HLS transcoding')
@@ -140,12 +158,13 @@ const AdminConfigFFmpegSchema = z
           .meta({ visibility: User }),
       })
       .meta({ id: 'AdminConfigFFmpegRealtimeDto' }),
+    dataSaver: GalleryDataSaverVideoSchema,
   })
   .meta({ id: 'AdminConfigFFmpegDto' });
 
 const AdminConfigSmtpSchema = z
   .object({
-    enabled: configBool.describe('Whether SMTP email notifications are enabled'),
+    enabled: configBool.describe('Whether SMTP email notifications are enabled').meta({ visibility: User }),
     from: z.string().describe('Email address to send from'),
     replyTo: z.string().describe('Email address for replies'),
     transport: z
@@ -165,11 +184,13 @@ const AdminConfigSchemaWithVisibility = z
   .object({
     backup: z
       .object({
+        beta: configBool.default(false).optional().describe('Whether the backups feature is enabled'),
         database: z
           .object({
             enabled: configBool.describe('Enabled'),
             cronExpression: cronExpressionSchema,
             keepLastAmount: z.int().min(1).describe('Keep last amount'),
+            s3: GalleryBackupS3Schema,
           })
           .meta({ id: 'AdminConfigDatabaseBackupDto' }),
       })
@@ -213,6 +234,8 @@ const AdminConfigSchemaWithVisibility = z
         peopleBackfill: AdminConfigJobSettingsSchema,
         petDetection: AdminConfigJobSettingsSchema,
         classification: AdminConfigJobSettingsSchema,
+        qualityAnalysis: AdminConfigJobSettingsSchema,
+        spatialScene: AdminConfigJobSettingsSchema,
       })
       .meta({ id: 'AdminConfigJobDto' }),
     logging: z
@@ -235,6 +258,7 @@ const AdminConfigSchemaWithVisibility = z
         clip: AdminConfigMachineLearningModelSchema.extend(GalleryClipExtension).meta({ id: 'AdminConfigClipDto' }),
         petDetection: GalleryPetDetectionSchema,
         petRecognition: GalleryPetRecognitionSchema,
+        spatialScene: GallerySpatialSceneSchema,
         duplicateDetection: AdminConfigMachineLearningTaskSchema.extend({
           maxDistance: z
             .number()
@@ -261,7 +285,7 @@ const AdminConfigSchemaWithVisibility = z
             .min(1)
             .describe('Minimum number of faces required for recognition')
             .meta({ visibility: User }),
-          suggestions: GalleryFaceSuggestionSchema,
+          ...GalleryFacialRecognitionExtension,
         }).meta({ id: 'AdminConfigFacialRecognitionDto' }),
         ocr: AdminConfigMachineLearningModelSchema.extend({
           maxResolution: z.int().min(1).describe('Maximum resolution for OCR processing'),
@@ -282,9 +306,9 @@ const AdminConfigSchemaWithVisibility = z
       .meta({ id: 'AdminConfigMachineLearningDto' }),
     map: z
       .object({
-        enabled: configBool.describe('Enabled').meta({ visibility: User }),
-        lightStyle: z.url().describe('Light map style URL').meta({ visibility: User }),
-        darkStyle: z.url().describe('Dark map style URL').meta({ visibility: User }),
+        enabled: configBool.describe('Enabled').meta({ visibility: Public }),
+        lightStyle: z.url().describe('Light map style URL').meta({ visibility: Public }),
+        darkStyle: z.url().describe('Dark map style URL').meta({ visibility: Public }),
       })
       .meta({ id: 'AdminConfigMapDto' }),
     reverseGeocoding: z
@@ -311,7 +335,8 @@ const AdminConfigSchemaWithVisibility = z
         accountManagementUrl: emptyOrUrl('Account management URL must be an empty string or a valid URL')
           .describe('Account management URL')
           .optional()
-          .default(''),
+          .default('')
+          .meta({ visibility: User }),
         scope: z.string().describe('Scope'),
         prompt: z.string().describe('OAuth prompt parameter (e.g. select_account, login, consent)'),
         endSessionEndpoint: emptyOrUrl('endSessionEndpoint must be an empty string or a valid URL').describe(
@@ -342,6 +367,29 @@ const AdminConfigSchemaWithVisibility = z
         return value;
       })
       .meta({ id: 'AdminConfigOAuthDto' }),
+    passkey: z
+      .object({
+        enabled: configBool.describe('Enabled').meta({ visibility: Public }),
+        domain: httpsDomain('Passkey domain').nullable().describe('Passkey domain'),
+        additionalDomains: z
+          .array(httpsDomain('Additional domain'))
+          .refine(
+            (domains) => domains.length === new Set(domains.map((domain) => new URL(domain).origin)).size,
+            'Duplicate domain',
+          )
+          .describe('Additional domains'),
+      })
+      .superRefine((value, ctx) => {
+        const origin = value.domain && new URL(value.domain).origin;
+        if (origin && value.additionalDomains.some((domain) => new URL(domain).origin === origin)) {
+          ctx.addIssue({
+            code: 'custom',
+            message: 'The passkey domain is always allowed and must not be listed as an additional domain',
+            input: value.additionalDomains,
+          });
+        }
+      })
+      .meta({ id: 'AdminConfigPasskeyDto' }),
     passwordLogin: z
       .object({ enabled: configBool.describe('Enabled').meta({ visibility: Public }) })
       .meta({ id: 'AdminConfigPasswordLoginDto' }),
@@ -393,9 +441,7 @@ const AdminConfigSchemaWithVisibility = z
         days: z.int().min(0).describe('Days').meta({ visibility: User }),
       })
       .meta({ id: 'AdminConfigTrashDto' }),
-    theme: z
-      .object({ customCss: z.string().describe('Custom CSS for theming').meta({ visibility: Public }) })
-      .meta({ id: 'AdminConfigThemeDto' }),
+    theme: z.object({ customCss: z.string().describe('Custom CSS for theming') }).meta({ id: 'AdminConfigThemeDto' }),
     library: z
       .object({
         scan: z
@@ -493,10 +539,20 @@ const applyVisibilityRecursive = (
       shape[key] = visible;
     }
   }
+  // Public, environment-only fields are not stored in the admin config. Extend the fresh root shape
+  // here: extending a named Zod schema later retains its old root $defs identity in OpenAPI.
+  if (visibility === Public && schema === AdminConfigSchemaWithVisibility) {
+    Object.assign(shape, GalleryPublicConfigExtension);
+  }
 
   let visible: z.ZodType | undefined;
   if (Object.keys(shape).length > 0) {
-    visible = z.object(shape).meta({
+    const isComplete = Object.keys(shape).length === Object.keys(object.shape).length;
+    const rebuilt =
+      schema instanceof z.ZodPipe && isComplete
+        ? z.object(shape).pipe(schema.def.out as z.ZodTransform<unknown, Record<string, unknown>>)
+        : z.object(shape);
+    visible = rebuilt.meta({
       ...(id && { id: `${visibility}${id.slice(Admin.length)}` }),
       ...((override ?? description) && { description: override ?? description }),
     });
@@ -525,9 +581,11 @@ const stripVisibilityMetadata = <T extends z.ZodType>(schema: T): T => {
   return schema;
 };
 
-const AdminConfigSchema = applyVisibility(Admin)! as z.ZodType<SystemConfig>;
+const AdminConfigSchema = AdminConfigSchemaWithVisibility;
 const UserConfigSchema = applyVisibility(User)! as z.ZodType<DeepPartial<SystemConfig>>;
-const PublicConfigSchema = applyVisibility(Public)! as z.ZodType<DeepPartial<SystemConfig>>;
+const PublicConfigSchema = applyVisibility(Public)! as z.ZodType<
+  DeepPartial<SystemConfig> & { webDeleteToastThreshold: number }
+>;
 
 // prevent visibility metadata from leaking to openapi spec
 // eslint-disable-next-line unicorn/no-top-level-side-effects
@@ -564,16 +622,18 @@ export function mapUserConfig(config: SystemConfig): UserConfigDto {
   return UserConfigSchema.parse(config);
 }
 
-export function mapPublicConfig(config: SystemConfig): PublicConfigDto {
-  return PublicConfigSchema.parse(config);
+export function mapPublicConfig(config: SystemConfig, webDeleteToastThreshold = 20): PublicConfigDto {
+  return PublicConfigSchema.parse({ ...config, webDeleteToastThreshold });
 }
 
 export const defaults = Object.freeze<SystemConfig>({
   backup: {
+    beta: false,
     database: {
       enabled: true,
       cronExpression: CronExpression.EVERY_DAY_AT_2AM,
       keepLastAmount: 14,
+      ...galleryBackupDatabaseDefaults,
     },
   },
   ffmpeg: {
@@ -603,6 +663,7 @@ export const defaults = Object.freeze<SystemConfig>({
       videoCodecs: [VideoCodec.H264, VideoCodec.Hevc],
       resolutions: [HlsVideoResolution.p480, HlsVideoResolution.p720, HlsVideoResolution.p1080],
     },
+    dataSaver: galleryDataSaverVideoDefaults,
   },
   integrityChecks: {
     missingFiles: {
@@ -657,6 +718,7 @@ export const defaults = Object.freeze<SystemConfig>({
     },
     petDetection: galleryMachineLearningDefaults.petDetection,
     petRecognition: galleryMachineLearningDefaults.petRecognition,
+    spatialScene: galleryMachineLearningDefaults.spatialScene,
     duplicateDetection: {
       enabled: true,
       maxDistance: 0.01,
@@ -667,7 +729,7 @@ export const defaults = Object.freeze<SystemConfig>({
       minScore: 0.7,
       maxDistance: 0.5,
       minFaces: 3,
-      suggestions: galleryMachineLearningDefaults.faceSuggestions,
+      ...galleryFacialRecognitionDefaults,
     },
     ocr: {
       enabled: true,
@@ -713,6 +775,11 @@ export const defaults = Object.freeze<SystemConfig>({
     tokenEndpointAuthMethod: OAuthTokenEndpointAuthMethod.ClientSecretPost,
     timeout: 30_000,
     allowInsecureRequests: false,
+  },
+  passkey: {
+    enabled: false,
+    domain: null,
+    additionalDomains: [],
   },
   passwordLogin: {
     enabled: true,

@@ -2,10 +2,11 @@ name: Gallery Rebase Smoke
 
 on:
   workflow_dispatch:
-    # Disabled for personal-use CI; keep the file for easy re-enable.
+    # Automatic runs disabled for this standalone private fork.
 
 jobs:
   rebase-smoke:
+    if: ${{ github.repository == 'open-noodle/gallery' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:

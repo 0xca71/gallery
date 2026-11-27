@@ -1,61 +1,71 @@
-import { fireEvent, render } from '@testing-library/svelte';
-import { timelineAssetFactory } from '@test-data/factories/asset-factory';
+import { factory } from '#test/unit/factories.ts';
+import type { ComponentProps } from 'svelte';
+import { render } from 'vitest-browser-svelte';
 import AssetViewerFilmstrip from './AssetViewerFilmstrip.svelte';
 
-vi.mock('$lib/components/assets/thumbnail/Thumbnail.svelte', async () => {
-  const { default: MockThumbnail } = await import('@test-data/mocks/filmstrip-thumbnail.stub.svelte');
+vi.mock('#lib/components/assets/thumbnail/Thumbnail.svelte', async () => {
+  const { default: MockThumbnail } = await import('#test/unit/mocks/FilmstripThumbnail.svelte');
   return { default: MockThumbnail };
 });
 
+const renderStrip = async (props: ComponentProps<typeof AssetViewerFilmstrip>) => {
+  const screen = await render(AssetViewerFilmstrip, props);
+  return {
+    ...screen,
+    getByRole: (role: 'listbox' | 'option') => screen.getByRole(role).element(),
+    getAllByRole: (role: 'option') => screen.getByRole(role).elements(),
+    getByTestId: (id: string) => screen.getByTestId(id).element(),
+  };
+};
+
 describe('AssetViewerFilmstrip', () => {
-  it('renders the current asset and adjacent thumbnails', () => {
-    const assets = timelineAssetFactory.buildList(3);
-    const { getByRole, getByTestId, getAllByRole } = render(AssetViewerFilmstrip, {
+  it('renders the current asset and adjacent thumbnails', async () => {
+    const assets = Array.from({ length: 3 }, () => factory.asset());
+    const { getByRole, getByTestId, getAllByRole } = await renderStrip({
       assets,
       currentAssetId: assets[1].id,
       onAssetSelect: vi.fn(),
     });
 
-    expect(getByRole('listbox')).toBeInTheDocument();
-    expect(getByTestId(`filmstrip-thumbnail-${assets[0].id}`)).toBeInTheDocument();
-    expect(getByTestId(`filmstrip-thumbnail-${assets[1].id}`)).toBeInTheDocument();
+    await expect.element(getByRole('listbox')).toBeInTheDocument();
+    await expect.element(getByTestId(`filmstrip-thumbnail-${assets[0].id}`)).toBeInTheDocument();
+    await expect.element(getByTestId(`filmstrip-thumbnail-${assets[1].id}`)).toBeInTheDocument();
     expect(getAllByRole('option')).toHaveLength(3);
-    expect(getAllByRole('option')[1]).toHaveAttribute('aria-selected', 'true');
-    expect(getAllByRole('option')[1]).toHaveClass('relative', 'size-14', 'overflow-hidden');
-    expect(getAllByRole('option')[1]).not.toHaveStyle('content-visibility: auto');
+    await expect.element(getAllByRole('option')[1]).toHaveAttribute('aria-selected', 'true');
+    await expect.element(getAllByRole('option')[1]).toHaveClass('relative', 'size-14', 'overflow-hidden');
   });
 
-  it('preloads a bounded window around the current asset', () => {
-    const assets = timelineAssetFactory.buildList(30);
-    const { getByTestId } = render(AssetViewerFilmstrip, {
+  it('preloads a bounded window around the current asset', async () => {
+    const assets = Array.from({ length: 30 }, () => factory.asset());
+    const { getByTestId } = await renderStrip({
       assets,
       currentAssetId: assets[15].id,
       onAssetSelect: vi.fn(),
     });
 
-    expect(getByTestId(`filmstrip-thumbnail-${assets[3].id}`)).toHaveAttribute('data-preload', 'true');
-    expect(getByTestId(`filmstrip-thumbnail-${assets[2].id}`)).toHaveAttribute('data-preload', 'false');
-    expect(getByTestId(`filmstrip-thumbnail-${assets[15].id}`)).toHaveAttribute('data-preload', 'true');
+    await expect.element(getByTestId(`filmstrip-thumbnail-${assets[3].id}`)).toHaveAttribute('data-preload', 'true');
+    await expect.element(getByTestId(`filmstrip-thumbnail-${assets[2].id}`)).toHaveAttribute('data-preload', 'false');
+    await expect.element(getByTestId(`filmstrip-thumbnail-${assets[15].id}`)).toHaveAttribute('data-preload', 'true');
   });
 
   it('selects a thumbnail when it is tapped', async () => {
-    const assets = timelineAssetFactory.buildList(2);
+    const assets = Array.from({ length: 2 }, () => factory.asset());
     const onAssetSelect = vi.fn();
-    const { getByTestId } = render(AssetViewerFilmstrip, {
+    const { getByTestId } = await renderStrip({
       assets,
       currentAssetId: assets[0].id,
       onAssetSelect,
     });
 
-    await fireEvent.click(getByTestId(`filmstrip-thumbnail-${assets[1].id}`));
+    getByTestId(`filmstrip-thumbnail-${assets[1].id}`).dispatchEvent(new MouseEvent('click', { bubbles: true }));
 
     expect(onAssetSelect).toHaveBeenCalledWith(assets[1]);
   });
 
   it('waits for scrolling to settle before selecting the centered asset', async () => {
-    const assets = timelineAssetFactory.buildList(3);
+    const assets = Array.from({ length: 3 }, () => factory.asset());
     const onAssetSelect = vi.fn();
-    const { getByRole, getAllByRole } = render(AssetViewerFilmstrip, {
+    const { getByRole, getAllByRole } = await renderStrip({
       assets,
       currentAssetId: assets[0].id,
       onAssetSelect,
@@ -79,8 +89,8 @@ describe('AssetViewerFilmstrip', () => {
     vi.spyOn(options[1]!, 'getBoundingClientRect').mockReturnValue({ left: 72, width: 56 } as DOMRect);
     vi.spyOn(options[2]!, 'getBoundingClientRect').mockReturnValue({ left: 244, width: 56 } as DOMRect);
 
-    await fireEvent.pointerDown(scroller);
-    await fireEvent.scroll(scroller);
+    scroller.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+    scroller.dispatchEvent(new Event('scroll'));
     expect(onAssetSelect).not.toHaveBeenCalled();
 
     scroller.dispatchEvent(new Event('scrollend'));
@@ -88,9 +98,9 @@ describe('AssetViewerFilmstrip', () => {
   });
 
   it('does not recenter after scrolling and updating the current asset', async () => {
-    const assets = timelineAssetFactory.buildList(3);
+    const assets = Array.from({ length: 3 }, () => factory.asset());
     const onAssetSelect = vi.fn();
-    const { getByRole, getAllByRole, rerender } = render(AssetViewerFilmstrip, {
+    const { getByRole, getAllByRole, rerender } = await renderStrip({
       assets,
       currentAssetId: assets[0].id,
       onAssetSelect,
@@ -104,25 +114,25 @@ describe('AssetViewerFilmstrip', () => {
     vi.spyOn(options[2]!, 'getBoundingClientRect').mockReturnValue({ left: 132, width: 56 } as DOMRect);
     const recenter = vi.spyOn(options[1]!, 'scrollIntoView');
 
-    await fireEvent.pointerDown(scroller);
-    await fireEvent.scroll(scroller);
+    scroller.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+    scroller.dispatchEvent(new Event('scroll'));
     scroller.dispatchEvent(new Event('scrollend'));
     await rerender({ assets, currentAssetId: assets[1].id, onAssetSelect });
 
     expect(onAssetSelect).toHaveBeenCalledExactlyOnceWith(assets[1]);
     expect(recenter).not.toHaveBeenCalled();
 
-    await fireEvent.pointerDown(scroller);
-    await fireEvent.scroll(scroller);
+    scroller.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+    scroller.dispatchEvent(new Event('scroll'));
     scroller.dispatchEvent(new Event('scrollend'));
     expect(recenter).not.toHaveBeenCalled();
     expect(onAssetSelect).toHaveBeenCalledTimes(1);
   });
 
   it('positions a refreshed timeline window immediately without smooth scrolling', async () => {
-    const assets = timelineAssetFactory.buildList(4);
+    const assets = Array.from({ length: 4 }, () => factory.asset());
     const onAssetSelect = vi.fn();
-    const { getByRole, getAllByRole, rerender } = render(AssetViewerFilmstrip, {
+    const { getByRole, getAllByRole, rerender } = await renderStrip({
       assets: assets.slice(0, 3),
       currentAssetId: assets[1].id,
       onAssetSelect,
@@ -145,9 +155,9 @@ describe('AssetViewerFilmstrip', () => {
   });
 
   it('keeps the settled target while the main asset update is still pending', async () => {
-    const assets = timelineAssetFactory.buildList(3);
+    const assets = Array.from({ length: 3 }, () => factory.asset());
     const onAssetSelect = vi.fn();
-    const { getByRole, getAllByRole, rerender } = render(AssetViewerFilmstrip, {
+    const { getByRole, getAllByRole, rerender } = await renderStrip({
       assets,
       currentAssetId: assets[0].id,
       onAssetSelect,
@@ -162,14 +172,14 @@ describe('AssetViewerFilmstrip', () => {
     vi.spyOn(options[2]!, 'getBoundingClientRect').mockReturnValue({ left: 244, width: 56 } as DOMRect);
     const recenterOldAsset = vi.spyOn(options[0]!, 'scrollIntoView');
 
-    await fireEvent.pointerDown(scroller);
-    await fireEvent.scroll(scroller);
+    scroller.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+    scroller.dispatchEvent(new Event('scroll'));
     scroller.dispatchEvent(new Event('scrollend'));
     expect(onAssetSelect).toHaveBeenCalledExactlyOnceWith(assets[1]);
 
     await rerender({ assets: [...assets], currentAssetId: assets[0].id, onAssetSelect });
 
     expect(recenterOldAsset).not.toHaveBeenCalled();
-    expect(getAllByRole('option')[1]).toHaveAttribute('aria-selected', 'true');
+    await expect.element(getAllByRole('option')[1]).toHaveAttribute('aria-selected', 'true');
   });
 });

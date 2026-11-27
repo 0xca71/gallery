@@ -19,6 +19,12 @@ describe(TimelineController.name, () => {
   });
 
   describe('GET /timeline/buckets', () => {
+    it('tells browsers to revalidate before reusing a cached copy', async () => {
+      service.getTimeBuckets.mockResolvedValue([]);
+      const { headers } = await request(ctx.getHttpServer()).get('/timeline/buckets');
+      expect(headers['cache-control']).toBe('private, no-cache');
+    });
+
     it('should parse bbox query string into an object', async () => {
       const { status } = await request(ctx.getHttpServer())
         .get('/timeline/buckets')
@@ -73,6 +79,14 @@ describe(TimelineController.name, () => {
   });
 
   describe('GET /timeline/bucket', () => {
+    it('tells browsers to revalidate before reusing a cached copy', async () => {
+      service.getTimeBucket.mockResolvedValue('{}');
+      const { headers } = await request(ctx.getHttpServer())
+        .get('/timeline/bucket')
+        .query({ timeBucket: '2026-03-01' });
+      expect(headers['cache-control']).toBe('private, no-cache');
+    });
+
     it('should be an authenticated route', async () => {
       await request(ctx.getHttpServer()).get('/timeline/bucket?timeBucket=1900-01-01');
       expect(ctx.authenticate).toHaveBeenCalled();
@@ -108,37 +122,6 @@ describe(TimelineController.name, () => {
       const { status, body } = await request(ctx.getHttpServer()).get('/timeline/bucket').query({ timeBucket: 'foo' });
       expect(status).toBe(400);
       expect(body).toEqual(errorDto.badRequest('Invalid time bucket format'));
-    });
-  });
-
-  describe('GET /timeline/bucket-covers', () => {
-    it('should be an authenticated route', async () => {
-      await request(ctx.getHttpServer()).get('/timeline/bucket-covers');
-      expect(ctx.authenticate).toHaveBeenCalled();
-    });
-
-    it('passes timeBuckets array to the service', async () => {
-      const { status } = await request(ctx.getHttpServer())
-        .get('/timeline/bucket-covers')
-        .query({ timeBuckets: ['2024-01-01', '2024-02-01'] });
-
-      expect(status).toBe(200);
-      expect(service.getTimeBucketCovers).toHaveBeenCalledWith(
-        undefined,
-        expect.objectContaining({ timeBuckets: ['2024-01-01', '2024-02-01'] }),
-      );
-    });
-
-    it('wraps a single timeBuckets value in an array', async () => {
-      const { status } = await request(ctx.getHttpServer())
-        .get('/timeline/bucket-covers')
-        .query({ timeBuckets: '2024-01-01' });
-
-      expect(status).toBe(200);
-      expect(service.getTimeBucketCovers).toHaveBeenCalledWith(
-        undefined,
-        expect.objectContaining({ timeBuckets: ['2024-01-01'] }),
-      );
     });
   });
 });

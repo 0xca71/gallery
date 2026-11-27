@@ -1,12 +1,12 @@
 import { BadRequestException } from '@nestjs/common';
 import { Stats } from 'node:fs';
 import { vitest } from 'vitest';
-import type { ILibraryBulkIdsJob, ILibraryFileJob } from 'src/types.js';
 import { JOBS_LIBRARY_PAGINATION_SIZE } from 'src/constants.js';
 import { SystemConfig, defaults } from 'src/dtos/config.dto.js';
 import { mapLibrary } from 'src/dtos/library.dto.js';
 import { AssetType, CronJob, ImmichWorker, JobName, JobStatus } from 'src/enum.js';
 import { LibraryService } from 'src/services/library.service.js';
+import type { ILibraryBulkIdsJob, ILibraryFileJob } from 'src/types.js';
 import { AssetFactory } from 'test/factories/asset.factory.js';
 import { authStub } from 'test/fixtures/auth.stub.js';
 import { systemConfigStub } from 'test/fixtures/system-config.stub.js';
@@ -300,31 +300,42 @@ describe(LibraryService.name, () => {
   });
 
   describe('handleQueueSyncAssets', () => {
-    it('should call the offline check', async () => {
-      const library = factory.library();
+    it('should offline assets outside the import paths or covered by an exclusion pattern', async () => {
+      const library = factory.library({ importPaths: ['/import/'], exclusionPatterns: ['**/raw/**'] });
+      const asset = AssetFactory.create({ libraryId: library.id, originalPath: '/import/photo.jpg' });
 
       mocks.library.get.mockResolvedValue(library);
-      mocks.storage.walk.mockImplementation(async function* generator() {});
+      mocks.asset.getLibraryAssetCount.mockResolvedValue(3);
+      mocks.asset.detectOfflineExternalAssets.mockResolvedValue(2);
+      mocks.library.streamAssetIds.mockReturnValue(makeStream([asset]));
+
+      await expect(sut.handleQueueSyncAssets({ id: library.id })).resolves.toBe(JobStatus.Success);
+
+      expect(mocks.asset.detectOfflineExternalAssets).toHaveBeenCalledWith(library.id, expect.any(Function));
+      const [, isInLibrary] = mocks.asset.detectOfflineExternalAssets.mock.calls[0];
+      expect(isInLibrary('/import/photo.jpg')).toBe(true);
+      expect(isInLibrary('/elsewhere/photo.jpg')).toBe(false);
+      expect(isInLibrary('/import/RAW/photo.jpg')).toBe(false);
+    });
+
+    it('should not queue asset sync when every asset was offlined', async () => {
+      const library = factory.library({ importPaths: ['/import/'] });
+
+      mocks.library.get.mockResolvedValue(library);
       mocks.asset.getLibraryAssetCount.mockResolvedValue(1);
-      mocks.asset.detectOfflineExternalAssets.mockResolvedValue({ numUpdatedRows: 1n });
+      mocks.asset.detectOfflineExternalAssets.mockResolvedValue(1);
 
-      const response = await sut.handleQueueSyncAssets({ id: library.id });
+      await expect(sut.handleQueueSyncAssets({ id: library.id })).resolves.toBe(JobStatus.Success);
 
-      expect(response).toBe(JobStatus.Success);
-      expect(mocks.asset.detectOfflineExternalAssets).toHaveBeenCalledWith(
-        library.id,
-        library.importPaths,
-        library.exclusionPatterns,
-      );
+      expect(mocks.library.streamAssetIds).not.toHaveBeenCalled();
+      expect(mocks.job.queue).not.toHaveBeenCalled();
     });
 
     it('should skip an empty library', async () => {
       const library = factory.library();
 
       mocks.library.get.mockResolvedValue(library);
-      mocks.storage.walk.mockImplementation(async function* generator() {});
       mocks.asset.getLibraryAssetCount.mockResolvedValue(0);
-      mocks.asset.detectOfflineExternalAssets.mockResolvedValue({ numUpdatedRows: 1n });
 
       const response = await sut.handleQueueSyncAssets({ id: library.id });
 
@@ -337,10 +348,9 @@ describe(LibraryService.name, () => {
       const asset = AssetFactory.create({ libraryId: library.id, isExternal: true });
 
       mocks.library.get.mockResolvedValue(library);
-      mocks.storage.walk.mockImplementation(async function* generator() {});
+      mocks.asset.detectOfflineExternalAssets.mockResolvedValue(0);
       mocks.library.streamAssetIds.mockReturnValue(makeStream([asset]));
       mocks.asset.getLibraryAssetCount.mockResolvedValue(1);
-      mocks.asset.detectOfflineExternalAssets.mockResolvedValue({ numUpdatedRows: 0n });
 
       const response = await sut.handleQueueSyncAssets({ id: library.id });
 
@@ -357,11 +367,6 @@ describe(LibraryService.name, () => {
       });
 
       expect(response).toBe(JobStatus.Success);
-      expect(mocks.asset.detectOfflineExternalAssets).toHaveBeenCalledWith(
-        library.id,
-        library.importPaths,
-        library.exclusionPatterns,
-      );
     });
 
     it('should batch assets into chunks when exceeding pagination size', async () => {
@@ -374,7 +379,7 @@ describe(LibraryService.name, () => {
       mocks.library.get.mockResolvedValue(library);
       mocks.library.streamAssetIds.mockReturnValue(makeStream(assets));
       mocks.asset.getLibraryAssetCount.mockResolvedValue(assets.length);
-      mocks.asset.detectOfflineExternalAssets.mockResolvedValue({ numUpdatedRows: 0n });
+      mocks.asset.detectOfflineExternalAssets.mockResolvedValue(0);
 
       const response = await sut.handleQueueSyncAssets({ id: library.id });
 
@@ -542,6 +547,7 @@ describe(LibraryService.name, () => {
       await expect(sut.handleSyncAssets(mockAssetJob)).resolves.toBe(JobStatus.Success);
 
       expect(mocks.asset.updateAll).not.toHaveBeenCalled();
+      expect(mocks.job.queueAll).not.toHaveBeenCalled();
     });
 
     it('should not touch fileCreatedAt when un-trashing an asset previously marked as offline', async () => {
@@ -605,7 +611,6 @@ describe(LibraryService.name, () => {
         mtime: new Date('2023-01-01'),
         ctime: new Date('2023-01-01'),
       } as Stats);
-      mocks.sharedSpace.getSpacesLinkedToLibrary.mockResolvedValue([]);
     });
 
     it('should import a new asset', async () => {
@@ -664,214 +669,35 @@ describe(LibraryService.name, () => {
     });
 
     describe('space face matching', () => {
-      it('should queue face match jobs for spaces linked to the library', async () => {
+      it('should emit LibraryAssetsCreate with the imported asset ids', async () => {
         const libraryId = newUuid();
-        const spaceId = newUuid();
         const library = factory.library({ id: libraryId });
         const assetId = newUuid();
 
         mocks.library.get.mockResolvedValue(library);
         mocks.asset.createAll.mockResolvedValue([assetId]);
-        mocks.sharedSpace.getSpacesLinkedToLibrary.mockResolvedValue([
-          {
-            spaceId,
-            libraryId,
-            addedById: null,
-            createdAt: newDate(),
-            updatedAt: newDate(),
-            createId: newUuid(),
-            updateId: newUuid(),
-            faceRecognitionEnabled: true,
-          },
-        ]);
 
         await sut.handleSyncFiles({ libraryId, paths: ['/photos/test.jpg'], progressCounter: 1, totalAssets: 1 });
 
-        expect(mocks.job.queue).toHaveBeenCalledWith({
-          name: JobName.SharedSpaceFaceMatch,
-          data: { spaceId, assetId },
-        });
-      });
-
-      it('should queue sidecar refresh and targeted space face match for imported linked-library assets', async () => {
-        const libraryId = newUuid();
-        const spaceId = newUuid();
-        const library = factory.library({ id: libraryId });
-        const assetId = newUuid();
-
-        mocks.library.get.mockResolvedValue(library);
-        mocks.asset.createAll.mockResolvedValue([assetId]);
-        mocks.sharedSpace.getSpacesLinkedToLibrary.mockResolvedValue([
-          {
-            spaceId,
-            libraryId,
-            addedById: null,
-            createdAt: newDate(),
-            updatedAt: newDate(),
-            createId: newUuid(),
-            updateId: newUuid(),
-            faceRecognitionEnabled: true,
-          },
-        ]);
-
-        await sut.handleSyncFiles({ libraryId, paths: ['/photos/test.jpg'], progressCounter: 1, totalAssets: 1 });
-
+        expect(mocks.event.emit).toHaveBeenCalledWith('LibraryAssetsCreate', { libraryId, assetIds: [assetId] });
         expect(mocks.job.queueAll).toHaveBeenCalledTimes(1);
         expect(mocks.job.queueAll).toHaveBeenCalledWith([
           { name: JobName.SidecarCheck, data: { id: assetId, source: 'upload' } },
         ]);
-        expect(mocks.job.queue).toHaveBeenCalledTimes(1);
-        expect(mocks.job.queue).toHaveBeenCalledWith({
-          name: JobName.SharedSpaceFaceMatch,
-          data: { spaceId, assetId },
-        });
-        expect(mocks.job.queue).not.toHaveBeenCalledWith(
-          expect.objectContaining({ name: JobName.SharedSpaceFaceMatchAll }),
-        );
       });
 
-      it('should queue jobs for multiple spaces if library is linked to more than one', async () => {
+      it('should queue no face jobs when linked library import has no new assets', async () => {
         const libraryId = newUuid();
-        const space1 = newUuid();
-        const space2 = newUuid();
-        const library = factory.library({ id: libraryId });
-        const assetId = newUuid();
-
-        mocks.library.get.mockResolvedValue(library);
-        mocks.asset.createAll.mockResolvedValue([assetId]);
-        mocks.sharedSpace.getSpacesLinkedToLibrary.mockResolvedValue([
-          {
-            spaceId: space1,
-            libraryId,
-            addedById: null,
-            createdAt: newDate(),
-            updatedAt: newDate(),
-            createId: newUuid(),
-            updateId: newUuid(),
-            faceRecognitionEnabled: true,
-          },
-          {
-            spaceId: space2,
-            libraryId,
-            addedById: null,
-            createdAt: newDate(),
-            updatedAt: newDate(),
-            createId: newUuid(),
-            updateId: newUuid(),
-            faceRecognitionEnabled: true,
-          },
-        ]);
-
-        await sut.handleSyncFiles({ libraryId, paths: ['/photos/test.jpg'], progressCounter: 1, totalAssets: 1 });
-
-        expect(mocks.job.queue).toHaveBeenCalledWith({
-          name: JobName.SharedSpaceFaceMatch,
-          data: { spaceId: space1, assetId },
-        });
-        expect(mocks.job.queue).toHaveBeenCalledWith({
-          name: JobName.SharedSpaceFaceMatch,
-          data: { spaceId: space2, assetId },
-        });
-      });
-
-      it('should not queue face match jobs when library is not linked to any space', async () => {
-        const libraryId = newUuid();
-        const library = factory.library({ id: libraryId });
-        const assetId = newUuid();
-
-        mocks.library.get.mockResolvedValue(library);
-        mocks.asset.createAll.mockResolvedValue([assetId]);
-        mocks.sharedSpace.getSpacesLinkedToLibrary.mockResolvedValue([]);
-
-        await sut.handleSyncFiles({ libraryId, paths: ['/photos/test.jpg'], progressCounter: 1, totalAssets: 1 });
-
-        expect(mocks.job.queueAll).toHaveBeenCalledTimes(1);
-        expect(mocks.job.queueAll).toHaveBeenCalledWith([
-          { name: JobName.SidecarCheck, data: { id: assetId, source: 'upload' } },
-        ]);
-        expect(mocks.job.queue).not.toHaveBeenCalled();
-      });
-
-      it('should not queue face match jobs when linked space has face recognition disabled', async () => {
-        const libraryId = newUuid();
-        const library = factory.library({ id: libraryId });
-        const assetId = newUuid();
-
-        mocks.library.get.mockResolvedValue(library);
-        mocks.asset.createAll.mockResolvedValue([assetId]);
-        mocks.sharedSpace.getSpacesLinkedToLibrary.mockResolvedValue([
-          {
-            spaceId: newUuid(),
-            libraryId,
-            addedById: null,
-            createdAt: newDate(),
-            updatedAt: newDate(),
-            createId: newUuid(),
-            updateId: newUuid(),
-            faceRecognitionEnabled: false,
-          },
-        ]);
-
-        await sut.handleSyncFiles({ libraryId, paths: ['/photos/test.jpg'], progressCounter: 1, totalAssets: 1 });
-
-        expect(mocks.job.queueAll).toHaveBeenCalledTimes(1);
-        expect(mocks.job.queueAll).toHaveBeenCalledWith([
-          { name: JobName.SidecarCheck, data: { id: assetId, source: 'upload' } },
-        ]);
-        expect(mocks.job.queue).not.toHaveBeenCalled();
-      });
-
-      it('should not queue face match jobs when linked library import has no new assets', async () => {
-        const libraryId = newUuid();
-        const spaceId = newUuid();
         const library = factory.library({ id: libraryId });
 
         mocks.library.get.mockResolvedValue(library);
         mocks.asset.createAll.mockResolvedValue([]);
-        mocks.sharedSpace.getSpacesLinkedToLibrary.mockResolvedValue([
-          {
-            spaceId,
-            libraryId,
-            addedById: null,
-            createdAt: newDate(),
-            updatedAt: newDate(),
-            createId: newUuid(),
-            updateId: newUuid(),
-            faceRecognitionEnabled: true,
-          },
-        ]);
 
         await sut.handleSyncFiles({ libraryId, paths: ['/photos/test.jpg'], progressCounter: 1, totalAssets: 1 });
 
-        expect(mocks.job.queue).not.toHaveBeenCalledWith(
-          expect.objectContaining({ name: JobName.SharedSpaceFaceMatch }),
-        );
-        expect(mocks.job.queue).not.toHaveBeenCalledWith(
-          expect.objectContaining({ name: JobName.SharedSpaceFaceMatchAll }),
-        );
-        expect(mocks.job.queue).not.toHaveBeenCalledWith(
-          expect.objectContaining({ name: JobName.AssetDetectFacesQueueAll }),
-        );
-        expect(mocks.job.queue).not.toHaveBeenCalledWith(
-          expect.objectContaining({ name: JobName.FacialRecognitionQueueAll }),
-        );
-        expect(mocks.job.queue).not.toHaveBeenCalledWith(
-          expect.objectContaining({ name: JobName.FaceIdentityBackfill }),
-        );
+        expect(mocks.job.queue).not.toHaveBeenCalled();
         expect(mocks.job.queueAll).not.toHaveBeenCalledWith(
           expect.arrayContaining([expect.objectContaining({ name: JobName.SidecarCheck })]),
-        );
-        expect(mocks.job.queueAll).not.toHaveBeenCalledWith(
-          expect.arrayContaining([expect.objectContaining({ name: JobName.SharedSpaceFaceMatchAll })]),
-        );
-        expect(mocks.job.queueAll).not.toHaveBeenCalledWith(
-          expect.arrayContaining([expect.objectContaining({ name: JobName.AssetDetectFacesQueueAll })]),
-        );
-        expect(mocks.job.queueAll).not.toHaveBeenCalledWith(
-          expect.arrayContaining([expect.objectContaining({ name: JobName.FacialRecognitionQueueAll })]),
-        );
-        expect(mocks.job.queueAll).not.toHaveBeenCalledWith(
-          expect.arrayContaining([expect.objectContaining({ name: JobName.FaceIdentityBackfill })]),
         );
       });
     });
@@ -888,6 +714,7 @@ describe(LibraryService.name, () => {
 
       expect(mocks.job.queue).toHaveBeenCalledWith({ name: JobName.LibraryDelete, data: { id: library.id } });
       expect(mocks.library.softDelete).toHaveBeenCalledWith(library.id);
+      expect(mocks.event.emit).toHaveBeenCalledWith('LibraryDelete');
     });
 
     it('should allow an external library to be deleted', async () => {
@@ -1002,6 +829,7 @@ describe(LibraryService.name, () => {
             exclusionPatterns: expect.any(Array),
           }),
         );
+        expect(mocks.event.emit).toHaveBeenCalledWith('LibraryCreate');
       });
 
       it('should create with name', async () => {
@@ -1169,6 +997,7 @@ describe(LibraryService.name, () => {
         'library-id',
         expect.objectContaining({ importPaths: [`${cwd}/foo/bar`] }),
       );
+      expect(mocks.event.emit).toHaveBeenCalledWith('LibraryUpdate');
     });
   });
 
@@ -1218,6 +1047,24 @@ describe(LibraryService.name, () => {
         await sut.watchAll();
 
         expect(mocks.storage.watch).toHaveBeenCalledWith(library.importPaths, expect.anything(), expect.anything());
+      });
+
+      it('should exclude paths from the watcher', async () => {
+        const library = factory.library({
+          importPaths: ['/foo', '/bar'],
+          exclusionPatterns: ['**/excluded/**'],
+        });
+
+        mocks.library.get.mockResolvedValue(library);
+        mocks.library.getAll.mockResolvedValue([library]);
+
+        await sut.watchAll();
+
+        expect(mocks.storage.watch).toHaveBeenCalledWith(
+          library.importPaths,
+          expect.objectContaining({ ignored: library.exclusionPatterns }),
+          expect.anything(),
+        );
       });
 
       it('should watch and unwatch library', async () => {

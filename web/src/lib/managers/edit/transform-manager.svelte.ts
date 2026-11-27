@@ -1,12 +1,11 @@
+import type { EditActions, EditToolManager } from '#lib/managers/edit/edit-manager.svelte.ts';
+import { getAssetMediaUrl } from '#lib/utils.ts';
+import { getDimensions } from '#lib/utils/asset-utils.ts';
+import { normalizeTransformEdits } from '#lib/utils/editor.ts';
+import type { CropRegion } from '#lib/utils/zoom-geometry.ts';
 import { AssetEditAction, AssetMediaSize, MirrorAxis, type AssetResponseDto, type CropParameters } from '@immich/sdk';
 import { clamp } from 'lodash-es';
 import { tick } from 'svelte';
-import { type EditActions, type EditToolManager } from '$lib/managers/edit/edit-manager.svelte';
-import { getAssetMediaUrl } from '$lib/utils';
-import { getDimensions } from '$lib/utils/asset-utils';
-import { normalizeTransformEdits } from '$lib/utils/editor';
-import { handleError } from '$lib/utils/handle-error';
-import type { CropRegion } from '$lib/utils/zoom-geometry';
 
 type Region = {
   x: number;
@@ -45,7 +44,10 @@ class TransformManager implements EditToolManager {
 
   isInteracting = $state(false);
   isDragging = $state(false);
-  animationFrame = $state<ReturnType<typeof requestAnimationFrame> | null>(null);
+  animationFrame = $state<number | null>(null);
+  #imageController: AbortController | undefined;
+  #onMouseMove = (event: MouseEvent) => this.handleMouseMove(event);
+  #onMouseUp = () => this.handleMouseUp();
   dragAnchor = $state({ x: 0, y: 0 });
   marqueeStart = $state({ x: 0, y: 0 });
   hasMarqueeMoved = $state(false);
@@ -204,8 +206,11 @@ class TransformManager implements EditToolManager {
   }
 
   async onActivate(asset: AssetResponseDto, edits: EditActions): Promise<void> {
-    const originalSize = getDimensions(asset.exifInfo!);
-    this.originalImageSize = { width: originalSize.width ?? 0, height: originalSize.height ?? 0 };
+    const originalSize = asset.exifInfo ? getDimensions(asset.exifInfo) : { width: asset.width, height: asset.height };
+    this.originalImageSize = {
+      width: originalSize.width ?? asset.width ?? 0,
+      height: originalSize.height ?? asset.height ?? 0,
+    };
 
     this.imgElement = new Image();
     this.imgElement.crossOrigin = 'anonymous';
@@ -217,13 +222,18 @@ class TransformManager implements EditToolManager {
       size: AssetMediaSize.Preview,
     });
 
-    this.imgElement.src = imageURL;
-    this.imgElement.addEventListener('load', () => transformManager.onImageLoad(edits), { passive: true });
-    this.imgElement.addEventListener('error', (error) => handleError(error, 'ErrorLoadingImage'), {
-      passive: true,
+    this.#imageController?.abort();
+    const controller = new AbortController();
+    this.#imageController = controller;
+    const { signal } = controller;
+    const image = this.imgElement;
+    const imageReady = new Promise<void>((resolve, reject) => {
+      image.addEventListener('load', () => resolve(), { once: true, signal });
+      image.addEventListener('error', () => reject(new Error('ErrorLoadingImage')), { once: true, signal });
+      signal.addEventListener('abort', () => reject(new Error('ImageLoadingCancelled')), { once: true });
     });
-
-    addEventListener('mousemove', (e: MouseEvent) => transformManager.handleMouseMove(e), { passive: true });
+    image.src = imageURL;
+    addEventListener('mousemove', this.#onMouseMove, { passive: true, signal });
 
     const transformEdits = edits.filter((e) => e.action === 'rotate' || e.action === 'mirror');
 
@@ -236,8 +246,9 @@ class TransformManager implements EditToolManager {
     this.mirrorHorizontal = normalizedTransformation.mirrorHorizontal;
     this.mirrorVertical = normalizedTransformation.mirrorVertical;
 
+    await imageReady;
     await tick();
-
+    this.onImageLoad(edits);
     this.resizeCanvas();
   }
 
@@ -246,7 +257,10 @@ class TransformManager implements EditToolManager {
   }
 
   onDeactivate() {
-    removeEventListener('mousemove', transformManager.handleMouseMove);
+    this.#imageController?.abort();
+    this.#imageController = undefined;
+    removeEventListener('mouseup', this.#onMouseUp);
+    if (this.animationFrame !== null) cancelAnimationFrame(this.animationFrame);
 
     this.reset();
   }
@@ -358,11 +372,11 @@ class TransformManager implements EditToolManager {
       this.draw(from);
 
       if (progress < 1) {
-        requestAnimationFrame(animate);
+        this.animationFrame = requestAnimationFrame(animate);
       }
     };
 
-    requestAnimationFrame(animate);
+    this.animationFrame = requestAnimationFrame(animate);
   }
 
   keepAspectRatio(newWidth: number, newHeight: number, aspectRatio: string = this.cropAspectRatio) {
@@ -644,7 +658,7 @@ class TransformManager implements EditToolManager {
     }
 
     document.body.style.userSelect = 'none';
-    addEventListener('mouseup', () => this.handleMouseUp(), { passive: true });
+    addEventListener('mouseup', this.#onMouseUp, { passive: true });
   }
 
   handleMouseMove(e: MouseEvent) {
@@ -664,7 +678,7 @@ class TransformManager implements EditToolManager {
   }
 
   handleMouseUp() {
-    removeEventListener('mouseup', this.handleMouseUp);
+    removeEventListener('mouseup', this.#onMouseUp);
     document.body.style.userSelect = '';
 
     this.isInteracting = false;

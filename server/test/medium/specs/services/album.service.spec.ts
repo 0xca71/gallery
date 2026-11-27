@@ -1,4 +1,5 @@
 import { Kysely } from 'kysely';
+import { SpaceAlbumRepository } from 'src/gallery/repositories/space-album.repository.js';
 import { AccessRepository } from 'src/repositories/access.repository.js';
 import { AlbumRepository } from 'src/repositories/album.repository.js';
 import { AssetRepository } from 'src/repositories/asset.repository.js';
@@ -12,10 +13,11 @@ import { getKyselyDB } from 'test/utils.js';
 
 let defaultDatabase: Kysely<DB>;
 
+// eslint-disable-next-line unicorn/no-unnecessary-parameters
 const setup = (db?: Kysely<DB>) => {
   return newMediumService(AlbumService, {
     database: db || defaultDatabase,
-    real: [AccessRepository, AlbumRepository, AssetRepository, UserRepository],
+    real: [SpaceAlbumRepository, AccessRepository, AlbumRepository, AssetRepository, UserRepository],
     mock: [LoggingRepository],
   });
 };

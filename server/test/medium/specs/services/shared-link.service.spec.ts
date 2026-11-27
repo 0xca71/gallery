@@ -1,7 +1,9 @@
 import { Kysely } from 'kysely';
 import { randomBytes } from 'node:crypto';
-import { SharedLinkType } from 'src/enum.js';
+import { AlbumUserRole, SharedLinkType } from 'src/enum.js';
+import { SpaceAlbumRepository } from 'src/gallery/repositories/space-album.repository.js';
 import { AccessRepository } from 'src/repositories/access.repository.js';
+import { AlbumRepository } from 'src/repositories/album.repository.js';
 import { DatabaseRepository } from 'src/repositories/database.repository.js';
 import { LoggingRepository } from 'src/repositories/logging.repository.js';
 import { SharedLinkAssetRepository } from 'src/repositories/shared-link-asset.repository.js';
@@ -15,10 +17,18 @@ import { getKyselyDB } from 'test/utils.js';
 
 let defaultDatabase: Kysely<DB>;
 
+// eslint-disable-next-line unicorn/no-unnecessary-parameters
 const setup = (db?: Kysely<DB>) => {
   return newMediumService(SharedLinkService, {
     database: db || defaultDatabase,
-    real: [AccessRepository, DatabaseRepository, SharedLinkRepository, SharedLinkAssetRepository],
+    real: [
+      AccessRepository,
+      AlbumRepository,
+      DatabaseRepository,
+      SharedLinkRepository,
+      SharedLinkAssetRepository,
+      SpaceAlbumRepository,
+    ],
     mock: [LoggingRepository, StorageRepository],
   });
 };
@@ -57,8 +67,8 @@ describe(SharedLinkService.name, () => {
 
       await expect(sut.get(auth, sharedLink.id)).resolves.toMatchObject({
         album: expect.objectContaining({
-          startDate: '2020-01-01T00:00:00+00:00',
-          endDate: '2022-01-01T00:00:00+00:00',
+          startDate: '2020-01-01T00:00:00.000Z',
+          endDate: '2022-01-01T00:00:00.000Z',
         }),
       });
     });
@@ -92,6 +102,33 @@ describe(SharedLinkService.name, () => {
 
     await expect(sut.getMine({ user, sharedLink }, [])).resolves.toMatchObject({
       assets: assets.map(({ asset }) => expect.objectContaining({ id: asset.id })),
+    });
+  });
+
+  // #763 slice 1b — mapSharedLink calls mapAsset with NO auth at all (see shared-link.dto.ts), so
+  // `isFavorite` must stay `false` for an anonymous visitor even when the link owner has favorited
+  // the asset. This is the exact regression this slice exists to prevent (see slice 1b plan
+  // "Why this is its own slice").
+  it('never exposes isFavorite to an anonymous shared-link visitor, even when the owner favorited the asset (#763)', async () => {
+    const { sut, ctx } = setup();
+
+    const { user } = await ctx.newUser();
+    const { asset } = await ctx.newAsset({ ownerId: user.id });
+    await ctx.newExif({ assetId: asset.id, make: 'Canon' });
+    await ctx.database.insertInto('asset_favorite').values({ userId: user.id, assetId: asset.id }).execute();
+
+    const sharedLinkRepo = ctx.get(SharedLinkRepository);
+    const sharedLink = await sharedLinkRepo.create({
+      key: randomBytes(16),
+      id: factory.uuid(),
+      userId: user.id,
+      allowUpload: false,
+      type: SharedLinkType.Individual,
+      assetIds: [asset.id],
+    });
+
+    await expect(sut.getMine({ user, sharedLink }, [])).resolves.toMatchObject({
+      assets: [expect.objectContaining({ id: asset.id, isFavorite: false })],
     });
   });
 
@@ -236,12 +273,14 @@ describe(SharedLinkService.name, () => {
       expect(result[0].id).toBe(link1.id);
     });
 
-    it('should return album shared links with album data', async () => {
+    it('should return album shared links with album data and (only) the owner', async () => {
       const { sut, ctx } = setup();
       const { user } = await ctx.newUser();
+      const { user: albumContributor } = await ctx.newUser();
       const auth = factory.auth({ user });
 
       const { album } = await ctx.newAlbum({ ownerId: user.id });
+      await ctx.newAlbumUser({ albumId: album.id, userId: albumContributor.id, role: AlbumUserRole.Editor });
 
       const sharedLinkRepo = ctx.get(SharedLinkRepository);
 
@@ -258,6 +297,9 @@ describe(SharedLinkService.name, () => {
       expect(result).toHaveLength(1);
       expect(result[0].album).toBeDefined();
       expect(result[0].album!.id).toBe(album.id);
+      expect(result[0].album!.albumUsers.length).toBe(1);
+      expect(result[0].album!.albumUsers[0].role).toBe(AlbumUserRole.Owner);
+      expect(result[0].album!.albumUsers[0].user.id).toBe(user.id);
     });
 
     it('should return multiple album shared links without sql error from json group by', async () => {

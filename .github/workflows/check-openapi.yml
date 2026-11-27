@@ -33,12 +33,42 @@ jobs:
           sparse-checkout-cone-mode: false
           persist-credentials: false
 
+      - name: Select reviewed contract transition
+        id: compatibility
+        run: |
+          base_sha=$(git -C .openapi-base rev-parse HEAD)
+          if [ "$base_sha" = "1c46717072304506da0efb36fe038fc173387845" ]; then
+            echo 'err_ignore=open-api/compatibility/gallery-2026-11-upgrade.txt' >> "$GITHUB_OUTPUT"
+            echo 'Using exact findings reviewed for the Gallery 2026-11 contract upgrade; custom changes remain checked against the pinned official contract.'
+          fi
+
+      - name: Checkout reviewed official contract
+        if: steps.compatibility.outputs.err_ignore != ''
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: 94f05b13f3cd3adcb0663c273c192fea898b79d8
+          path: .openapi-official
+          sparse-checkout: open-api/immich-openapi-specs.json
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Check custom changes against reviewed official contract
+        if: steps.compatibility.outputs.err_ignore != ''
+        uses: oasdiff/oasdiff-action/breaking@9ce3a29eb0e6478dd0140932a678c7fb59d08f22 # v0.1.20
+        with:
+          base: .openapi-official/open-api/immich-openapi-specs.json
+          revision: open-api/immich-openapi-specs.json
+          err-ignore: ${{ steps.compatibility.outputs.err_ignore }}
+          fail-on: ERR
+          review: false
+
       - name: Check for breaking API changes
-        uses: oasdiff/oasdiff-action/breaking@9c0494cfee8b8fcc9fb383ed2d5d3fbdae169b93 # v0.1.15
+        uses: oasdiff/oasdiff-action/breaking@9ce3a29eb0e6478dd0140932a678c7fb59d08f22 # v0.1.20
         with:
           base: .openapi-base/open-api/immich-openapi-specs.json
           revision: open-api/immich-openapi-specs.json
           fail-on: ERR
+          err-ignore: ${{ steps.compatibility.outputs.err_ignore }}
           review: false
 
   check-mobile-patches:
@@ -61,7 +91,7 @@ jobs:
           persist-credentials: false
 
       - name: Setup Mise
-        uses: immich-app/devtools/actions/use-mise@06a9ef925332c91be647d6256642b86b398592c8 # use-mise-action-v3.2.1
+        uses: immich-app/devtools/actions/use-mise@caac7f7e4298458a14238959504f411fc6cc7f06 # use-mise-action-v3.2.3
         with:
           github_token: ${{ github.token }}
           working_directory: ./mobile

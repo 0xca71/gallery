@@ -1,12 +1,19 @@
-import { addAssets, updateSpace, UserAvatarColor } from '@immich/sdk';
+import { eventManager } from '#lib/managers/event-manager.svelte.ts';
+import { handleError } from '#lib/utils/handle-error.ts';
+import { UserAvatarColor, addAssets, updateSpace } from '@immich/sdk';
 import { toastManager } from '@immich/ui';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { goto } from '$app/navigation';
-import { eventManager } from '$lib/managers/event-manager.svelte';
-import * as handleErrorModule from '$lib/utils/handle-error';
 import { addAssetsToSpace, updateSpaceDetails } from './space.service';
 
-vi.mock('$app/navigation', () => ({ goto: vi.fn().mockResolvedValue(undefined) }));
+// Browser mode rejects an import of a name a mock does not export, so keep the global fake's other exports.
+vi.mock('$app/navigation', async () => ({
+  ...(await import('#test/unit/mocks/app-navigation.ts')),
+  goto: vi.fn().mockResolvedValue(undefined),
+}));
+
+// An ES module namespace cannot be spied on in the browser; spy on the module's exports instead.
+vi.mock(import('#lib/utils/handle-error.ts'), { spy: true });
 
 vi.mock('@immich/ui', async (orig) => {
   const actual = await orig<typeof import('@immich/ui')>();
@@ -22,19 +29,18 @@ vi.mock('@immich/sdk', async (orig) => ({
   updateSpace: vi.fn().mockResolvedValue(undefined),
 }));
 
-let handleErrorSpy: ReturnType<typeof vi.spyOn>;
+const handleErrorSpy = vi.mocked(handleError);
 let emitSpy: ReturnType<typeof vi.spyOn>;
 
 beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(addAssets).mockResolvedValue(undefined as never);
   vi.mocked(updateSpace).mockResolvedValue(undefined as never);
-  handleErrorSpy = vi.spyOn(handleErrorModule, 'handleError').mockImplementation(() => {});
+  handleErrorSpy.mockImplementation(() => {});
   emitSpy = vi.spyOn(eventManager, 'emit');
 });
 
 afterEach(() => {
-  handleErrorSpy.mockRestore();
   emitSpy.mockRestore();
 });
 
@@ -107,6 +113,7 @@ describe('updateSpaceDetails', () => {
     await expect(updateSpaceDetails('space-1', dto)).resolves.toBe(true);
 
     expect(updateSpace).toHaveBeenCalledWith({ id: 'space-1', sharedSpaceUpdateDto: dto });
+    expect(emitSpy).toHaveBeenCalledWith('SpaceUpdate', { spaceId: 'space-1' });
     expect(toastManager.primary).toHaveBeenCalledOnce();
   });
 
@@ -126,6 +133,7 @@ describe('updateSpaceDetails', () => {
     await expect(updateSpaceDetails('space-1', dto)).resolves.toBe(false);
 
     expect(handleErrorSpy).toHaveBeenCalledWith(error, expect.any(String));
+    expect(emitSpy).not.toHaveBeenCalledWith('SpaceUpdate', expect.anything());
     expect(toastManager.primary).not.toHaveBeenCalled();
   });
 });

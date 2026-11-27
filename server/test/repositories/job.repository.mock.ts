@@ -1,6 +1,6 @@
 import { Mocked, vitest } from 'vitest';
-import type { RepositoryInterface } from 'src/types.js';
 import { JobRepository } from 'src/repositories/job.repository.js';
+import type { RepositoryInterface } from 'src/types.js';
 
 export const newJobRepositoryMock = (): Mocked<RepositoryInterface<JobRepository>> => {
   return {
@@ -19,14 +19,7 @@ export const newJobRepositoryMock = (): Mocked<RepositoryInterface<JobRepository
     isActive: vitest.fn(),
     isPaused: vitest.fn(),
     getJobCounts: vitest.fn(),
-    getJobCountsWithRepair: vitest.fn(),
-    hasInFlightDedupChain: vitest.fn().mockResolvedValue(false),
-    getJobTypes: vitest.fn().mockResolvedValue([]),
-    getTelemetryMetrics: vitest.fn(),
     clear: vitest.fn(),
-    reconcileOrphanedActiveJobs: vitest.fn().mockImplementation(() => Promise.resolve()),
-    removeOrphanedActiveJobs: vitest.fn().mockImplementation(() => Promise.resolve([])),
-    removeFailedJobsByJobIdPrefix: vitest.fn().mockResolvedValue(0),
     waitForQueueCompletion: vitest.fn(),
     removeJob: vitest.fn(),
   };

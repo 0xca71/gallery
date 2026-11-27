@@ -1,11 +1,11 @@
 import { createZodDto } from 'nestjs-zod';
 import z from 'zod';
-import type { AnyMemoryData, MemoryDataOf } from 'src/types.js';
 import { Memory } from 'src/database.js';
 import { HistoryBuilder } from 'src/decorators.js';
 import { AssetResponseSchema, mapAsset } from 'src/dtos/asset-response.dto.js';
 import { AuthDto } from 'src/dtos/auth.dto.js';
 import { AssetOrderWithRandomSchema, MemoryType, MemoryTypeSchema } from 'src/enum.js';
+import type { AnyMemoryData, MemoryDataOf } from 'src/types.js';
 import { isoDateToDate, isoDatetimeToDate, nonEmptyPartial, stringToBool } from 'src/validation.js';
 
 const MemorySearchSchema = z
@@ -67,6 +67,18 @@ const MemoryCreateSchema = z
   .refine(({ data, type }) => type !== MemoryType.OnThisDay || OnThisDaySchema.safeParse(data).success, {
     error: 'Invalid input: expected number, received undefined',
     path: ['data', 'year'],
+  })
+  // immich-30831: a birthday memory must name its person. Same issues as upstream's
+  // superRefine so its controller spec passes verbatim; the fork keeps `data` free-form.
+  .superRefine((dto, ctx) => {
+    if (dto.type !== MemoryType.Birthday) {
+      return;
+    }
+    for (const key of ['personId', 'personName'] as const) {
+      if (dto.data[key] === undefined) {
+        ctx.addIssue({ code: 'custom', path: ['data', key], message: `Required for ${MemoryType.Birthday} memories` });
+      }
+    }
   })
   .meta({ id: 'MemoryCreateDto' });
 

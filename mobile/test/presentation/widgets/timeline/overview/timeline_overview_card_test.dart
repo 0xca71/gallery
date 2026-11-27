@@ -52,9 +52,14 @@ void main() {
     MediaQueryData? mediaQuery,
     ThemeData? theme,
   }) {
+    // The card formats dates with resolvedDateTimeLocale(), which reads Intl.defaultLocale; the app
+    // sets that from the active locale (main.dart), so do the same here.
+    final previousDefaultLocale = Intl.defaultLocale;
+    Intl.defaultLocale = locale.toLanguageTag();
+    addTearDown(() => Intl.defaultLocale = previousDefaultLocale);
     return EasyLocalization(
       supportedLocales: supportedLocales,
-      path: '../i18n',
+      path: '../i18n/gallery/merged',
       fallbackLocale: const Locale('en'),
       startLocale: locale,
       child: MaterialApp(

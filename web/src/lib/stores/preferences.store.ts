@@ -1,13 +1,13 @@
+import { defaultLang } from '#lib/constants.ts';
+import { convertBCP47, getPreferredLocale } from '#lib/utils/i18n.ts';
 import { persisted } from 'svelte-persisted-store';
-import { browser } from '$app/environment';
-import { defaultLang } from '$lib/constants';
-import { convertBCP47, getPreferredLocale } from '$lib/utils/i18n';
+import { browser } from '$app/env';
 
 // Locale to use for formatting dates, numbers, etc.
 export const locale = persisted('locale', 'default', {
   serializer: {
     parse: (text) => convertBCP47(text) || 'default',
-    stringify: (object) => object ?? '',
+    stringify: (object = '') => object,
   },
 });
 
@@ -15,7 +15,7 @@ const preferredLocale = browser ? getPreferredLocale() : undefined;
 export const lang = persisted<string>('lang', preferredLocale || defaultLang.code, {
   serializer: {
     parse: (text) => convertBCP47(text),
-    stringify: (object) => object ?? '',
+    stringify: (object = '') => object,
   },
 });
 
@@ -50,9 +50,6 @@ const persistedObject = <T>(key: string, defaults: T) =>
   });
 
 export const mapSettings = persistedObject<MapSettings>('map-settings', defaultMapSettings);
-
-export const videoViewerVolume = persisted<number>('video-viewer-volume', 1, {});
-export const videoViewerMuted = persisted<boolean>('video-viewer-muted', false, {});
 
 export interface AlbumViewSettings {
   view: string;
@@ -116,28 +113,6 @@ export const albumViewSettings = persisted<AlbumViewSettings>('album-view-settin
   collapsedGroups: {},
 });
 
-export enum PeopleSortBy {
-  PhotoCount = 'photoCount',
-  Name = 'name',
-}
-
-export enum PeopleFilterBy {
-  All = 'All',
-  People = 'People',
-  Pets = 'Pets',
-}
-
-export interface PeopleViewSettings {
-  sortBy: PeopleSortBy;
-  /** People-page type filter. Persisted alongside sortBy; older stored objects have no value. */
-  filterBy?: PeopleFilterBy;
-}
-
-export const peopleViewSettings = persistedObject<PeopleViewSettings>('people-view-settings', {
-  sortBy: PeopleSortBy.PhotoCount,
-  filterBy: PeopleFilterBy.All,
-});
-
 export enum PlacesGroupBy {
   None = 'None',
   Country = 'Country',
@@ -160,32 +135,6 @@ export const autoPlayVideo = persisted<boolean>('auto-play-video', true, {});
 
 export const alwaysLoadOriginalVideo = persisted<boolean>('always-load-original-video', false, {});
 
-/**
- * Whether the asset-viewer Info panel crops each person's avatar out of the photo on screen
- * (`true`, the long-standing behaviour) or shows their profile face instead (`false`).
- *
- * Defaults to `true` so nothing changes visually on upgrade. The setting is deliberately inert
- * for a viewer with no reachable profile face — see resolvePersonAvatar in $lib/utils/person-avatar.
- */
-export const cropFacesFromAsset = persisted<boolean>('crop-faces-from-asset', true, {});
-
 export const recentAlbumsDropdown = persisted<boolean>('recent-albums-open', true, {});
-export const recentSpacesDropdown = persisted<boolean>('recent-spaces-open', true, {});
 
-export const recentSpaceAlbumsExpanded = persisted<Record<string, boolean>>('recent-space-albums-open', {}, {});
-
-export const isSpaceAlbumsExpanded = (state: Record<string, boolean>, spaceId: string): boolean => state[spaceId];
-
-export const setSpaceAlbumsExpanded = (spaceId: string, expanded: boolean, validSpaceIds: string[]): void => {
-  recentSpaceAlbumsExpanded.update((state) => {
-    const valid = new Set(validSpaceIds);
-    const next: Record<string, boolean> = {};
-    for (const [id, value] of Object.entries(state)) {
-      if (valid.has(id)) {
-        next[id] = value;
-      }
-    }
-    next[spaceId] = expanded;
-    return next;
-  });
-};
+export const hideBackupsReminder = persisted<boolean>('hide-backups-reminder', false, {});

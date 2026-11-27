@@ -1,14 +1,7 @@
-import {
-  AssetOrder,
-  AssetTypeEnum,
-  AssetVisibility,
-  TimeBucketSize,
-  type FilterSuggestionsPersonDto,
-} from '@immich/sdk';
-import type { FilterState } from '$lib/components/filter-panel/filter-panel';
-import { applyTextFilters, buildFilterContext } from '$lib/components/filter-panel/filter-panel';
-import { createUrl } from '$lib/utils';
-import { handleRemoveFilter } from '$lib/utils/filter-remove';
+import { applyTextFilters, buildFilterContext, type FilterState } from '#lib/components/filter-panel/filter-panel.ts';
+import { handleRemoveFilter } from '#lib/utils/filter-remove.ts';
+import { getGlobalPersonThumbnailUrl, getSpacePersonThumbnailUrl } from '#lib/utils/global-person-route.ts';
+import { AssetOrder, AssetTypeEnum, AssetVisibility, type FilterSuggestionsPersonDto } from '@immich/sdk';
 
 export type PhotosPersonFilterReference = {
   id: string;
@@ -21,27 +14,33 @@ export type PhotosPersonFilterReference = {
 };
 
 /**
- * The `/photos` timeline query.
- *
- * `userId` is REQUIRED and always sent — it is the personal timeline's owner gate, and it is what
- * makes every other chip a NARROWING of my own timeline rather than a redefinition of its scope.
- *
- * The server only defaults `userId` to the caller when neither `albumId` nor `spaceId` is present
- * (`timeline.service.ts` `timeBucketChecks`); under an `albumId` it deliberately leaves the owner
- * scope unset, because for the ALBUM page album ACCESS *is* the scope — a viewer of a shared album
- * must see the owner's assets (medium test E22). `/photos` is the opposite surface, so it has to
- * state its scope itself: without `userId`, an album chip would collapse the personal timeline to
- * "everything in that album", and `?albumId=A&ownerId=<co-member>` would list a co-member's assets
- * — and the Favorites chip the album OWNER's favourites (`isFavorite` is the owner's flag) — on MY
- * timeline. The server query already ANDs the two gates; it just has to be told about both.
- */
+The `/photos` timeline query.
+
+`userId` is REQUIRED and always sent — it is the personal timeline's owner gate, and it is what
+makes every other chip a NARROWING of my own timeline rather than a redefinition of its scope.
+
+The server only defaults `userId` to the caller when neither `albumId` nor `spaceId` is present
+(`timeline.service.ts` `timeBucketChecks`); under an `albumId` it deliberately leaves the owner
+scope unset, because for the ALBUM page album ACCESS *is* the scope — a viewer of a shared album
+must see the owner's assets (medium test E22). `/photos` is the opposite surface, so it has to
+state its scope itself: without `userId`, an album chip would collapse the personal timeline to
+"everything in that album", and `?albumId=A&ownerId=<co-member>` would list a co-member's assets
+on MY timeline. The server query already ANDs the two gates; it just has to be told about both.
+
+(#763: the Favorites chip is no longer part of that hazard — a favourite is a per-user overlay
+row resolved for the CALLER, not the asset owner's flag, so it narrows to MY favourites whoever
+owns the asset.)
+*/
 export function buildPhotosTimelineOptions(filters: FilterState, userId: string): Record<string, unknown> {
-  const includeSharedTimelineAssets = filters.isFavorite === undefined;
   const base: Record<string, unknown> = {
     userId,
     visibility: AssetVisibility.Timeline,
     withStacked: true,
-    ...(includeSharedTimelineAssets && { withPartners: true, withSharedSpaces: true }),
+    // #763 slice 4: favorites no longer suppress cross-user scopes — the server guard is gone
+    // and the favorite predicate is per-user, so partner/space content stays in scope while
+    // filtering by favorite.
+    withPartners: true,
+    withSharedSpaces: true,
   };
 
   if (filters.personIds.length > 0) {
@@ -105,37 +104,16 @@ export function buildPhotosTimelineOptions(filters: FilterState, userId: string)
   return base;
 }
 
-/**
- * Bucket query backing the Photos temporal picker.
- *
- * The selected year/month is a narrowing predicate for the timeline, but it must not narrow the
- * picker itself. Otherwise selecting July leaves the picker with only July's bucket, so all other
- * month counts disappear and there is no enabled month to switch to. Keep an explicit custom date
- * range, which is independent of the year/month picker, and request month-sized buckets so every
- * month in the selected year has its baseline count.
- */
-export function buildPhotosPickerBucketOptions(filters: FilterState, userId: string): Record<string, unknown> {
-  return {
-    ...buildPhotosTimelineOptions({ ...filters, selectedYear: undefined, selectedMonth: undefined }, userId),
-    bucketSize: TimeBucketSize.Month,
-  };
-}
-
 export function getPhotosPersonFilterThumbnailUrl(
   person: Pick<FilterSuggestionsPersonDto, 'id' | 'primaryProfile'>,
+  spaceId?: string,
 ): string {
-  const profile = person.primaryProfile;
-
-  if (profile?.type === 'space-person' && profile.spaceId) {
-    return createUrl(`/shared-spaces/${profile.spaceId}/people/${profile.id}/thumbnail`);
+  // Inside a space, suggestion rows are that space's people, keyed by their own id.
+  if (spaceId) {
+    return getSpacePersonThumbnailUrl({ spaceId, id: person.id });
   }
 
-  if (profile?.type === 'user-person') {
-    return createUrl(`/people/${profile.id}/thumbnail`);
-  }
-
-  const userPersonId = person.id.startsWith('person:') ? person.id.slice('person:'.length) : person.id;
-  return createUrl(`/people/${userPersonId}/thumbnail`);
+  return getGlobalPersonThumbnailUrl({ id: person.id.replace(/^person:/, ''), primaryProfile: person.primaryProfile });
 }
 
 export function getPhotosPersonFilterId(person: PhotosPersonFilterReference): string {

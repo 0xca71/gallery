@@ -2,7 +2,11 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:immich_mobile/data/data_controller.dart';
 import 'package:immich_mobile/data/db/main/database.dart';
 import 'package:immich_mobile/data/store/activity.dart';
+import 'package:immich_mobile/data/store/ocr.dart';
+import 'package:immich_mobile/data/store/passkey.dart';
 import 'package:immich_mobile/data/store/person.dart';
+import 'package:immich_mobile/data/store/tag.dart';
+import 'package:immich_mobile/data/store/user_metadata.dart';
 import 'package:immich_mobile/services/api.service.dart';
 
 /// The [DataController] backing this container's store
@@ -36,4 +40,12 @@ abstract final class Store {
   static final people = PersonStore.instance;
 
   static final activity = ActivityStore.instance;
+
+  static final ocr = OcrStore.instance;
+
+  static final passkeys = PasskeyStore.instance;
+
+  static final tags = TagStore.instance;
+
+  static final userMetadata = UserMetadataStore.instance;
 }

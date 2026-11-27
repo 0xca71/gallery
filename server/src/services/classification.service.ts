@@ -1,13 +1,13 @@
 import { Injectable } from '@nestjs/common';
-import type { ArgOf } from 'src/repositories/event.repository.js';
-import type { JobOf } from 'src/types.js';
 import { OnEvent, OnJob } from 'src/decorators.js';
 import { AuthDto } from 'src/dtos/auth.dto.js';
 import { type SystemConfig } from 'src/dtos/config.dto.js';
 import { AssetVisibility, ImmichWorker, JobName, JobStatus, QueueName, SystemMetadataKey } from 'src/enum.js';
-import { type ClassificationFaceExclusion } from 'src/gallery/config.dto.js';
+import { type ClassificationFaceExclusion } from 'src/gallery/dtos/config.dto.js';
 import { type ClassificationFaceSummary } from 'src/repositories/classification.repository.js';
+import type { ArgOf } from 'src/repositories/event.repository.js';
 import { BaseService } from 'src/services/base.service.js';
+import type { JobOf } from 'src/types.js';
 import { isFacialRecognitionEnabled } from 'src/utils/misc.js';
 import { upsertTags } from 'src/utils/tag.js';
 
@@ -78,10 +78,12 @@ export class ClassificationService extends BaseService {
     this.embeddingCache.clear();
     this.pendingEncodes.clear();
 
-    if (classificationChanged) {
-      await this.reconcileAutoTags(oldConfig.classification, newConfig.classification);
-      await this.systemMetadataRepository.set(SystemMetadataKey.ClassificationConfigState, newConfig.classification);
+    if (!classificationChanged) {
+      return;
     }
+
+    await this.reconcileAutoTags(oldConfig.classification, newConfig.classification);
+    await this.systemMetadataRepository.set(SystemMetadataKey.ClassificationConfigState, newConfig.classification);
   }
 
   private async reconcileAutoTags(previous: ClassificationConfig, current: ClassificationConfig) {
@@ -96,13 +98,26 @@ export class ClassificationService extends BaseService {
         continue;
       }
 
-      if (currentCategory.similarity > previousCategory.similarity) {
-        this.logger.log(
-          `Classification category "${previousCategory.name}" similarity increased ` +
-            `(${previousCategory.similarity} → ${currentCategory.similarity}); clearing auto-tag assignments`,
-        );
-        await this.classificationRepository.removeAutoTagAssignments(previousCategory.name);
+      if (!(currentCategory.similarity > previousCategory.similarity)) {
+        continue;
       }
+
+      this.logger.log(
+        `Classification category "${previousCategory.name}" similarity increased ` +
+          `(${previousCategory.similarity} → ${currentCategory.similarity}); clearing auto-tag assignments`,
+      );
+      await this.classificationRepository.removeAutoTagAssignments(previousCategory.name);
+    }
+  }
+
+  // Chained off JobSuccess (not JobService.onDone) so upstream's follow-up list stays untouched.
+  @OnEvent({ name: 'JobSuccess' })
+  async onJobSuccess({ job, response }: ArgOf<'JobSuccess'>) {
+    if (response !== JobStatus.Success && response !== JobStatus.Skipped) {
+      return;
+    }
+    if (job.name === JobName.SmartSearch) {
+      await this.jobRepository.queue({ name: JobName.AssetClassify, data: { id: job.data.id } });
     }
   }
 
@@ -123,10 +138,12 @@ export class ClassificationService extends BaseService {
     let queue: Array<{ name: JobName.AssetClassify; data: { id: string } }> = [];
     for await (const asset of stream) {
       queue.push({ name: JobName.AssetClassify, data: { id: asset.id } });
-      if (queue.length >= 1000) {
-        await this.jobRepository.queueAll(queue);
-        queue = [];
+      if (!(queue.length >= 1000)) {
+        continue;
       }
+
+      await this.jobRepository.queueAll(queue);
+      queue = [];
     }
 
     await this.jobRepository.queueAll(queue);
@@ -135,6 +152,15 @@ export class ClassificationService extends BaseService {
 
   @OnJob({ name: JobName.AssetClassify, queue: QueueName.Classification })
   async handleClassify({ id }: { id: string }): Promise<JobStatus> {
+    return this.databaseRepository.withAssetLock(id, async () => {
+      if (await this.assetEditSaveRepository.isSaving(id, false)) {
+        return JobStatus.Skipped;
+      }
+      return this.handleClassifyUnlocked({ id });
+    });
+  }
+
+  private async handleClassifyUnlocked({ id }: { id: string }): Promise<JobStatus> {
     const asset = await this.assetRepository.getById(id);
     if (!asset) {
       return JobStatus.Failed;
@@ -176,6 +202,7 @@ export class ClassificationService extends BaseService {
         }
       }
 
+      // eslint-disable-next-line unicorn/prefer-continue
       if (bestSimilarity >= category.similarity) {
         const tags = await upsertTags(this.tagRepository, {
           userId: asset.ownerId,

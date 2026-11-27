@@ -16,29 +16,38 @@
 // touches it; each upstream call site shrinks to a single, stable helper call.
 //
 // See docs / data/sa-abstraction-spec-t8/report.md for the full design + slices.
-import { Expression, ExpressionBuilder, RawBuilder, ReferenceExpression, SqlBool, sql } from 'kysely';
+import {
+  Expression,
+  ExpressionBuilder,
+  RawBuilder,
+  ReferenceExpression,
+  SelectQueryBuilder,
+  SqlBool,
+  StringReference,
+  sql,
+} from 'kysely';
 import { AssetVisibility, SharedSpaceRole } from 'src/enum.js';
 import { DB } from 'src/schema/index.js';
 import { anyUuid, asUuid } from 'src/utils/database.js';
 
 /**
- * The canonical set of asset visibilities that are shareable through a space.
- * Hidden and Locked assets are never shareable; Archive and Timeline are.
- * This is the single source of truth — previously declared as three local
- * constants under two names across shared-space, face-identity, and person
- * repositories.
- */
+The canonical set of asset visibilities that are shareable through a space.
+Hidden and Locked assets are never shareable; Archive and Timeline are.
+This is the single source of truth — previously declared as three local
+constants under two names across shared-space, face-identity, and person
+repositories.
+*/
 export const spaceVisibleAssetVisibilities = [AssetVisibility.Archive, AssetVisibility.Timeline];
 
 /**
- * Returns an `eb.in` predicate restricting `column` to the two space-shareable
- * visibility values (`archive`, `timeline`).
- *
- * Default column presumes an `asset`-rooted/joined query; not usable on an
- * `asset`-less builder.
- *
- * Usage: `.where((eb) => spaceVisibilityGate(eb))`
- */
+Returns an `eb.in` predicate restricting `column` to the two space-shareable
+visibility values (`archive`, `timeline`).
+
+Default column presumes an `asset`-rooted/joined query; not usable on an
+`asset`-less builder.
+
+Usage: `.where((eb) => spaceVisibilityGate(eb))`
+*/
 export function spaceVisibilityGate(
   eb: ExpressionBuilder<DB, keyof DB>,
   column: ReferenceExpression<DB, keyof DB> = 'asset.visibility',
@@ -47,38 +56,44 @@ export function spaceVisibilityGate(
 }
 
 /**
- * How a space-scoped branch is bound to the space(s) it applies to. Mirrors the
- * exact predicates the hand-cloned branches used:
- *  - `{ spaceId }`      -> `shared_space_album.spaceId = <uuid>`        (literal)
- *  - `{ spaceIds }`     -> `shared_space_album.spaceId = any(<uuid[]>)` (timeline set)
- *  - `{ memberUserId }` -> inner-join `shared_space_member` on the user  (membership)
- *  - `{ spaceIdRef }`   -> `shared_space_album.spaceId = <outer column>` (correlated)
- *
- * `{ memberUserId }` additionally accepts an optional `memberRole` — when set, the membership
- * join also requires `shared_space_member.role IN (memberRole)` (e.g. restricting to Owner/Editor
- * for a write-capable scope). Omitting it preserves the original any-role membership check.
- */
+How a space-scoped branch is bound to the space(s) it applies to. Mirrors the
+exact predicates the hand-cloned branches used:
+ - `{ spaceId }`      -> `shared_space_album.spaceId = <uuid>`        (literal)
+ - `{ spaceIds }`     -> `shared_space_album.spaceId = any(<uuid[]>)` (timeline set)
+ - `{ memberUserId }` -> inner-join `shared_space_member` on the user  (membership)
+ - `{ spaceIdRef }`   -> `shared_space_album.spaceId = <outer column>` (correlated)
+
+`{ memberUserId }` additionally accepts an optional `memberRole` — when set, the membership
+join also requires `shared_space_member.role IN (memberRole)` (e.g. restricting to Owner/Editor
+for a write-capable scope). Omitting it preserves the original any-role membership check. It
+may also carry `spaceId` or `spaceIdRef` to narrow the membership to one space.
+*/
 export type SpaceScope =
   | { spaceId: string }
   | { spaceIds: string[] }
-  | { memberUserId: string; memberRole?: SharedSpaceRole[] }
+  | {
+      memberUserId: string;
+      memberRole?: SharedSpaceRole[];
+      spaceId?: string;
+      spaceIdRef?: ReferenceExpression<DB, keyof DB>;
+    }
   | { spaceIdRef: ReferenceExpression<DB, keyof DB> };
 
 /**
- * Which album-visibility gate a space-scoped query wants.
- *
- * Deliberately a REQUIRED union rather than an optional boolean: after #1041 there are three distinct
- * gates, and an optional flag would let a new call site silently inherit the wrong one — the class of
- * mistake a green `tsc` cannot catch on a re-key.
- *
- *  - 'space-tab' : shared_space_album.showInTimeline = true. Governs the SPACE's own Photos tab, which
- *                  is the same for every member. This is exactly the old `requireShowInTimeline: true`.
- *  - 'personal'  : NOT EXISTS a shared_space_album_hidden row for THIS viewer, this (space, album).
- *                  Governs a personal-timeline surface (the /photos timeline, folder view, memories) —
- *                  each member's own preference, never the shared flag. Requires `viewerId`.
- *  - 'none'      : no album gate at all (the album page itself, grant surfaces, sync streams). Exactly
- *                  the old absent/false.
- */
+Which album-visibility gate a space-scoped query wants.
+
+Deliberately a REQUIRED union rather than an optional boolean: after #1041 there are three distinct
+gates, and an optional flag would let a new call site silently inherit the wrong one — the class of
+mistake a green `tsc` cannot catch on a re-key.
+
+ - 'space-tab' : shared_space_album.showInTimeline = true. Governs the SPACE's own Photos tab, which
+                 is the same for every member. This is exactly the old `requireShowInTimeline: true`.
+ - 'personal'  : NOT EXISTS a shared_space_album_hidden row for THIS viewer, this (space, album).
+                 Governs a personal-timeline surface (the /photos timeline, folder view, memories) —
+                 each member's own preference, never the shared flag. Requires `viewerId`.
+ - 'none'      : no album gate at all (the album page itself, grant surfaces, sync streams). Exactly
+                 the old absent/false.
+*/
 export type AlbumTimelineGate = 'space-tab' | 'personal' | 'none';
 
 export interface SpaceAlbumAssetOptions {
@@ -88,27 +103,27 @@ export interface SpaceAlbumAssetOptions {
   /** Which album-visibility gate this query wants. See {@link AlbumTimelineGate}. */
   albumTimelineGate: AlbumTimelineGate;
   /**
-   * The A1 invariant: require `album.deletedAt IS NULL`. Default true. Passing
-   * false reproduces the pre-fix soft-delete hole at the four legacy sites and is
-   * ONLY used to keep Slices 1-14 behavior-preserving; Slice 15 removes those.
-   */
+  The A1 invariant: require `album.deletedAt IS NULL`. Default true. Passing
+  false reproduces the pre-fix soft-delete hole at the four legacy sites and is
+  ONLY used to keep Slices 1-14 behavior-preserving; Slice 15 removes those.
+  */
   requireAlbumNotDeleted?: boolean;
   /** Exclude a specific linked album (the "other album" self-exclusion at getAlbumAssetIdsWithoutOtherSpacePath). */
   excludeAlbumId?: string;
   /**
-   * The viewer whose personal hide preference gates this album arm. REQUIRED when
-   * `albumTimelineGate === 'personal'` — every other gate ignores it.
-   */
+  The viewer whose personal hide preference gates this album arm. REQUIRED when
+  `albumTimelineGate === 'personal'` — every other gate ignores it.
+  */
   viewerId?: string;
 }
 
 /**
- * Spaces a user can access — created OR a member. Relocated here (from
- * sync.repository.ts) so the whole "accessible*" scoping family lives in one
- * fork-owned module; sync.repository.ts re-exports it for its existing callers.
- *
- * Usage: `.where('shared_space.id', 'in', (eb) => accessibleSpaces(eb, userId))`
- */
+Spaces a user can access — created OR a member. Relocated here (from
+sync.repository.ts) so the whole "accessible*" scoping family lives in one
+fork-owned module; sync.repository.ts re-exports it for its existing callers.
+
+Usage: `.where('shared_space.id', 'in', (eb) => accessibleSpaces(eb, userId))`
+*/
 export function accessibleSpaces(eb: ExpressionBuilder<DB, keyof DB>, userId: string) {
   return eb
     .selectFrom('shared_space')
@@ -123,11 +138,11 @@ export function accessibleSpaces(eb: ExpressionBuilder<DB, keyof DB>, userId: st
 }
 
 /**
- * Album ids linked to spaces the user can access, excluding soft-deleted albums
- * (A1). Relocated from sync.repository.ts; re-exported from there.
- *
- * Usage: `.where('album.id', 'in', (eb) => accessibleSpaceAlbums(eb, userId))`
- */
+Album ids linked to spaces the user can access, excluding soft-deleted albums
+(A1). Relocated from sync.repository.ts; re-exported from there.
+
+Usage: `.where('album.id', 'in', (eb) => accessibleSpaceAlbums(eb, userId))`
+*/
 export function accessibleSpaceAlbums(eb: ExpressionBuilder<DB, keyof DB>, userId: string) {
   return eb
     .selectFrom('shared_space_album')
@@ -137,16 +152,26 @@ export function accessibleSpaceAlbums(eb: ExpressionBuilder<DB, keyof DB>, userI
     .where('shared_space_album.spaceId', 'in', (e) => accessibleSpaces(e, userId));
 }
 
+/** Album ids linked to one space, excluding soft-deleted albums. */
+export function spaceLinkedAlbumIds(eb: ExpressionBuilder<DB, keyof DB>, spaceId: string) {
+  return eb
+    .selectFrom('shared_space_album')
+    .innerJoin('album', 'album.id', 'shared_space_album.albumId')
+    .select('shared_space_album.albumId')
+    .where('shared_space_album.spaceId', '=', spaceId)
+    .where('album.deletedAt', 'is', null);
+}
+
 /**
- * The linked-album access path, as an `EXISTS (...)` predicate. Covers BOTH sources of a linked
- * album's contents: the album owner's own `album_asset` rows AND cross-owner `album_space_asset`
- * contributions (#764). Because both arms are unioned here, every consumer of the album arm
- * (timeline, search, map, view, memory, access, …) surfaces contributions with the exact same
- * membership / role / showInTimeline / not-deleted scoping it already applies — no per-site change.
- *
- * Negate with `eb.not(spaceAlbumAssetExists(...))` for anti-join / "no other space path" uses:
- * `NOT (albumAsset OR contributed)` correctly excludes both.
- */
+The linked-album access path, as an `EXISTS (...)` predicate. Covers BOTH sources of a linked
+album's contents: the album owner's own `album_asset` rows AND cross-owner `album_space_asset`
+contributions (#764). Because both arms are unioned here, every consumer of the album arm
+(timeline, search, map, view, memory, access, …) surfaces contributions with the exact same
+membership / role / showInTimeline / not-deleted scoping it already applies — no per-site change.
+
+Negate with `eb.not(spaceAlbumAssetExists(...))` for anti-join / "no other space path" uses:
+`NOT (albumAsset OR contributed)` correctly excludes both.
+*/
 export function spaceAlbumAssetExists(
   eb: ExpressionBuilder<DB, keyof DB>,
   options: SpaceAlbumAssetOptions,
@@ -155,14 +180,17 @@ export function spaceAlbumAssetExists(
 }
 
 /**
- * The 'personal' gate: NOT EXISTS a `shared_space_album_hidden` row for THIS viewer, keyed on the
- * `shared_space_album` row already in scope (`(spaceId, albumId)`). Correlated, not a pre-resolved id
- * list — this governs a single album arm for a single viewer, not the caller's-own-timeline
- * subtraction (see `hiddenFromOwnTimeline`, which IS list-based for the reasons in §6.5 of the design
- * doc). Requires `options.viewerId`; throws if missing rather than silently emitting `userId = NULL`
- * (always-false, i.e. an unconditionally-passing NOT EXISTS — a silent "show everything" bug).
- */
-function notHiddenByViewer(eb: ExpressionBuilder<DB, keyof DB>, options: SpaceAlbumAssetOptions): Expression<SqlBool> {
+The 'personal' gate: NOT EXISTS a `shared_space_album_hidden` row for THIS viewer, keyed on the
+`shared_space_album` row already in scope (`(spaceId, albumId)`). Correlated, not a pre-resolved id
+list — this governs a single album arm for a single viewer, not the caller's-own-timeline
+subtraction (see `hiddenFromOwnTimeline`, which IS list-based for the reasons in §6.5 of the design
+doc). Requires `options.viewerId`; throws if missing rather than silently emitting `userId = NULL`
+(always-false, i.e. an unconditionally-passing NOT EXISTS — a silent "show everything" bug).
+*/
+function notHiddenByViewer(
+  eb: ExpressionBuilder<DB, keyof DB>,
+  options: Pick<SpaceAlbumAssetOptions, 'viewerId'>,
+): Expression<SqlBool> {
   if (!options.viewerId) {
     throw new Error("spaceAlbumAssetExists: albumTimelineGate 'personal' requires viewerId");
   }
@@ -178,48 +206,124 @@ function notHiddenByViewer(eb: ExpressionBuilder<DB, keyof DB>, options: SpaceAl
   );
 }
 
-/** The `album_asset` arm — the album owner's own contents (unchanged pre-#764 behavior). */
+/** The `album_asset` arm: the album owner's own contents. */
 function linkedAlbumAssetExists(
   eb: ExpressionBuilder<DB, keyof DB>,
   options: SpaceAlbumAssetOptions,
 ): Expression<SqlBool> {
+  return eb.exists(spaceAlbumArm(eb, 'album_asset', options).select(eb.lit(1).as('exists')));
+}
+
+/**
+The `album_space_asset` arm: cross-owner contributions (#764). Same as the `album_asset` arm, except
+the join also correlates `album_space_asset.spaceId` to the link's space, so a contribution is only
+visible through the one space it was contributed to (a multi-space album never leaks it to members
+of another linked space). Exported for sites that want only the contributed arm.
+*/
+export function spaceContributedAssetExists(
+  eb: ExpressionBuilder<DB, keyof DB>,
+  options: SpaceAlbumAssetOptions,
+): Expression<SqlBool> {
+  return eb.exists(spaceAlbumArm(eb, 'album_space_asset', options).select(eb.lit(1).as('exists')));
+}
+
+/**
+Album membership as a row source `(albumId, assetId)`: the albums' own `album_asset` rows, plus the
+cross-owner `album_space_asset` contributions that are live in `contributedVia` (album still linked
+to the contribution's space, album not deleted, asset space-shareable). Without `contributedVia` it
+is `album_asset` alone. `albums` is a list of ids, a correlated reference such as `'album.id'`, or a
+subquery selecting `albumId` (keeps a whole-space read a row-source join instead of an asset scan).
+
+Unlike the EXISTS helpers, this hands out asset ids with no outer `asset` row to gate, so the
+contributed arm carries the space visibility gate itself. UNION dedupes an asset that is both an
+album row and a contribution.
+*/
+export function albumMembership(
+  eb: ExpressionBuilder<DB, keyof DB>,
+  albums: string[] | StringReference<DB, keyof DB> | SelectQueryBuilder<DB, keyof DB, { albumId: string }>,
+  contributedVia?: SpaceScope,
+) {
+  const inAlbums = <QB extends SelectQueryBuilder<DB, keyof DB, object>>(
+    qb: QB,
+    column: 'album_asset.albumId' | 'album_space_asset.albumId',
+  ): QB => {
+    if (Array.isArray(albums)) {
+      return qb.where(column, '=', anyUuid(albums)) as QB;
+    }
+    return (typeof albums === 'string' ? qb.whereRef(column, '=', albums) : qb.where(column, 'in', albums)) as QB;
+  };
+  const own = eb
+    .selectFrom('album_asset')
+    .select(['album_asset.albumId as albumId', 'album_asset.assetId as assetId'])
+    .$call((qb) => inAlbums(qb, 'album_asset.albumId'));
+  if (!contributedVia) {
+    return own;
+  }
+  return own.union(
+    spaceAlbumArm(eb, 'album_space_asset', { scope: contributedVia, albumTimelineGate: 'none' })
+      .innerJoin('asset', 'asset.id', 'album_space_asset.assetId')
+      .where((eb) => spaceVisibilityGate(eb))
+      .select(['album_space_asset.albumId as albumId', 'album_space_asset.assetId as assetId'])
+      .$call((qb) => inAlbums(qb, 'album_space_asset.albumId')),
+  );
+}
+
+/**
+One album arm of the linked-album path, rooted at `shared_space_album` and joined to `table`, with
+the scope, A1 (album not deleted), timeline gate and album exclusion applied. The caller selects;
+`correlateAssetId`, when set, ties the arm to an outer asset row.
+*/
+function spaceAlbumArm(
+  eb: ExpressionBuilder<DB, keyof DB>,
+  table: 'album_asset' | 'album_space_asset',
+  options: Omit<SpaceAlbumAssetOptions, 'correlateAssetId'> & {
+    correlateAssetId?: ReferenceExpression<DB, keyof DB>;
+  },
+) {
   const notDeleted = options.requireAlbumNotDeleted ?? true;
   const { scope } = options;
+  const memberUserId = 'memberUserId' in scope ? scope.memberUserId : undefined;
+  const memberRole = 'memberRole' in scope ? scope.memberRole : undefined;
+  const spaceId = 'spaceId' in scope ? scope.spaceId : undefined;
+  const spaceIds = 'spaceIds' in scope ? scope.spaceIds : undefined;
+  const spaceIdRef = 'spaceIdRef' in scope ? scope.spaceIdRef : undefined;
 
-  return eb.exists(
-    eb
-      .selectFrom('shared_space_album')
-      .innerJoin('album_asset', 'album_asset.albumId', 'shared_space_album.albumId')
-      // A1 invariant — the album must not be soft-deleted (unless explicitly opted out).
+  // Typed over every table (the outer scope is visible to correlated refs anyway) so one chain serves
+  // either arm; only the joined table is referenced below.
+  const root = (
+    table === 'album_asset'
+      ? eb
+          .selectFrom('shared_space_album')
+          .innerJoin('album_asset', 'album_asset.albumId', 'shared_space_album.albumId')
+      : eb
+          .selectFrom('shared_space_album')
+          .innerJoin('album_space_asset', (join) =>
+            join
+              .onRef('album_space_asset.albumId', '=', 'shared_space_album.albumId')
+              .onRef('album_space_asset.spaceId', '=', 'shared_space_album.spaceId'),
+          )
+  ) as SelectQueryBuilder<DB, keyof DB, object>;
+
+  return (
+    root
+      // A1 invariant: the album must not be soft-deleted (unless explicitly opted out). Aliased so a
+      // caller can correlate on its own outer `album` row.
       .$if(notDeleted, (qb) =>
-        qb.innerJoin('album', (join) =>
-          join.onRef('album.id', '=', 'shared_space_album.albumId').on('album.deletedAt', 'is', null),
+        qb.innerJoin('album as linked_album', (join) =>
+          join.onRef('linked_album.id', '=', 'shared_space_album.albumId').on('linked_album.deletedAt', 'is', null),
         ),
       )
       // Membership scope joins the member table inside the subquery.
-      .$if('memberUserId' in scope, (qb) =>
+      .$if(!!memberUserId, (qb) =>
         qb
           .innerJoin('shared_space_member', 'shared_space_member.spaceId', 'shared_space_album.spaceId')
-          .where('shared_space_member.userId', '=', asUuid((scope as { memberUserId: string }).memberUserId))
-          .$if(!!(scope as { memberRole?: SharedSpaceRole[] }).memberRole?.length, (qb2) =>
-            qb2.where('shared_space_member.role', 'in', (scope as { memberRole: SharedSpaceRole[] }).memberRole),
-          ),
+          .where('shared_space_member.userId', '=', asUuid(memberUserId!))
+          .$if(!!memberRole?.length, (qb2) => qb2.where('shared_space_member.role', 'in', memberRole!)),
       )
-      .select(eb.lit(1).as('exists'))
-      .whereRef('album_asset.assetId', '=', options.correlateAssetId)
-      .$if('spaceId' in scope, (qb) =>
-        qb.where('shared_space_album.spaceId', '=', asUuid((scope as { spaceId: string }).spaceId)),
-      )
-      .$if('spaceIds' in scope, (qb) =>
-        qb.where('shared_space_album.spaceId', '=', anyUuid((scope as { spaceIds: string[] }).spaceIds)),
-      )
-      .$if('spaceIdRef' in scope, (qb) =>
-        qb.whereRef(
-          'shared_space_album.spaceId',
-          '=',
-          (scope as { spaceIdRef: ReferenceExpression<DB, keyof DB> }).spaceIdRef,
-        ),
-      )
+      .$if(!!options.correlateAssetId, (qb) => qb.whereRef(`${table}.assetId`, '=', options.correlateAssetId!))
+      .$if(!!spaceId, (qb) => qb.where('shared_space_album.spaceId', '=', asUuid(spaceId!)))
+      .$if(!!spaceIds, (qb) => qb.where('shared_space_album.spaceId', '=', anyUuid(spaceIds!)))
+      .$if(!!spaceIdRef, (qb) => qb.whereRef('shared_space_album.spaceId', '=', spaceIdRef!))
       .$call((qb) => {
         // Exhaustive switch, not `=== 'space-tab'`: the readers were plain comparisons before
         // #1041 slice 8, and adding `'personal'` to the union then produced ZERO `tsc` errors
@@ -236,75 +340,7 @@ function linkedAlbumAssetExists(
           }
         }
       })
-      .$if(!!options.excludeAlbumId, (qb) => qb.where('shared_space_album.albumId', '!=', options.excludeAlbumId!)),
-  );
-}
-
-/**
- * The `album_space_asset` arm — cross-owner contributions (#764). Mirrors {@link linkedAlbumAssetExists}
- * exactly, except the join additionally correlates `album_space_asset.spaceId` to the link's space so
- * a contribution is only ever visible through the SINGLE space it was contributed to (a multi-space
- * album never leaks a contribution to members of a different linked space). Exported for direct use
- * where only the contributed arm is wanted.
- */
-export function spaceContributedAssetExists(
-  eb: ExpressionBuilder<DB, keyof DB>,
-  options: SpaceAlbumAssetOptions,
-): Expression<SqlBool> {
-  const notDeleted = options.requireAlbumNotDeleted ?? true;
-  const { scope } = options;
-
-  return eb.exists(
-    eb
-      .selectFrom('shared_space_album')
-      .innerJoin('album_space_asset', (join) =>
-        join
-          .onRef('album_space_asset.albumId', '=', 'shared_space_album.albumId')
-          .onRef('album_space_asset.spaceId', '=', 'shared_space_album.spaceId'),
-      )
-      .$if(notDeleted, (qb) =>
-        qb.innerJoin('album', (join) =>
-          join.onRef('album.id', '=', 'shared_space_album.albumId').on('album.deletedAt', 'is', null),
-        ),
-      )
-      .$if('memberUserId' in scope, (qb) =>
-        qb
-          .innerJoin('shared_space_member', 'shared_space_member.spaceId', 'shared_space_album.spaceId')
-          .where('shared_space_member.userId', '=', asUuid((scope as { memberUserId: string }).memberUserId))
-          .$if(!!(scope as { memberRole?: SharedSpaceRole[] }).memberRole?.length, (qb2) =>
-            qb2.where('shared_space_member.role', 'in', (scope as { memberRole: SharedSpaceRole[] }).memberRole),
-          ),
-      )
-      .select(eb.lit(1).as('exists'))
-      .whereRef('album_space_asset.assetId', '=', options.correlateAssetId)
-      .$if('spaceId' in scope, (qb) =>
-        qb.where('shared_space_album.spaceId', '=', asUuid((scope as { spaceId: string }).spaceId)),
-      )
-      .$if('spaceIds' in scope, (qb) =>
-        qb.where('shared_space_album.spaceId', '=', anyUuid((scope as { spaceIds: string[] }).spaceIds)),
-      )
-      .$if('spaceIdRef' in scope, (qb) =>
-        qb.whereRef(
-          'shared_space_album.spaceId',
-          '=',
-          (scope as { spaceIdRef: ReferenceExpression<DB, keyof DB> }).spaceIdRef,
-        ),
-      )
-      .$call((qb) => {
-        // Exhaustive switch — see the sibling comment in linkedAlbumAssetExists.
-        switch (options.albumTimelineGate) {
-          case 'space-tab': {
-            return qb.where('shared_space_album.showInTimeline', '=', true);
-          }
-          case 'personal': {
-            return qb.where((eb) => notHiddenByViewer(eb, options));
-          }
-          case 'none': {
-            return qb;
-          }
-        }
-      })
-      .$if(!!options.excludeAlbumId, (qb) => qb.where('shared_space_album.albumId', '!=', options.excludeAlbumId!)),
+      .$if(!!options.excludeAlbumId, (qb) => qb.where('shared_space_album.albumId', '!=', options.excludeAlbumId!))
   );
 }
 
@@ -391,12 +427,12 @@ export function spaceLibraryAssetExists(
 }
 
 /**
- * The three access-path arms `[direct, library, album]`, ready to spread into
- * `eb.or([...ownExtras, ...spaceAssetPathBranches(eb, opts)])`. Only for the
- * "clean" asset-outer sites (correlate on asset.id / asset.libraryId with no
- * per-arm isOffline quirk); other sites route just the album arm through
- * `spaceAlbumAssetExists` and keep their bespoke direct/library arms inline.
- */
+The three access-path arms `[direct, library, album]`, ready to spread into
+`eb.or([...ownExtras, ...spaceAssetPathBranches(eb, opts)])`. Only for the
+"clean" asset-outer sites (correlate on asset.id / asset.libraryId with no
+per-arm isOffline quirk); other sites route just the album arm through
+`spaceAlbumAssetExists` and keep their bespoke direct/library arms inline.
+*/
 export function spaceAssetPathBranches(
   eb: ExpressionBuilder<DB, keyof DB>,
   options: SpacePathBranchOptions,
@@ -413,6 +449,101 @@ export function spaceAssetPathBranches(
   ];
 }
 
+/**
+The ids of the assets one space reaches, as a row source `(assetId)`: the same four paths
+{@link spaceAssetPathBranches} tests (direct pool, linked library, linked album, cross-owner
+contribution) read from the space's own rows. UNION removes an asset reached by several paths.
+
+Use it for a whole-space count or top-N. The EXISTS arms tested on an outer `asset` scan cost one
+probe per asset on the server, so a 7-asset space cost as much as one holding every photo (#1298).
+The caller joins `asset` and applies the asset gates (trash, offline, visibility).
+*/
+export function spaceAssetIdSource(
+  eb: ExpressionBuilder<DB, keyof DB>,
+  options: { spaceId: string } & Pick<SpacePathBranchOptions, 'albumTimelineGate' | 'viewerId'>,
+) {
+  const { spaceId, ...gate } = options;
+  const scope = { spaceId };
+  return eb
+    .selectFrom('shared_space_asset')
+    .select('shared_space_asset.assetId as assetId')
+    .where('shared_space_asset.spaceId', '=', asUuid(spaceId))
+    .union(
+      eb
+        .selectFrom('shared_space_library')
+        .innerJoin('asset', 'asset.libraryId', 'shared_space_library.libraryId')
+        .select('asset.id as assetId')
+        .where('shared_space_library.spaceId', '=', asUuid(spaceId)),
+    )
+    .union(spaceAlbumArm(eb, 'album_asset', { scope, ...gate }).select('album_asset.assetId as assetId'))
+    .union(spaceAlbumArm(eb, 'album_space_asset', { scope, ...gate }).select('album_space_asset.assetId as assetId'));
+}
+
+/** How a viewer's shared spaces enter a query: which spaces, and the album arm's gate. */
+export type ViewerSpaces = Pick<SpacePathBranchOptions, 'scope' | 'albumTimelineGate' | 'viewerId'>;
+
+/**
+Another member's asset that reaches the viewer through a path of `spaces`. It must be shareable
+(Archive or Timeline) and not trashed: visibility and trash are owner-private. Correlates on `asset`.
+*/
+export function sharedWithViewer(eb: ExpressionBuilder<DB, keyof DB>, spaces: ViewerSpaces): Expression<SqlBool> {
+  return eb.and([
+    spaceVisibilityGate(eb),
+    eb('asset.deletedAt', 'is', null),
+    eb.or(
+      spaceAssetPathBranches(eb, { correlateAssetId: 'asset.id', correlateLibraryId: 'asset.libraryId', ...spaces }),
+    ),
+  ]);
+}
+
+/**
+The viewer-scope predicate. `owned` is the caller's own-row term (the viewer, the partners it merges
+in, any own-timeline subtraction); with `spaces` it also admits what {@link sharedWithViewer} admits.
+*/
+export function ownedOrSharedWithViewer(
+  eb: ExpressionBuilder<DB, keyof DB>,
+  owned: Expression<SqlBool>,
+  spaces?: ViewerSpaces,
+): Expression<SqlBool> {
+  return spaces ? eb.or([owned, sharedWithViewer(eb, spaces)]) : owned;
+}
+
+/**
+The re-gate for an album-confined search, where album access stands in for ownership. An album row
+is returned only when it is shareable and not trashed (the album grid's own rule), and an asset that
+also sits in a space directly or through a library only through one of the viewer's
+`timelineSpaceIds`: a member who hid that space from their timeline must not get its content back
+through an album search.
+*/
+export function albumConfinedToViewer(
+  eb: ExpressionBuilder<DB, keyof DB>,
+  timelineSpaceIds?: string[],
+): Expression<SqlBool> {
+  return eb.and([
+    spaceVisibilityGate(eb),
+    eb('asset.deletedAt', 'is', null),
+    eb.or([
+      eb.and([
+        eb.not(eb.exists(eb.selectFrom('shared_space_asset').whereRef('shared_space_asset.assetId', '=', 'asset.id'))),
+        eb.not(
+          eb.exists(
+            eb.selectFrom('shared_space_library').whereRef('shared_space_library.libraryId', '=', 'asset.libraryId'),
+          ),
+        ),
+      ]),
+      ...(timelineSpaceIds
+        ? [
+            spaceDirectAssetExists(eb, { correlateAssetId: 'asset.id', scope: { spaceIds: timelineSpaceIds } }),
+            spaceLibraryAssetExists(eb, {
+              correlateLibraryId: 'asset.libraryId',
+              scope: { spaceIds: timelineSpaceIds },
+            }),
+          ]
+        : []),
+    ]),
+  ]);
+}
+
 // ---------------------------------------------------------------------------
 // Raw-SQL family — for the sites that author queries with `sql``` tagged
 // templates (face-identity.repository.ts, shared-space.repository.ts stats).
@@ -424,10 +555,10 @@ export interface SpaceAlbumAssetSqlOptions {
   /** Raw fragment for the outer asset id, e.g. sql`asset.id`. */
   assetIdColumn: RawBuilder<unknown>;
   /**
-   * Raw JOIN fragment that scopes `shared_space_album.spaceId` to the target
-   * space(s), placed directly after `FROM shared_space_album`, e.g.
-   * sql`INNER JOIN timeline_spaces ON timeline_spaces."spaceId" = shared_space_album."spaceId"`.
-   */
+  Raw JOIN fragment that scopes `shared_space_album.spaceId` to the target
+  space(s), placed directly after `FROM shared_space_album`, e.g.
+  sql`INNER JOIN timeline_spaces ON timeline_spaces."spaceId" = shared_space_album."spaceId"`.
+  */
   spaceScopeJoin: RawBuilder<unknown>;
   /** A1 invariant: require `album.deletedAt IS NULL`. Default true. */
   requireAlbumNotDeleted?: boolean;
@@ -438,34 +569,34 @@ export interface SpaceAlbumAssetSqlOptions {
 }
 
 /**
- * Raw-SQL analogue of `spaceAlbumAssetExists` — an `EXISTS (...) OR EXISTS (...)` fragment over
- * the linked-album access path, for interpolation into `sql``` queries. Emits BOTH arms, mirroring
- * spaceAlbumAssetExists: the album owner's own `album_asset` rows, and cross-owner `album_space_asset`
- * contributions (#752 P1-7 — previously this raw-SQL analogue only emitted the `album_asset` arm,
- * despite its header claiming parity with the two-arm Kysely helper). The outer parentheses keep
- * this precedence-safe for every consumer that interpolates it into a larger `OR ${...}` / negates
- * it via `NOT (...)`.
- */
+Raw-SQL analogue of `spaceAlbumAssetExists` — an `EXISTS (...) OR EXISTS (...)` fragment over
+the linked-album access path, for interpolation into `sql``` queries. Emits BOTH arms, mirroring
+spaceAlbumAssetExists: the album owner's own `album_asset` rows, and cross-owner `album_space_asset`
+contributions (#752 P1-7 — previously this raw-SQL analogue only emitted the `album_asset` arm,
+despite its header claiming parity with the two-arm Kysely helper). The outer parentheses keep
+this precedence-safe for every consumer that interpolates it into a larger `OR ${...}` / negates
+it via `NOT (...)`.
+*/
 /**
- * "Can this viewer see `asset` on a timeline surface?" — the predicate the People-page aggregates
- * correlate per face row. A viewer reaches an asset by owning it, or through one of three space
- * paths: a directly-added asset, a linked library, or a linked album.
- *
- * **Every space arm joins the `timeline_spaces` CTE**, so a viewer who belongs to no
- * timeline-enabled space cannot satisfy any of them, and the predicate is exactly
- * `asset."ownerId" = <viewer>`. Postgres cannot deduce that at plan time — it evaluates the whole
- * OR per candidate row, which on a large single-user library meant hundreds of thousands of index
- * probes into `asset` that removed nothing. Passing `hasTimelineSpaces: false` emits the collapsed
- * form instead.
- *
- * The caller is responsible for establishing `hasTimelineSpaces` (a `shared_space_member` lookup
- * on `userId` + `showInTimeline`), and for defining the `timeline_spaces` CTE this correlates
- * against when it is true.
- *
- * If a future space path is added here that is NOT gated on `timeline_spaces`, the collapsed form
- * becomes wrong — `accessible-timeline-asset-predicate.medium.spec.ts` compares the two forms'
- * result sets and will fail.
- */
+"Can this viewer see `asset` on a timeline surface?" — the predicate the People-page aggregates
+correlate per face row. A viewer reaches an asset by owning it, or through one of three space
+paths: a directly-added asset, a linked library, or a linked album.
+
+**Every space arm joins the `timeline_spaces` CTE**, so a viewer who belongs to no
+timeline-enabled space cannot satisfy any of them, and the predicate is exactly
+`asset."ownerId" = <viewer>`. Postgres cannot deduce that at plan time — it evaluates the whole
+OR per candidate row, which on a large single-user library meant hundreds of thousands of index
+probes into `asset` that removed nothing. Passing `hasTimelineSpaces: false` emits the collapsed
+form instead.
+
+The caller is responsible for establishing `hasTimelineSpaces` (a `shared_space_member` lookup
+on `userId` + `showInTimeline`), and for defining the `timeline_spaces` CTE this correlates
+against when it is true.
+
+If a future space path is added here that is NOT gated on `timeline_spaces`, the collapsed form
+becomes wrong — `accessible-timeline-asset-predicate.medium.spec.ts` compares the two forms'
+result sets and will fail.
+*/
 export function accessibleTimelineAssetPredicate(options: {
   userId: string;
   hasTimelineSpaces: boolean;
@@ -495,9 +626,9 @@ export function accessibleTimelineAssetPredicate(options: {
 }
 
 /**
- * The service-resolved scope of what a caller has hidden from their OWN timeline. See
- * `SharedSpaceRepository.getTimelineHiddenScope` — this type is its return shape.
- */
+The service-resolved scope of what a caller has hidden from their OWN timeline. See
+`SharedSpaceRepository.getTimelineHiddenScope` — this type is its return shape.
+*/
 export interface TimelineHiddenScope {
   hiddenSpaceIds: string[];
   hiddenAlbumIds: string[];
@@ -506,13 +637,13 @@ export interface TimelineHiddenScope {
 }
 
 /**
- * True when every arm of the scope is empty — the common case (a viewer who has hidden nothing).
- * Callers use this to decide whether to emit the caller's-own-arm subtraction at all, so that case
- * costs nothing beyond the four already-required `getTimelineHiddenScope` lookups. Mirrors the
- * internal check inside {@link hiddenFromOwnTimeline}; exported so callers that branch on SQL SHAPE
- * (not just the returned predicate) — e.g. to skip `.where(...)` entirely rather than pass a
- * trivially-true one — can make the same decision without duplicating the four-list check.
- */
+True when every arm of the scope is empty — the common case (a viewer who has hidden nothing).
+Callers use this to decide whether to emit the caller's-own-arm subtraction at all, so that case
+costs nothing beyond the four already-required `getTimelineHiddenScope` lookups. Mirrors the
+internal check inside {@link hiddenFromOwnTimeline}; exported so callers that branch on SQL SHAPE
+(not just the returned predicate) — e.g. to skip `.where(...)` entirely rather than pass a
+trivially-true one — can make the same decision without duplicating the four-list check.
+*/
 export function timelineHiddenScopeIsEmpty(scope: TimelineHiddenScope): boolean {
   return (
     scope.hiddenSpaceIds.length === 0 &&
@@ -523,37 +654,37 @@ export function timelineHiddenScopeIsEmpty(scope: TimelineHiddenScope): boolean 
 }
 
 /**
- * How this call site supplies §3's "another visible path re-admits the photo" arm.
- *
- * A REQUIRED discriminated union, not an optional list, for the same reason {@link AlbumTimelineGate}
- * is: the rescue is half of the rule, and an optional parameter let three call sites (memories ×3,
- * and the `!timelineSpaceIds` timeline branch) emit the subtraction WITHOUT it and silently
- * over-subtract. A new call site now has to say which shape it is.
- *
- *  - 'sibling-arm' : the caller already ORs a visible-path branch alongside the owner term, so this
- *                    predicate must emit the bare subtraction. `withTimeBucketAssetFilters`'s
- *                    `timelineSpaceIds` branch and `ViewRepository.ownedOrSpaceAccessible` are the
- *                    only two — both OR `spaceAssetPathBranches` at the same level.
- *  - 'inline'      : there is no sibling arm; the rescue must be built into the predicate itself.
- *                    Needs the viewer's visible spaces (`getSpaceIdsForTimeline`) and their id, the
- *                    same two inputs the sibling arm is built from.
- */
+How this call site supplies §3's "another visible path re-admits the photo" arm.
+
+A REQUIRED discriminated union, not an optional list, for the same reason {@link AlbumTimelineGate}
+is: the rescue is half of the rule, and an optional parameter let three call sites (memories ×3,
+and the `!timelineSpaceIds` timeline branch) emit the subtraction WITHOUT it and silently
+over-subtract. A new call site now has to say which shape it is.
+
+ - 'sibling-arm' : the caller already ORs a visible-path branch alongside the owner term, so this
+                   predicate must emit the bare subtraction. `withTimeBucketAssetFilters`'s
+                   `timelineSpaceIds` branch and `ViewRepository.ownedOrSpaceAccessible` are the
+                   only two — both OR `spaceAssetPathBranches` at the same level.
+ - 'inline'      : there is no sibling arm; the rescue must be built into the predicate itself.
+                   Needs the viewer's visible spaces (`getSpaceIdsForTimeline`) and their id, the
+                   same two inputs the sibling arm is built from.
+*/
 export type TimelineRescue = { kind: 'sibling-arm' } | { kind: 'inline'; visibleSpaceIds: string[]; viewerId: string };
 
 /**
- * #1041: the subtraction applied to the caller's OWN assets — "I have hidden every way this photo
- * reaches a space, so keep it off my timeline".
- *
- * Returns `undefined` when the scope is empty so the caller emits nothing at all; that is the common
- * case and keeps the change free for everyone who has hidden nothing (mirrors the hasTimelineSpaces
- * collapse in {@link accessibleTimelineAssetPredicate}).
- *
- * Attach ONLY to the caller's own-id arm — never to `userIds`, which includes partners. See §6.4 of
- * the design doc: AND-ing this into the shared owner arm would remove a PARTNER's photos based on the
- * CALLER's flags.
- *
- * `rescue` carries §3's other half — see {@link TimelineRescue}.
- */
+#1041: the subtraction applied to the caller's OWN assets — "I have hidden every way this photo
+reaches a space, so keep it off my timeline".
+
+Returns `undefined` when the scope is empty so the caller emits nothing at all; that is the common
+case and keeps the change free for everyone who has hidden nothing (mirrors the hasTimelineSpaces
+collapse in {@link accessibleTimelineAssetPredicate}).
+
+Attach ONLY to the caller's own-id arm — never to `userIds`, which includes partners. See §6.4 of
+the design doc: AND-ing this into the shared owner arm would remove a PARTNER's photos based on the
+CALLER's flags.
+
+`rescue` carries §3's other half — see {@link TimelineRescue}.
+*/
 export function hiddenFromOwnTimeline(
   eb: ExpressionBuilder<DB, keyof DB>,
   scope: TimelineHiddenScope,

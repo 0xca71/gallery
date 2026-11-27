@@ -5,8 +5,8 @@ import 'dart:ui' as ui;
 import 'package:ffi/ffi.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:immich_mobile/infrastructure/loaders/image_request.dart';
 import 'package:immich_mobile/domain/models/asset/base_asset.model.dart';
+import 'package:immich_mobile/infrastructure/loaders/image_request.dart';
 import 'package:immich_mobile/platform/remote_image_api.g.dart';
 import 'package:immich_mobile/presentation/widgets/images/remote_image_provider.dart';
 
@@ -25,7 +25,9 @@ void main() {
     final after = provider(DateTime.fromMillisecondsSinceEpoch(2));
     expect(before, isNot(after));
     expect(before.hashCode, isNot(after.hashCode));
-    expect(before, provider(DateTime.fromMillisecondsSinceEpoch(1)));
+    final same = provider(DateTime.fromMillisecondsSinceEpoch(1));
+    expect(before, same);
+    expect(before.hashCode, same.hashCode);
   });
 
   const channel = BasicMessageChannel<Object?>(
@@ -92,6 +94,24 @@ void main() {
     expect(args[4], isNull);
   });
 
+  test('accepts a decoded image for an animation request', () async {
+    final pointer = malloc<Uint8>(8)..asTypedList(8).setAll(0, [255, 0, 0, 255, 0, 0, 255, 255]);
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockDecodedMessageHandler(channel, (
+      message,
+    ) async {
+      return <Object?>[
+        <Object?, Object?>{'pointer': pointer.address, 'width': 2, 'height': 1, 'rowBytes': 8},
+      ];
+    });
+
+    final codec = (await RemoteImageRequest(uri: 'https://example.test/animation').loadCodec())!;
+    final image = (await codec.getNextFrame()).image;
+
+    expect((image.width, image.height), (2, 1));
+    image.dispose();
+    codec.dispose();
+  });
+
   test('keeps portrait cover quality in a wide tile', () async {
     final image = await loadEncoded('assets/feature_message/ocr.webp', const ui.Size(963, 642));
 
@@ -124,14 +144,16 @@ void main() {
   });
 
   test('uses the decode size in the provider cache key', () {
-    final small = RemoteImageProvider(url: 'https://example.test/thumbnail', decodeSize: const ui.Size.square(160));
-    final large = RemoteImageProvider(url: 'https://example.test/thumbnail', decodeSize: const ui.Size.square(320));
+    const small = RemoteImageProvider(url: 'https://example.test/thumbnail', decodeSize: ui.Size.square(160));
+    const large = RemoteImageProvider(url: 'https://example.test/thumbnail', decodeSize: ui.Size.square(320));
 
     expect(small, isNot(large));
   });
 
   test('shares the cache key when no decode size is set', () {
+    // ignore: prefer_const_constructors
     final first = RemoteImageProvider(url: 'https://example.test/thumbnail');
+    // ignore: prefer_const_constructors
     final second = RemoteImageProvider(url: 'https://example.test/thumbnail');
 
     expect(first, second);

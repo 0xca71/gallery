@@ -1,7 +1,5 @@
 import { Injectable } from '@nestjs/common';
 import { Duration } from 'luxon';
-import { readFile } from 'node:fs/promises';
-import { isAbsolute } from 'node:path';
 import { MachineLearningConfig } from 'src/dtos/config.dto.js';
 import { LoggingRepository } from 'src/repositories/logging.repository.js';
 
@@ -17,6 +15,7 @@ export enum ModelTask {
   SEARCH = 'clip',
   OCR = 'ocr',
   PET_DETECTION = 'pet-detection',
+  DEPTH_ESTIMATION = 'depth-estimation',
 }
 
 export enum ModelType {
@@ -26,6 +25,7 @@ export enum ModelType {
   TEXTUAL = 'textual',
   VISUAL = 'visual',
   OCR = 'ocr',
+  DEPTH = 'depth',
 }
 
 export type ModelPayload = { imagePath: string } | { text: string };
@@ -94,8 +94,25 @@ export type PetDetectionRequest = {
   };
 };
 
+// Gallery: Spatial Scene depth map (specs/2026-10-29-spatial-scene-design.md). `depth` is a base64 8-bit PNG.
+export type DepthEstimation = {
+  depth: string;
+  width: number;
+  height: number;
+  boundarySharpness: number;
+  edgeDensity: number;
+  foregroundRatio: number;
+  focus: number;
+};
+export type DepthEstimationRequest = { [ModelTask.DEPTH_ESTIMATION]: { [ModelType.DEPTH]: ModelOptions } };
+
 export type MachineLearningRequest =
-  ClipVisualRequest | ClipTextualRequest | FacialRecognitionRequest | OcrRequest | PetDetectionRequest;
+  | ClipVisualRequest
+  | ClipTextualRequest
+  | FacialRecognitionRequest
+  | OcrRequest
+  | PetDetectionRequest
+  | DepthEstimationRequest;
 export type TextEncodingOptions = ModelOptions & { language?: string };
 
 @Injectable()
@@ -104,7 +121,7 @@ export class MachineLearningRepository {
   private interval?: ReturnType<typeof setInterval>;
   private _config?: MachineLearningConfig;
 
-  private get config(): MachineLearningConfig {
+  protected get config(): MachineLearningConfig {
     if (!this._config) {
       throw new Error('Machine learning repository not been setup');
     }
@@ -122,7 +139,7 @@ export class MachineLearningRepository {
     this.logger.setContext(MachineLearningRepository.name);
   }
 
-  private get connectionHeaders() {
+  protected get connectionHeaders() {
     return this.closeConnections ? CLOSE_CONNECTION_HEADERS : undefined;
   }
 
@@ -193,7 +210,7 @@ export class MachineLearningRepository {
     return this.healthyMap[url];
   }
 
-  private async predict<T>(
+  protected async predict<T>(
     payload: ModelPayload,
     config: MachineLearningRequest,
     options?: { timeoutMs?: number },
@@ -291,63 +308,17 @@ export class MachineLearningRepository {
     return response[ModelTask.OCR];
   }
 
-  async ping(): Promise<{ ok: boolean }> {
-    const url = this.config.urls[0];
-    if (!url) {
-      return { ok: false };
-    }
-    try {
-      const response = await fetch(new URL('ping', url), {
-        headers: this.connectionHeaders,
-        signal: AbortSignal.timeout(2000),
-      });
-      return { ok: response.ok };
-    } catch {
-      return { ok: false };
-    }
-  }
-
-  async detectPets(
-    imagePath: string,
-    { modelName, minScore }: { modelName: string; minScore: number },
-    recognition?: { modelName: string },
-  ) {
-    const request: PetDetectionRequest = {
-      [ModelTask.PET_DETECTION]: {
-        [ModelType.DETECTION]: { modelName, options: { minScore } },
-        ...(recognition && { [ModelType.RECOGNITION]: { modelName: recognition.modelName } }),
-      },
-    };
-    const response = await this.predict<PetDetectionResponse>({ imagePath }, request);
-    return {
-      imageHeight: response.imageHeight,
-      imageWidth: response.imageWidth,
-      // A missing key (e.g. an older/misbehaving ML service) must not crash the caller's
-      // `pets.filter(...)` — an absent response key is treated as "no pets detected".
-      pets: response[ModelTask.PET_DETECTION] ?? [],
-    };
-  }
-
   private async getFormData(payload: ModelPayload, config: MachineLearningRequest): Promise<FormData> {
     const formData = new FormData();
     formData.append('entries', JSON.stringify(config));
 
     if ('imagePath' in payload) {
-      let fileBuffer: Buffer;
-      if (isAbsolute(payload.imagePath)) {
-        fileBuffer = await readFile(payload.imagePath);
-      } else {
-        // Dynamic import to avoid circular dependency:
-        // MachineLearningRepository -> StorageService -> BaseService -> MachineLearningRepository
-        const { StorageService } = await import('../services/storage.service.js');
-        const backend = StorageService.resolveBackendForKey(payload.imagePath);
-        const { stream } = await backend.get(payload.imagePath);
-        const chunks: Buffer[] = [];
-        for await (const chunk of stream) {
-          chunks.push(Buffer.from(chunk));
-        }
-        fileBuffer = Buffer.concat(chunks);
-      }
+      // Dynamic import to avoid circular dependency:
+      // MachineLearningRepository -> StorageService -> BaseService -> MachineLearningRepository
+      // Needs StorageService.onBootstrap to have set the backends, which every worker does on
+      // AppBootstrap before it runs jobs.
+      const { StorageService } = await import('../services/storage.service.js');
+      const fileBuffer = await StorageService.backendFor(payload.imagePath).readAll(payload.imagePath);
       formData.append('image', new Blob([new Uint8Array(fileBuffer)]));
     } else if ('text' in payload) {
       formData.append('text', payload.text);

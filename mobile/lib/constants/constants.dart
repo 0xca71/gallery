@@ -9,11 +9,9 @@ const int kLogTruncateLimit = 2000;
 
 // Sync
 const int kSyncEventBatchSize = 5000;
-const int kFetchLocalAssetsBatchSize = 40000;
 
 // Hash batch limits
 final int kBatchHashFileLimit = Platform.isIOS ? 32 : 512;
-const int kBatchHashSizeLimit = 1024 * 1024 * 1024; // 1GB
 
 // Secure storage keys
 const String kSecuredPinCode = "secured_pin_code";
@@ -48,11 +46,12 @@ const int kMinMonthsToEnableScrubberSnap = 12;
 
 const String kImmichAppStoreLink = "https://apps.apple.com/app/id6761776289";
 const String kImmichPlayStoreLink = "https://play.google.com/store/apps/details?id=de.opennoodle.gallery";
-const String kImmichLatestRelease = "https://github.com/immich-app/immich/releases/latest";
+const String kImmichLatestRelease = "https://github.com/open-noodle/gallery/releases/latest";
 
 const int kPhotoTabIndex = 0;
 const int kSearchTabIndex = 1;
-const int kSpacesTabIndex = 2;
+const int kAlbumTabIndex = 2;
+// ignore: unused-code
 const int kLibraryTabIndex = 3;
 
 // Workaround for SQLite's variable limit (SQLITE_MAX_VARIABLE_NUMBER = 32766)

@@ -1,6 +1,9 @@
 import { Kysely } from 'kysely';
 import { Mocked } from 'vitest';
 import { AssetVisibility, JobName, JobStatus, QueueName, SharedSpaceRole, SourceType } from 'src/enum.js';
+import { FaceSearchRepository } from 'src/gallery/repositories/face-search.repository.js';
+import { GalleryAssetRepository } from 'src/gallery/repositories/gallery-asset.repository.js';
+import { QueueMaintenanceRepository } from 'src/gallery/repositories/queue-maintenance.repository.js';
 import { AssetRepository } from 'src/repositories/asset.repository.js';
 import { ConfigRepository } from 'src/repositories/config.repository.js';
 import { DatabaseRepository } from 'src/repositories/database.repository.js';
@@ -21,11 +24,13 @@ import { getKyselyDB } from 'test/utils.js';
 
 let defaultDatabase: Kysely<DB>;
 
+// eslint-disable-next-line unicorn/no-unnecessary-parameters
 const setup = (db?: Kysely<DB>) => {
   const { ctx, sut } = newMediumService(SharedSpaceService, {
     database: db || defaultDatabase,
     real: [
       AssetRepository,
+      GalleryAssetRepository,
       SharedSpaceRepository,
       FaceIdentityRepository,
       PersonRepository,
@@ -33,21 +38,24 @@ const setup = (db?: Kysely<DB>) => {
       DatabaseRepository,
       SystemMetadataRepository,
       SearchRepository,
+      FaceSearchRepository,
       FacePersonVerdictRepository,
       StackRepository,
     ],
-    mock: [LoggingRepository, JobRepository],
+    mock: [LoggingRepository, JobRepository, QueueMaintenanceRepository],
   });
   const jobs = ctx.getMock(JobRepository);
   jobs.queue.mockResolvedValue();
   jobs.queueAll.mockResolvedValue();
-  jobs.hasInFlightDedupChain.mockResolvedValue(false);
+  const queueMaintenance = ctx.getMock(QueueMaintenanceRepository);
+  queueMaintenance.hasInFlightDedupChain.mockResolvedValue(false);
   return {
     ctx,
     sut,
     faceIdentityRepository: ctx.get(FaceIdentityRepository),
     sharedSpaceRepository: ctx.get(SharedSpaceRepository),
     jobs,
+    queueMaintenance,
   };
 };
 
@@ -887,26 +895,26 @@ describe('SharedSpaceService linked-library face identity repair', () => {
   // restart) must not sweep or kick identity maintenance again, even if new jobs failed since.
   it('sweeps blocked failed face jobs on the first bootstrap only', async () => {
     const firstBoot = setup();
-    firstBoot.jobs.removeFailedJobsByJobIdPrefix.mockResolvedValue(3);
+    firstBoot.queueMaintenance.removeFailedJobsByJobIdPrefix.mockResolvedValue(3);
 
     await firstBoot.sut.onBootstrap();
 
     // Three sweeps on a first boot: the shared-space cleanup covers PeopleBackfill and FacialRecognition
     // (2), and H8 added an independent person-suggestion-scan cleanup on PeopleBackfill (1). The latter
     // needs its own state key precisely because this one is already marked done on every booted instance.
-    expect(firstBoot.jobs.removeFailedJobsByJobIdPrefix).toHaveBeenCalledTimes(3);
-    expect(firstBoot.jobs.removeFailedJobsByJobIdPrefix).toHaveBeenCalledWith(QueueName.PeopleBackfill, [
+    expect(firstBoot.queueMaintenance.removeFailedJobsByJobIdPrefix).toHaveBeenCalledTimes(3);
+    expect(firstBoot.queueMaintenance.removeFailedJobsByJobIdPrefix).toHaveBeenCalledWith(QueueName.PeopleBackfill, [
       'person-suggestion-scan/',
       'space-person-suggestion-scan/',
     ]);
     expect(firstBoot.jobs.queue).toHaveBeenCalledWith({ name: JobName.FaceIdentityBackfill, data: {} });
 
     const secondBoot = setup();
-    secondBoot.jobs.removeFailedJobsByJobIdPrefix.mockResolvedValue(3);
+    secondBoot.queueMaintenance.removeFailedJobsByJobIdPrefix.mockResolvedValue(3);
 
     await secondBoot.sut.onBootstrap();
 
-    expect(secondBoot.jobs.removeFailedJobsByJobIdPrefix).not.toHaveBeenCalled();
+    expect(secondBoot.queueMaintenance.removeFailedJobsByJobIdPrefix).not.toHaveBeenCalled();
     expect(secondBoot.jobs.queue).not.toHaveBeenCalled();
   });
 });

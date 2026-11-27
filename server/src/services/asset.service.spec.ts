@@ -2,9 +2,10 @@ import { BadRequestException, ConflictException, ForbiddenException, Unauthorize
 import { DateTime } from 'luxon';
 import path from 'node:path';
 import { Readable } from 'node:stream';
-import type { AssetResponseDto } from 'src/dtos/asset-response.dto.js';
+import { StorageCore } from 'src/cores/storage.core.js';
+import { mapAsset, type AssetResponseDto } from 'src/dtos/asset-response.dto.js';
 import { AssetJobName, AssetStatsResponseDto } from 'src/dtos/asset.dto.js';
-import { AssetEditAction } from 'src/dtos/editing.dto.js';
+import { AssetEditAction, AssetEditsCreateDto } from 'src/dtos/editing.dto.js';
 import {
   AssetFileType,
   AssetMetadataKey,
@@ -13,6 +14,7 @@ import {
   AssetVisibility,
   JobName,
   JobStatus,
+  SharedSpaceActivityType,
 } from 'src/enum.js';
 import { AssetStats } from 'src/repositories/asset.repository.js';
 import { AssetService } from 'src/services/asset.service.js';
@@ -62,6 +64,12 @@ describe(AssetService.name, () => {
     // dedicated EXIF-restore emit (asset_exif.updateId is untouched by a visibility flip).
     mocks.sharedSpace.emitLibraryAssetVisibilityPurge.mockResolvedValue(void 0);
     mocks.sharedSpace.emitLibraryAssetVisibilityRestore.mockResolvedValue(void 0);
+
+    // #763: update/updateAll now reroute the deprecated `isFavorite` alias through
+    // AssetFavoriteRepository instead of writing the asset column directly; default to a no-op so
+    // unrelated update/updateAll tests that merely pass isFavorite through a fixture don't break.
+    mocks.assetFavorite.addAll.mockResolvedValue(void 0);
+    mocks.assetFavorite.removeAll.mockResolvedValue(void 0);
   });
 
   const setupUnlinkAndDelete = (external = false) => {
@@ -141,6 +149,62 @@ describe(AssetService.name, () => {
       expect(mocks.event.emit).not.toHaveBeenCalled();
     });
 
+    it('rejects shared-link deletion even if the caller can read the photo', async () => {
+      const { auth, photo } = setupUnlinkAndDelete();
+      const sharedAuth = AuthFactory.from({ id: auth.user.id }).sharedLink().build();
+      await expect(sut.unlinkAndDeleteLivePhoto(sharedAuth, photo.id)).rejects.toThrow();
+      expect(mocks.asset.unlinkAndDeleteLivePhoto).not.toHaveBeenCalled();
+      expect(mocks.event.emit).not.toHaveBeenCalled();
+    });
+
+    it('preserves the Android motion-photo unlink restriction before any write', async () => {
+      const { auth, photo, video } = setupUnlinkAndDelete();
+      mocks.asset.getById
+        .mockReset()
+        .mockResolvedValueOnce(getForAsset(photo))
+        .mockResolvedValueOnce(
+          getForAsset({ ...video, originalPath: StorageCore.getAndroidMotionPath(video, video.id) }),
+        );
+      await expect(sut.unlinkAndDeleteLivePhoto(auth, photo.id)).rejects.toBeInstanceOf(BadRequestException);
+      expect(mocks.asset.unlinkAndDeleteLivePhoto).not.toHaveBeenCalled();
+      expect(mocks.event.emit).not.toHaveBeenCalled();
+    });
+
+    it.each([false, true])(
+      'reuses permanent deletion and emits official derived-media cleanup (external=%s)',
+      async (external) => {
+        const { auth, photo, video: linkedVideo } = setupUnlinkAndDelete(external);
+        await sut.unlinkAndDeleteLivePhoto(auth, photo.id);
+        const video = AssetFactory.from({
+          id: linkedVideo.id,
+          type: AssetType.Video,
+          libraryId: linkedVideo.libraryId,
+          isExternal: external,
+        })
+          .owner(auth.user)
+          .file({ type: AssetFileType.Thumbnail })
+          .file({ type: AssetFileType.Preview })
+          .file({ type: AssetFileType.FullSize })
+          .file({ type: AssetFileType.FullSize, isEdited: true })
+          .file({ type: AssetFileType.Preview, isEdited: true })
+          .file({ type: AssetFileType.Thumbnail, isEdited: true })
+          .file({ type: AssetFileType.EncodedVideo })
+          .file({ type: AssetFileType.Sidecar })
+          .build();
+        mocks.assetJob.getForAssetDeletion.mockResolvedValue(getForAssetDeletion(video));
+        await expect(sut.handleAssetDeletion({ id: video.id, deleteOnDisk: true })).resolves.toBe(JobStatus.Success);
+        expect(mocks.job.queue).toHaveBeenCalledWith({
+          name: JobName.FileDelete,
+          data: { files: expect.arrayContaining([...video.files.map(({ path }) => path), video.originalPath]) },
+        });
+        expect(mocks.event.emit).toHaveBeenCalledWith('AssetDelete', {
+          assetId: video.id,
+          userId: auth.user.id,
+          affectedSpacePersons: [],
+        });
+      },
+    );
+
     it('rejects a video as the selected photo', async () => {
       const { auth, video } = setupUnlinkAndDelete();
       mocks.asset.getById.mockReset().mockResolvedValue(getForAsset(video));
@@ -193,8 +257,9 @@ describe(AssetService.name, () => {
   });
 
   describe('ensureAssetAddress', () => {
-    it('requires asset read access before resolving and saving an address', async () => {
+    it('resolves a detailed address only after asset read authorization', async () => {
       mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set(['asset-1']));
+      mocks.systemMetadata.get.mockResolvedValue({ reverseGeocoding: { enabled: true } });
       mocks.map.ensureDetailedAddress.mockResolvedValue('中国湖北省武汉市');
       await expect(sut.ensureAssetAddress(authStub.admin, 'asset-1')).resolves.toEqual({
         formattedAddress: '中国湖北省武汉市',
@@ -202,8 +267,32 @@ describe(AssetService.name, () => {
       expect(mocks.map.ensureDetailedAddress).toHaveBeenCalledWith('asset-1');
     });
 
-    it('never calls the provider for an asset the caller cannot read', async () => {
+    it('allows an authorized space viewer to resolve an address without edit rights', async () => {
+      mocks.access.spaceAsset.checkSpaceAccess.mockResolvedValue(new Set(['asset-1']));
+      mocks.systemMetadata.get.mockResolvedValue({ reverseGeocoding: { enabled: true } });
+      mocks.map.ensureDetailedAddress.mockResolvedValue('中国湖北省武汉市');
+      await expect(sut.ensureAssetAddress(authStub.admin, 'asset-1')).resolves.toEqual({
+        formattedAddress: '中国湖北省武汉市',
+      });
+    });
+
+    it('does not contact the provider when reverse geocoding is disabled', async () => {
+      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set(['asset-1']));
+      mocks.systemMetadata.get.mockResolvedValue({ reverseGeocoding: { enabled: false } });
+      await expect(sut.ensureAssetAddress(authStub.admin, 'asset-1')).resolves.toEqual({ formattedAddress: null });
+      expect(mocks.map.ensureDetailedAddress).not.toHaveBeenCalled();
+    });
+
+    it('does not contact the provider for assets the caller cannot read', async () => {
       await expect(sut.ensureAssetAddress(authStub.admin, 'asset-1')).rejects.toBeInstanceOf(BadRequestException);
+      expect(mocks.map.ensureDetailedAddress).not.toHaveBeenCalled();
+    });
+
+    it('does not spend quota for shared-link sessions even when the asset is readable', async () => {
+      mocks.access.asset.checkSharedLinkAccess.mockResolvedValue(new Set(['asset-1']));
+      await expect(sut.ensureAssetAddress(authStub.adminSharedLink, 'asset-1')).rejects.toBeInstanceOf(
+        ForbiddenException,
+      );
       expect(mocks.map.ensureDetailedAddress).not.toHaveBeenCalled();
     });
   });
@@ -225,16 +314,31 @@ describe(AssetService.name, () => {
     });
 
     it('should allow shared link access', async () => {
+      const asset = AssetFactory.from()
+        .owner()
+        .face({}, (face) => face.person())
+        .build();
+      mocks.access.asset.checkSharedLinkAccess.mockResolvedValue(new Set([asset.id]));
+      mocks.asset.getById.mockResolvedValue(getForAsset(asset));
+
+      const result = await sut.get(authStub.adminSharedLink, asset.id);
+
+      expect(result).toMatchObject({ id: asset.id, hasMetadata: true, people: [], owner: undefined });
+      expect(mocks.access.asset.checkSharedLinkAccess).toHaveBeenCalledWith(
+        authStub.adminSharedLink.sharedLink?.id,
+        new Set([asset.id]),
+      );
+    });
+
+    // #763: a shared-link session's auth.user is the link owner — their favorites must not leak.
+    it('does not project the link owner favorite for a shared link session (#763)', async () => {
       const asset = AssetFactory.create();
       mocks.access.asset.checkSharedLinkAccess.mockResolvedValue(new Set([asset.id]));
       mocks.asset.getById.mockResolvedValue(getForAsset(asset));
 
       await sut.get(authStub.adminSharedLink, asset.id);
 
-      expect(mocks.access.asset.checkSharedLinkAccess).toHaveBeenCalledWith(
-        authStub.adminSharedLink.sharedLink?.id,
-        new Set([asset.id]),
-      );
+      expect(mocks.asset.getById).toHaveBeenCalledWith(asset.id, expect.anything(), undefined);
     });
 
     it('should strip metadata for shared link if exif is disabled', async () => {
@@ -265,7 +369,7 @@ describe(AssetService.name, () => {
         asset.id,
       );
 
-      expect(result).not.toHaveProperty('owner');
+      expect(result).toMatchObject({ owner: undefined });
     });
 
     it('should clear people for non-owner access', async () => {
@@ -303,13 +407,16 @@ describe(AssetService.name, () => {
 
     it('should allow shared space access', async () => {
       const asset = AssetFactory.create();
-      mocks.access.asset.checkSpaceAccess.mockResolvedValue(new Set([asset.id]));
+      mocks.access.spaceAsset.checkSpaceAccess.mockResolvedValue(new Set([asset.id]));
       mocks.asset.getById.mockResolvedValue(asset as any);
       mocks.sharedSpace.findSpaceForAssetAndUser.mockResolvedValue(void 0 as any);
 
       await sut.get(authStub.admin, asset.id);
 
-      expect(mocks.access.asset.checkSpaceAccess).toHaveBeenCalledWith(authStub.admin.user.id, new Set([asset.id]));
+      expect(mocks.access.spaceAsset.checkSpaceAccess).toHaveBeenCalledWith(
+        authStub.admin.user.id,
+        new Set([asset.id]),
+      );
     });
 
     it('should keep people for space member with spaceId', async () => {
@@ -317,10 +424,10 @@ describe(AssetService.name, () => {
         .exif()
         .face({}, (f) => f.person({ personGroupId: 'person-1', name: 'Test Person' }))
         .build();
-      mocks.access.asset.checkSpaceAccess.mockResolvedValue(new Set([asset.id]));
+      mocks.access.spaceAsset.checkSpaceAccess.mockResolvedValue(new Set([asset.id]));
       mocks.asset.getById.mockResolvedValue(asset as any);
       mocks.sharedSpace.getMember.mockResolvedValue({ userId: authStub.admin.user.id } as any);
-      mocks.access.asset.checkSpaceAccessForSpace.mockResolvedValue(new Set([asset.id]));
+      mocks.access.spaceAsset.checkSpaceAccessForSpace.mockResolvedValue(new Set([asset.id]));
       mocks.sharedSpace.findSpacePersonsByLinkedPersonIds.mockResolvedValue(
         new Map([['person-1', { id: 'space-person-1', isHidden: false }]]),
       );
@@ -344,10 +451,10 @@ describe(AssetService.name, () => {
           }),
         )
         .build();
-      mocks.access.asset.checkSpaceAccess.mockResolvedValue(new Set([asset.id]));
+      mocks.access.spaceAsset.checkSpaceAccess.mockResolvedValue(new Set([asset.id]));
       mocks.asset.getById.mockResolvedValue(asset as any);
       mocks.sharedSpace.getMember.mockResolvedValue({ userId: authStub.admin.user.id } as any);
-      mocks.access.asset.checkSpaceAccessForSpace.mockResolvedValue(new Set([asset.id]));
+      mocks.access.spaceAsset.checkSpaceAccessForSpace.mockResolvedValue(new Set([asset.id]));
       mocks.sharedSpace.findSpacePersonsByLinkedPersonIds.mockResolvedValue(
         new Map([
           [
@@ -387,7 +494,7 @@ describe(AssetService.name, () => {
       mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([asset.id]));
       mocks.asset.getById.mockResolvedValue(getForAsset(asset));
       mocks.sharedSpace.getMember.mockResolvedValue({ userId: authStub.user1.user.id } as any);
-      mocks.access.asset.checkSpaceAccessForSpace.mockResolvedValue(new Set([asset.id]));
+      mocks.access.spaceAsset.checkSpaceAccessForSpace.mockResolvedValue(new Set([asset.id]));
       mocks.sharedSpace.findSpacePersonsByLinkedPersonIds.mockResolvedValue(
         new Map([['person-1', { id: 'space-person-1', isHidden: false }]]),
       );
@@ -419,7 +526,7 @@ describe(AssetService.name, () => {
       mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([asset.id]));
       mocks.asset.getById.mockResolvedValue(getForAsset(asset));
       mocks.sharedSpace.getMember.mockResolvedValue({ userId: authStub.user1.user.id } as any);
-      mocks.access.asset.checkSpaceAccessForSpace.mockResolvedValue(new Set());
+      mocks.access.spaceAsset.checkSpaceAccessForSpace.mockResolvedValue(new Set());
 
       const result = await sut.get(authStub.user1, asset.id, 'space-id');
 
@@ -434,7 +541,7 @@ describe(AssetService.name, () => {
       mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([asset.id]));
       mocks.asset.getById.mockResolvedValue(getForAsset(asset));
       mocks.sharedSpace.getMember.mockResolvedValue({ userId: authStub.user1.user.id } as any);
-      mocks.access.asset.checkSpaceAccessForSpace.mockResolvedValue(new Set([asset.id]));
+      mocks.access.spaceAsset.checkSpaceAccessForSpace.mockResolvedValue(new Set([asset.id]));
       mocks.sharedSpace.findSpacePersonsByLinkedPersonIds.mockResolvedValue(
         new Map([['person-1', { id: 'space-person-1', isHidden: true }]]),
       );
@@ -452,7 +559,7 @@ describe(AssetService.name, () => {
       mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([asset.id]));
       mocks.asset.getById.mockResolvedValue(getForAsset(asset));
       mocks.sharedSpace.getMember.mockResolvedValue({ userId: authStub.user1.user.id } as any);
-      mocks.access.asset.checkSpaceAccessForSpace.mockResolvedValue(new Set([asset.id]));
+      mocks.access.spaceAsset.checkSpaceAccessForSpace.mockResolvedValue(new Set([asset.id]));
       mocks.sharedSpace.findSpacePersonsByLinkedPersonIds.mockResolvedValue(new Map());
 
       const result = await sut.get(authStub.user1, asset.id, 'space-id');
@@ -462,10 +569,10 @@ describe(AssetService.name, () => {
 
     it('should not expose unassigned faces for space member with spaceId', async () => {
       const asset = AssetFactory.from().exif().face({ id: 'unassigned-face-id' }).build();
-      mocks.access.asset.checkSpaceAccess.mockResolvedValue(new Set([asset.id]));
+      mocks.access.spaceAsset.checkSpaceAccess.mockResolvedValue(new Set([asset.id]));
       mocks.asset.getById.mockResolvedValue(asset as any);
       mocks.sharedSpace.getMember.mockResolvedValue({ userId: authStub.admin.user.id } as any);
-      mocks.access.asset.checkSpaceAccessForSpace.mockResolvedValue(new Set([asset.id]));
+      mocks.access.spaceAsset.checkSpaceAccessForSpace.mockResolvedValue(new Set([asset.id]));
       mocks.sharedSpace.findSpacePersonsByLinkedPersonIds.mockResolvedValue(new Map());
 
       const result = await sut.get(authStub.admin, asset.id, 'space-id');
@@ -480,7 +587,7 @@ describe(AssetService.name, () => {
         .exif()
         .face({}, (f) => f.person({ personGroupId: 'person-1', name: 'Test Person' }))
         .build();
-      mocks.access.asset.checkSpaceAccess.mockResolvedValue(new Set([asset.id]));
+      mocks.access.spaceAsset.checkSpaceAccess.mockResolvedValue(new Set([asset.id]));
       mocks.asset.getById.mockResolvedValue(asset as any);
       mocks.sharedSpace.findSpaceForAssetAndUser.mockResolvedValue(void 0 as any);
 
@@ -494,7 +601,7 @@ describe(AssetService.name, () => {
         .exif()
         .face({}, (f) => f.person({ personGroupId: 'person-1', name: 'Test Person' }))
         .build();
-      mocks.access.asset.checkSpaceAccess.mockResolvedValue(new Set([asset.id]));
+      mocks.access.spaceAsset.checkSpaceAccess.mockResolvedValue(new Set([asset.id]));
       mocks.asset.getById.mockResolvedValue(asset as any);
       mocks.sharedSpace.getMember.mockResolvedValue(void 0 as any);
 
@@ -506,10 +613,10 @@ describe(AssetService.name, () => {
         .exif()
         .face({}, (f) => f.person({ personGroupId: 'person-1', name: 'Test Person' }))
         .build();
-      mocks.access.asset.checkSpaceAccess.mockResolvedValue(new Set([asset.id]));
+      mocks.access.spaceAsset.checkSpaceAccess.mockResolvedValue(new Set([asset.id]));
       mocks.asset.getById.mockResolvedValue(asset as any);
       mocks.sharedSpace.getMember.mockResolvedValue({ userId: authStub.admin.user.id } as any);
-      mocks.access.asset.checkSpaceAccessForSpace.mockResolvedValue(new Set([asset.id]));
+      mocks.access.spaceAsset.checkSpaceAccessForSpace.mockResolvedValue(new Set([asset.id]));
       mocks.sharedSpace.findSpacePersonsByLinkedPersonIds.mockResolvedValue(
         new Map([['person-1', { id: 'space-person-1', isHidden: true }]]),
       );
@@ -524,10 +631,10 @@ describe(AssetService.name, () => {
         .exif()
         .face({}, (f) => f.person({ personGroupId: 'person-1', name: 'Test Person' }))
         .build();
-      mocks.access.asset.checkSpaceAccess.mockResolvedValue(new Set([asset.id]));
+      mocks.access.spaceAsset.checkSpaceAccess.mockResolvedValue(new Set([asset.id]));
       mocks.asset.getById.mockResolvedValue(asset as any);
       mocks.sharedSpace.getMember.mockResolvedValue({ userId: authStub.admin.user.id } as any);
-      mocks.access.asset.checkSpaceAccessForSpace.mockResolvedValue(new Set([asset.id]));
+      mocks.access.spaceAsset.checkSpaceAccessForSpace.mockResolvedValue(new Set([asset.id]));
       mocks.sharedSpace.findSpacePersonsByLinkedPersonIds.mockResolvedValue(new Map());
 
       const result = await sut.get(authStub.admin, asset.id, 'space-id');
@@ -664,14 +771,37 @@ describe(AssetService.name, () => {
         .exif()
         .face({}, (f) => f.person({ personGroupId: 'person-1', name: 'Test Person' }))
         .build();
-      mocks.access.asset.checkSpaceAccess.mockResolvedValue(new Set([asset.id]));
+      mocks.access.spaceAsset.checkSpaceAccess.mockResolvedValue(new Set([asset.id]));
       mocks.asset.getById.mockResolvedValue(asset as any);
       mocks.sharedSpace.getMember.mockResolvedValue({ userId: authStub.admin.user.id } as any);
-      mocks.access.asset.checkSpaceAccessForSpace.mockResolvedValue(new Set());
+      mocks.access.spaceAsset.checkSpaceAccessForSpace.mockResolvedValue(new Set());
 
       const result = await sut.get(authStub.admin, asset.id, 'space-id');
 
       expect(result).toHaveProperty('people', []);
+    });
+
+    // The explicit-spaceId branch must report the SAME `resolvedSpaceId` the inferred branch below
+    // does. It used to omit it, so a client re-reading an asset WITH the space id got a response
+    // whose resolved space had vanished -- and `canEditSpacePeople` falls back to that field when
+    // the route carries no space, so the People-row edit controls turned themselves off after a
+    // face edit on /photos/:id until the panel was closed and reopened.
+    it('should report resolvedSpaceId when the space is given explicitly', async () => {
+      const asset = AssetFactory.from()
+        .exif()
+        .face({}, (f) => f.person({ personGroupId: 'person-1', name: 'Test Person' }))
+        .build();
+      mocks.access.spaceAsset.checkSpaceAccess.mockResolvedValue(new Set([asset.id]));
+      mocks.asset.getById.mockResolvedValue(asset as any);
+      mocks.sharedSpace.getMember.mockResolvedValue({ userId: authStub.admin.user.id } as any);
+      mocks.access.spaceAsset.checkSpaceAccessForSpace.mockResolvedValue(new Set([asset.id]));
+      mocks.sharedSpace.findSpacePersonsByLinkedPersonIds.mockResolvedValue(
+        new Map([['person-1', { id: 'sp-1', isHidden: false }]]),
+      );
+
+      const result = await sut.get(authStub.admin, asset.id, 'space-1');
+
+      expect((result as any).resolvedSpaceId).toBe('space-1');
     });
 
     it('should keep people for space member without spaceId (fallback)', async () => {
@@ -679,7 +809,7 @@ describe(AssetService.name, () => {
         .exif()
         .face({}, (f) => f.person({ personGroupId: 'person-1', name: 'Test Person' }))
         .build();
-      mocks.access.asset.checkSpaceAccess.mockResolvedValue(new Set([asset.id]));
+      mocks.access.spaceAsset.checkSpaceAccess.mockResolvedValue(new Set([asset.id]));
       mocks.asset.getById.mockResolvedValue(asset as any);
       mocks.sharedSpace.findSpaceForAssetAndUser.mockResolvedValue({ spaceId: 'space-1' });
       mocks.sharedSpace.findSpacePersonsByLinkedPersonIds.mockResolvedValue(
@@ -714,7 +844,7 @@ describe(AssetService.name, () => {
         .exif()
         .face({}, (f) => f.person({ personGroupId: 'person-1', name: 'Test Person' }))
         .build();
-      mocks.access.asset.checkSpaceAccess.mockResolvedValue(new Set([asset.id]));
+      mocks.access.spaceAsset.checkSpaceAccess.mockResolvedValue(new Set([asset.id]));
       mocks.asset.getById.mockResolvedValue(asset as any);
       mocks.sharedSpace.findSpaceForAssetAndUser.mockResolvedValue({ spaceId: 'space-1' });
       mocks.sharedSpace.findSpacePersonsByLinkedPersonIds.mockResolvedValue(
@@ -767,7 +897,16 @@ describe(AssetService.name, () => {
 
       await sut.update(authStub.admin, asset.id, { isFavorite: true });
 
-      expect(mocks.asset.update).toHaveBeenCalledWith({ id: asset.id, isFavorite: true });
+      // #763: isFavorite is stripped from the direct column write and rerouted to the caller's own
+      // AssetFavoriteRepository row — the update return path still threads the caller's id to
+      // project isFavoriteForUser from the (now up to date) asset_favorite table.
+      expect(mocks.asset.update).toHaveBeenCalledWith({ id: asset.id }, authStub.admin.user.id);
+      expect(mocks.assetFavorite.addAll).toHaveBeenCalledWith(authStub.admin.user.id, [asset.id]);
+      expect(mocks.websocket.clientSend).toHaveBeenCalledWith(
+        'on_asset_update',
+        authStub.admin.user.id,
+        expect.objectContaining({ id: asset.id }),
+      );
     });
 
     it('should update the exif description', async () => {
@@ -806,6 +945,8 @@ describe(AssetService.name, () => {
           lockedPropertiesBehavior: 'append',
         }),
       );
+
+      expect(mocks.job.queue).toHaveBeenCalledWith({ name: JobName.SidecarWrite, data: { id: asset.id } });
     });
 
     it('should fail linking a live video if the motion part could not be found', async () => {
@@ -839,7 +980,11 @@ describe(AssetService.name, () => {
       const auth = AuthFactory.create();
       const motionAsset = AssetFactory.from().owner(auth.user).build();
       const asset = AssetFactory.create();
-      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([asset.id]));
+      // AssetUpdate on the asset, the fork's owner-only linkage check (rbac-3), then AssetUpdate on the motion video
+      mocks.access.asset.checkOwnerAccess
+        .mockResolvedValueOnce(new Set([asset.id]))
+        .mockResolvedValueOnce(new Set([asset.id]))
+        .mockResolvedValueOnce(new Set([motionAsset.id]));
       mocks.sharedSpace.findSpaceForAssetAndUser.mockResolvedValue(void 0 as any);
       mocks.asset.getById.mockResolvedValue(getForAsset(asset));
 
@@ -894,7 +1039,12 @@ describe(AssetService.name, () => {
     it('should link a live video', async () => {
       const motionAsset = AssetFactory.create({ type: AssetType.Video, visibility: AssetVisibility.Timeline });
       const stillAsset = AssetFactory.create();
-      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([stillAsset.id]));
+      // AssetUpdate on the asset, the fork's owner-only linkage check (rbac-3), then AssetUpdate on the motion video
+      mocks.access.asset.checkOwnerAccess
+        .mockResolvedValueOnce(new Set([stillAsset.id]))
+        .mockResolvedValueOnce(new Set([stillAsset.id]))
+        .mockResolvedValueOnce(new Set([motionAsset.id]))
+        .mockResolvedValue(new Set([stillAsset.id]));
       mocks.sharedSpace.findSpaceForAssetAndUser.mockResolvedValue(void 0 as any);
       mocks.asset.getById.mockResolvedValueOnce(getForAsset(motionAsset));
       mocks.asset.getById.mockResolvedValueOnce(getForAsset(stillAsset));
@@ -905,7 +1055,11 @@ describe(AssetService.name, () => {
 
       expect(mocks.asset.update).toHaveBeenCalledWith({ id: motionAsset.id, visibility: AssetVisibility.Hidden });
       expect(mocks.event.emit).toHaveBeenCalledWith('AssetHide', { assetId: motionAsset.id, userId: auth.user.id });
-      expect(mocks.asset.update).toHaveBeenCalledWith({ id: stillAsset.id, livePhotoVideoId: motionAsset.id });
+      // #763: the update return path now threads the caller's id to project isFavoriteForUser.
+      expect(mocks.asset.update).toHaveBeenCalledWith(
+        { id: stillAsset.id, livePhotoVideoId: motionAsset.id },
+        auth.user.id,
+      );
     });
 
     it('should throw an error if asset could not be found after update', async () => {
@@ -932,10 +1086,14 @@ describe(AssetService.name, () => {
 
       await sut.update(auth, asset.id, { livePhotoVideoId: null });
 
-      expect(mocks.asset.update).toHaveBeenCalledWith({
-        id: asset.id,
-        livePhotoVideoId: null,
-      });
+      // #763: the update return path now threads the caller's id to project isFavoriteForUser.
+      expect(mocks.asset.update).toHaveBeenCalledWith(
+        {
+          id: asset.id,
+          livePhotoVideoId: null,
+        },
+        auth.user.id,
+      );
       expect(mocks.asset.update).toHaveBeenCalledWith({
         id: motionAsset.id,
         visibility: asset.visibility,
@@ -970,7 +1128,8 @@ describe(AssetService.name, () => {
 
       await sut.update(auth, asset.id, { livePhotoVideoId: null });
 
-      expect(mocks.asset.update).toHaveBeenCalledWith({ id: asset.id, livePhotoVideoId: null });
+      // #763: the update return path now threads the caller's id to project isFavoriteForUser.
+      expect(mocks.asset.update).toHaveBeenCalledWith({ id: asset.id, livePhotoVideoId: null }, auth.user.id);
     });
 
     it('should update latitude and longitude', async () => {
@@ -989,6 +1148,7 @@ describe(AssetService.name, () => {
             assetId: asset.id,
             latitude: 40.7128,
             longitude: -74.006,
+            formattedAddress: null,
             lockedProperties: ['latitude', 'longitude'],
           }),
           lockedPropertiesBehavior: 'append',
@@ -1017,6 +1177,7 @@ describe(AssetService.name, () => {
             country: 'Germany',
             state: 'Berlin',
             city: 'Berlin',
+            formattedAddress: null,
             lockedProperties: ['latitude', 'longitude'],
           }),
           lockedPropertiesBehavior: 'append',
@@ -1034,6 +1195,7 @@ describe(AssetService.name, () => {
       await sut.update(authStub.admin, asset.id, { description: 'New description' });
 
       expect(mocks.map.reverseGeocode).not.toHaveBeenCalled();
+      expect(mocks.asset.upsertExif.mock.calls[0][0].exif).not.toHaveProperty('formattedAddress');
     });
 
     it('purges direct/album/library space paths when a single PUT sets visibility Hidden (security-4)', async () => {
@@ -1100,7 +1262,7 @@ describe(AssetService.name, () => {
       // Caller does not own the asset but has space-edit rights → AssetUpdate gate passes.
       mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set());
       mocks.sharedSpace.findSpaceForAssetAndUser.mockResolvedValue(void 0 as any);
-      mocks.access.asset.checkSpaceEditAccess.mockResolvedValue(new Set([asset.id]));
+      mocks.access.spaceAsset.checkSpaceEditAccess.mockResolvedValue(new Set([asset.id]));
       mocks.asset.getById.mockResolvedValue(getForAsset(asset));
       mocks.asset.update.mockResolvedValue({ ...getForAsset(asset), visibility: AssetVisibility.Locked });
 
@@ -1120,7 +1282,7 @@ describe(AssetService.name, () => {
       mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set());
       mocks.sharedSpace.findSpaceForAssetAndUser.mockResolvedValue(void 0 as any);
       mocks.asset.getById.mockResolvedValue(getForAsset(asset));
-      mocks.access.asset.checkSpaceEditAccess.mockResolvedValue(new Set([asset.id]));
+      mocks.access.spaceAsset.checkSpaceEditAccess.mockResolvedValue(new Set([asset.id]));
 
       await expect(sut.update(auth, asset.id, { livePhotoVideoId: motionId })).rejects.toBeInstanceOf(
         ForbiddenException,
@@ -1130,6 +1292,24 @@ describe(AssetService.name, () => {
       expect(mocks.asset.update).not.toHaveBeenCalled();
     });
 
+    // #763: the alias writes only the caller's own overlay row — never the owner's — so it is not owner-gated,
+    // and a favorite-only write is private state, not an edit to attribute in the space feed.
+    it('lets a space editor favorite a non-owned asset via the single-PUT alias without logging an edit (#763)', async () => {
+      const auth = AuthFactory.create();
+      const asset = AssetFactory.create();
+      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set());
+      mocks.sharedSpace.findSpaceForAssetAndUser.mockResolvedValue(void 0 as any);
+      mocks.asset.getById.mockResolvedValue(getForAsset(asset));
+      mocks.asset.update.mockResolvedValue(getForAsset(asset));
+      mocks.access.spaceAsset.checkSpaceEditAccess.mockResolvedValue(new Set([asset.id]));
+      mocks.access.spaceAsset.checkSpaceAccess.mockResolvedValue(new Set([asset.id]));
+
+      await sut.update(auth, asset.id, { isFavorite: true });
+
+      expect(mocks.assetFavorite.addAll).toHaveBeenCalledWith(auth.user.id, [asset.id]);
+      expect(mocks.sharedSpace.logActivity).not.toHaveBeenCalled();
+    });
+
     it('allows changing visibility on an asset the caller owns even as a space editor (rbac-3)', async () => {
       const asset = AssetFactory.create({ visibility: AssetVisibility.Timeline });
       mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([asset.id]));
@@ -1137,27 +1317,14 @@ describe(AssetService.name, () => {
       mocks.asset.getById.mockResolvedValue(getForAsset(asset));
       mocks.asset.update.mockResolvedValue({ ...getForAsset(asset), visibility: AssetVisibility.Archive });
 
-      await sut.update(AuthFactory.create({ id: asset.ownerId }), asset.id, { visibility: AssetVisibility.Archive });
+      const auth = AuthFactory.create({ id: asset.ownerId });
+      await sut.update(auth, asset.id, { visibility: AssetVisibility.Archive });
 
-      expect(mocks.asset.update).toHaveBeenCalledWith({ id: asset.id, visibility: AssetVisibility.Archive });
-    });
-  });
-
-  describe('onAssetHide / onAssetShow', () => {
-    it('purges direct/album/library space paths when a motion asset is hidden (motion bypass)', async () => {
-      const assetId = newUuid();
-      await sut.onAssetHide({ assetId, userId: newUuid() });
-      expect(mocks.sharedSpace.emitDirectAssetVisibilityPurge).toHaveBeenCalledWith([assetId]);
-      expect(mocks.sharedSpace.emitAlbumAssetVisibilityPurge).toHaveBeenCalledWith([assetId]);
-      expect(mocks.sharedSpace.emitLibraryAssetVisibilityPurge).toHaveBeenCalledWith([assetId]);
-    });
-
-    it('restores direct/album space paths when a motion asset is shown again (motion bypass)', async () => {
-      const assetId = newUuid();
-      await sut.onAssetShow({ assetId, userId: newUuid() });
-      expect(mocks.sharedSpace.emitDirectAssetVisibilityRestore).toHaveBeenCalledWith([assetId]);
-      expect(mocks.sharedSpace.emitAlbumAssetVisibilityRestore).toHaveBeenCalledWith([assetId]);
-      expect(mocks.sharedSpace.emitDirectAssetVisibilityPurge).not.toHaveBeenCalled();
+      // #763: the update return path now threads the caller's id to project isFavoriteForUser.
+      expect(mocks.asset.update).toHaveBeenCalledWith(
+        { id: asset.id, visibility: AssetVisibility.Archive },
+        auth.user.id,
+      );
     });
   });
 
@@ -1182,10 +1349,10 @@ describe(AssetService.name, () => {
       const auth = AuthFactory.create();
       // Editor owns asset-1; has space-edit rights over asset-2 (another member's asset) → AssetUpdate gate passes.
       mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set(['asset-1']));
-      mocks.access.asset.checkSpaceEditAccess.mockResolvedValue(new Set(['asset-2']));
+      mocks.access.spaceAsset.checkSpaceEditAccess.mockResolvedValue(new Set(['asset-2']));
       mocks.asset.getByIds.mockResolvedValue([
-        { id: 'asset-1', visibility: AssetVisibility.Timeline } as any,
-        { id: 'asset-2', visibility: AssetVisibility.Timeline } as any,
+        AssetFactory.create({ id: 'asset-1', visibility: AssetVisibility.Timeline }),
+        AssetFactory.create({ id: 'asset-2', visibility: AssetVisibility.Timeline }),
       ]);
 
       await expect(
@@ -1200,15 +1367,85 @@ describe(AssetService.name, () => {
       expect(mocks.sharedSpace.emitLibraryAssetVisibilityPurge).not.toHaveBeenCalled();
     });
 
-    it('allows a space editor to change a NON-visibility field on a non-owned asset (existing policy) (rbac-3)', async () => {
+    it('allows a space editor to change a metadata field on a non-owned asset (existing policy) (rbac-3)', async () => {
       const auth = AuthFactory.create();
       mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set());
-      mocks.access.asset.checkSpaceEditAccess.mockResolvedValue(new Set(['asset-2']));
+      mocks.access.spaceAsset.checkSpaceEditAccess.mockResolvedValue(new Set(['asset-2']));
+
+      await sut.updateAll(auth, { ids: ['asset-2'], rating: 3 });
+
+      // No owner-only field → the owner-split guard never runs → editor keeps their metadata-edit capability.
+      expect(mocks.asset.updateAllExif).toHaveBeenCalledWith(['asset-2'], { rating: 3 });
+    });
+
+    // duplicateId is the owner's duplicate clean-up — not part of the space-editor grant.
+    it('rejects a bulk duplicateId change that includes a non-owned (space-edit) asset (rbac-3)', async () => {
+      const auth = AuthFactory.create();
+      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set(['asset-1']));
+      mocks.access.spaceAsset.checkSpaceEditAccess.mockResolvedValue(new Set(['asset-2']));
+
+      await expect(sut.updateAll(auth, { ids: ['asset-1', 'asset-2'], duplicateId: null })).rejects.toBeInstanceOf(
+        ForbiddenException,
+      );
+
+      expect(mocks.asset.updateAll).not.toHaveBeenCalled();
+    });
+
+    it("rejects joining another owner's duplicate group", async () => {
+      const auth = AuthFactory.create();
+      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set(['asset-1']));
+      mocks.galleryDuplicate.hasOtherOwner.mockResolvedValue(true);
+
+      await expect(sut.updateAll(auth, { ids: ['asset-1'], duplicateId: 'group-1' })).rejects.toBeInstanceOf(
+        ForbiddenException,
+      );
+
+      expect(mocks.galleryDuplicate.hasOtherOwner).toHaveBeenCalledWith('group-1', auth.user.id);
+      expect(mocks.asset.updateAll).not.toHaveBeenCalled();
+    });
+
+    it('joins a duplicate group that holds only assets the caller owns', async () => {
+      const auth = AuthFactory.create();
+      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set(['asset-1']));
+      mocks.galleryDuplicate.hasOtherOwner.mockResolvedValue(false);
+
+      await sut.updateAll(auth, { ids: ['asset-1'], duplicateId: 'group-1' });
+
+      expect(mocks.galleryDuplicate.hasOtherOwner).toHaveBeenCalledWith('group-1', auth.user.id);
+      expect(mocks.asset.updateAll).toHaveBeenCalledWith(['asset-1'], { duplicateId: 'group-1' });
+    });
+
+    // #763: the deprecated isFavorite alias writes only the caller's own overlay row, so a space editor
+    // favoriting a member's asset is allowed — and, being private state, it is not logged as an edit.
+    it('lets a space editor favorite a non-owned asset via the alias without logging a cross-owner edit (#763)', async () => {
+      const auth = AuthFactory.create();
+      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set());
+      mocks.access.spaceAsset.checkSpaceEditAccess.mockResolvedValue(new Set(['asset-2']));
+      mocks.access.spaceAsset.checkSpaceAccess.mockResolvedValue(new Set(['asset-2']));
 
       await sut.updateAll(auth, { ids: ['asset-2'], isFavorite: true });
 
-      // No visibility → owner-split guard never runs → editor keeps their metadata-edit capability.
-      expect(mocks.asset.updateAll).toHaveBeenCalledWith(['asset-2'], { isFavorite: true });
+      expect(mocks.assetFavorite.addAll).toHaveBeenCalledWith(auth.user.id, ['asset-2']);
+      expect(mocks.asset.updateAll).not.toHaveBeenCalled();
+      expect(mocks.sharedSpace.logActivity).not.toHaveBeenCalled();
+      expect(mocks.sharedSpace.findSpaceForAssetAndUser).not.toHaveBeenCalled();
+    });
+
+    it('should emit a websocket event if a sidecar write is not necessary', async () => {
+      const auth = AuthFactory.create();
+      const asset1 = AssetFactory.from().owner(auth.user).build();
+      const asset2 = AssetFactory.from().owner(auth.user).build();
+      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([asset1.id, asset2.id]));
+      mocks.asset.getByIds.mockResolvedValue([asset1, asset2]);
+
+      await sut.updateAll(auth, { ids: [asset1.id, asset2.id], visibility: AssetVisibility.Archive });
+
+      expect(mocks.asset.updateAll).toHaveBeenCalledWith([asset1.id, asset2.id], {
+        visibility: AssetVisibility.Archive,
+      });
+      expect(mocks.job.queueAll).not.toHaveBeenCalled();
+      expect(mocks.websocket.clientSend).toHaveBeenCalledTimes(2);
+      expect(mocks.asset.getByIds).toHaveBeenLastCalledWith([asset1.id, asset2.id], auth.user.id);
     });
 
     it('should not update Assets table if no relevant fields are provided', async () => {
@@ -1261,11 +1498,12 @@ describe(AssetService.name, () => {
         latitude: 30,
         longitude: 50,
         dateTimeOriginal,
-        isFavorite: false,
         duplicateId: undefined,
         rating: undefined,
       });
-      expect(mocks.asset.updateAll).toHaveBeenCalled();
+      // #763: no visibility/duplicateId set → assetDto is empty → assetRepository.updateAll is
+      // correctly NOT called (isFavorite no longer keeps it non-empty, see the test above).
+      expect(mocks.asset.updateAll).not.toHaveBeenCalled();
       expect(mocks.asset.updateAllExif).toHaveBeenCalledWith(['asset-1'], {
         dateTimeOriginal,
         latitude: 30,
@@ -1360,7 +1598,9 @@ describe(AssetService.name, () => {
       'should purge direct space assets from member devices when visibility is %s',
       async (visibility) => {
         mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set(['asset-1']));
-        mocks.asset.getByIds.mockResolvedValue([{ id: 'asset-1', visibility: AssetVisibility.Timeline } as any]);
+        mocks.asset.getByIds.mockResolvedValue([
+          AssetFactory.create({ id: 'asset-1', visibility: AssetVisibility.Timeline }),
+        ]);
 
         await sut.updateAll(authStub.admin, { ids: ['asset-1'], visibility });
 
@@ -1373,7 +1613,9 @@ describe(AssetService.name, () => {
       'should re-add direct space assets to member devices when visibility is %s',
       async (visibility) => {
         mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set(['asset-1']));
-        mocks.asset.getByIds.mockResolvedValue([{ id: 'asset-1', visibility: AssetVisibility.Hidden } as any]);
+        mocks.asset.getByIds.mockResolvedValue([
+          AssetFactory.create({ id: 'asset-1', visibility: AssetVisibility.Hidden }),
+        ]);
 
         await sut.updateAll(authStub.admin, { ids: ['asset-1'], visibility });
 
@@ -1386,7 +1628,9 @@ describe(AssetService.name, () => {
       'L4: should re-deliver library-asset EXIF to member devices when visibility is %s (restore)',
       async (visibility) => {
         mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set(['asset-1']));
-        mocks.asset.getByIds.mockResolvedValue([{ id: 'asset-1', visibility: AssetVisibility.Hidden } as any]);
+        mocks.asset.getByIds.mockResolvedValue([
+          AssetFactory.create({ id: 'asset-1', visibility: AssetVisibility.Hidden }),
+        ]);
 
         await sut.updateAll(authStub.admin, { ids: ['asset-1'], visibility });
 
@@ -1408,7 +1652,9 @@ describe(AssetService.name, () => {
     // Slice 1: album-path purge/restore dispatch assertions.
     it('should purge album-linked space assets when visibility is Hidden', async () => {
       mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set(['asset-1']));
-      mocks.asset.getByIds.mockResolvedValue([{ id: 'asset-1', visibility: AssetVisibility.Timeline } as any]);
+      mocks.asset.getByIds.mockResolvedValue([
+        AssetFactory.create({ id: 'asset-1', visibility: AssetVisibility.Timeline }),
+      ]);
 
       await sut.updateAll(authStub.admin, { ids: ['asset-1'], visibility: AssetVisibility.Hidden });
 
@@ -1418,7 +1664,9 @@ describe(AssetService.name, () => {
 
     it('should NOT purge album-linked assets when visibility is Locked (removeAssetsFromAll covers it)', async () => {
       mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set(['asset-1']));
-      mocks.asset.getByIds.mockResolvedValue([{ id: 'asset-1', visibility: AssetVisibility.Timeline } as any]);
+      mocks.asset.getByIds.mockResolvedValue([
+        AssetFactory.create({ id: 'asset-1', visibility: AssetVisibility.Timeline }),
+      ]);
 
       await sut.updateAll(authStub.admin, { ids: ['asset-1'], visibility: AssetVisibility.Locked });
 
@@ -1430,7 +1678,9 @@ describe(AssetService.name, () => {
       'should re-add album-linked space assets to member devices when visibility is %s',
       async (visibility) => {
         mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set(['asset-1']));
-        mocks.asset.getByIds.mockResolvedValue([{ id: 'asset-1', visibility: AssetVisibility.Hidden } as any]);
+        mocks.asset.getByIds.mockResolvedValue([
+          AssetFactory.create({ id: 'asset-1', visibility: AssetVisibility.Hidden }),
+        ]);
 
         await sut.updateAll(authStub.admin, { ids: ['asset-1'], visibility });
 
@@ -1453,7 +1703,9 @@ describe(AssetService.name, () => {
       'should purge library-linked space assets when visibility is %s',
       async (visibility) => {
         mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set(['asset-1']));
-        mocks.asset.getByIds.mockResolvedValue([{ id: 'asset-1', visibility: AssetVisibility.Timeline } as any]);
+        mocks.asset.getByIds.mockResolvedValue([
+          AssetFactory.create({ id: 'asset-1', visibility: AssetVisibility.Timeline }),
+        ]);
 
         await sut.updateAll(authStub.admin, { ids: ['asset-1'], visibility });
 
@@ -1519,7 +1771,9 @@ describe(AssetService.name, () => {
       // Gating purgeIds on "prior was shareable" would silently no-op here and leave the member's
       // device holding stale bytes forever. M3 makes the purge unconditional on a non-shareable next.
       mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set(['asset-1']));
-      mocks.asset.getByIds.mockResolvedValue([{ id: 'asset-1', visibility: AssetVisibility.Hidden } as any]);
+      mocks.asset.getByIds.mockResolvedValue([
+        AssetFactory.create({ id: 'asset-1', visibility: AssetVisibility.Hidden }),
+      ]);
       await sut.updateAll(authStub.admin, { ids: ['asset-1'], visibility: AssetVisibility.Hidden });
       expect(mocks.sharedSpace.emitDirectAssetVisibilityPurge).toHaveBeenCalledWith(['asset-1']);
       expect(mocks.sharedSpace.emitAlbumAssetVisibilityPurge).toHaveBeenCalledWith(['asset-1']);
@@ -1528,7 +1782,9 @@ describe(AssetService.name, () => {
 
     it('does NOT purge or restore on a Timeline→Archive move (both shareable, correctness-8)', async () => {
       mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set(['asset-1']));
-      mocks.asset.getByIds.mockResolvedValue([{ id: 'asset-1', visibility: AssetVisibility.Timeline } as any]);
+      mocks.asset.getByIds.mockResolvedValue([
+        AssetFactory.create({ id: 'asset-1', visibility: AssetVisibility.Timeline }),
+      ]);
       await sut.updateAll(authStub.admin, { ids: ['asset-1'], visibility: AssetVisibility.Archive });
       expect(mocks.sharedSpace.emitDirectAssetVisibilityPurge).not.toHaveBeenCalled();
       expect(mocks.sharedSpace.emitDirectAssetVisibilityRestore).not.toHaveBeenCalled();
@@ -1539,8 +1795,8 @@ describe(AssetService.name, () => {
       // asset-1 crosses Timeline→Hidden; asset-2 was already Hidden (simulates a retry after a failed
       // emit on a prior request that committed the write but never delivered the purge).
       mocks.asset.getByIds.mockResolvedValue([
-        { id: 'asset-1', visibility: AssetVisibility.Timeline } as any,
-        { id: 'asset-2', visibility: AssetVisibility.Hidden } as any,
+        AssetFactory.create({ id: 'asset-1', visibility: AssetVisibility.Timeline }),
+        AssetFactory.create({ id: 'asset-2', visibility: AssetVisibility.Hidden }),
       ]);
       await sut.updateAll(authStub.admin, {
         ids: ['asset-1', 'asset-2'],
@@ -1554,7 +1810,9 @@ describe(AssetService.name, () => {
 
     it('re-locking an already-Locked asset still strips it from albums (M-1 retry-convergence)', async () => {
       mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set(['asset-1']));
-      mocks.asset.getByIds.mockResolvedValue([{ id: 'asset-1', visibility: AssetVisibility.Locked } as any]);
+      mocks.asset.getByIds.mockResolvedValue([
+        AssetFactory.create({ id: 'asset-1', visibility: AssetVisibility.Locked }),
+      ]);
       await sut.updateAll(authStub.admin, { ids: ['asset-1'], visibility: AssetVisibility.Locked });
       // M-1: the album strip is now UNCONDITIONAL on Locked (no prior!==Locked "lock-once" gate). A crash
       // between the visibility UPDATE and the strip left the album_asset rows with no tombstone, and the old
@@ -1668,7 +1926,7 @@ describe(AssetService.name, () => {
       ]);
     });
 
-    it('should set deleteOnDisk to false for offline assets', async () => {
+    it('should queue offline assets like any other (handleAssetDeletion keeps their files)', async () => {
       const asset = AssetFactory.create({ isOffline: true });
 
       mocks.assetJob.streamForDeletedJob.mockReturnValue(makeStream([asset]));
@@ -1677,7 +1935,7 @@ describe(AssetService.name, () => {
       await expect(sut.handleAssetDeletionCheck()).resolves.toBe(JobStatus.Success);
 
       expect(mocks.job.queueAll).toHaveBeenCalledWith([
-        { name: JobName.AssetDelete, data: { id: asset.id, deleteOnDisk: false } },
+        { name: JobName.AssetDelete, data: { id: asset.id, deleteOnDisk: true } },
       ]);
     });
 
@@ -1692,39 +1950,6 @@ describe(AssetService.name, () => {
   });
 
   describe('handleAssetDeletion', () => {
-    it('retains and retries a deletion while a file save is queued', async () => {
-      const id = newUuid();
-      mocks.assetEditSave.isSaving.mockResolvedValue(true);
-      await expect(sut.handleAssetDeletion({ id, deleteOnDisk: true })).resolves.toBe(JobStatus.Skipped);
-      expect(mocks.job.queue).toHaveBeenCalledWith({
-        name: JobName.AssetDelete,
-        data: { id, deleteOnDisk: true, delay: 2000 },
-      });
-      expect(mocks.assetJob.getForAssetDeletion).not.toHaveBeenCalled();
-    });
-    it.each([false, true])('deletes the video source and sidecar (external=%s)', async (external) => {
-      const asset = AssetFactory.from({
-        type: AssetType.Video,
-        libraryId: external ? newUuid() : null,
-        isExternal: external,
-        originalPath: external ? '/mnt/external/video.mp4' : '/data/upload/video.mp4',
-      })
-        .file({ type: AssetFileType.Thumbnail })
-        .file({ type: AssetFileType.Preview })
-        .file({ type: AssetFileType.EncodedVideo })
-        .file({ type: AssetFileType.Sidecar })
-        .build();
-      mocks.assetJob.getForAssetDeletion.mockResolvedValue(getForAssetDeletion(asset));
-
-      await sut.handleAssetDeletion({ id: asset.id, deleteOnDisk: true });
-
-      expect(mocks.job.queue).toHaveBeenCalledWith({
-        name: JobName.FileDelete,
-        data: { files: expect.arrayContaining([asset.originalPath, ...asset.files.map(({ path }) => path)]) },
-      });
-      expect(mocks.asset.remove).toHaveBeenCalledWith(getForAssetDeletion(asset));
-    });
-
     // Deleting an asset makes Postgres lock shared_space_person itself to satisfy the
     // representativeFaceId ON DELETE SET NULL foreign key, in face-deletion order. That cycles
     // against concurrent space-people recounts and no application-level ordering can prevent it,
@@ -1853,20 +2078,22 @@ describe(AssetService.name, () => {
       expect(mocks.stack.update).not.toHaveBeenCalled();
     });
 
-    it('should delete a live photo', async () => {
+    it.each([
+      { isOffline: false, deleteOnDisk: true },
+      { isOffline: true, deleteOnDisk: false },
+    ])('should delete a live photo (isOffline: $isOffline)', async ({ isOffline, deleteOnDisk }) => {
       const motionAsset = AssetFactory.from({ type: AssetType.Video, visibility: AssetVisibility.Hidden }).build();
-      const asset = AssetFactory.create({ livePhotoVideoId: motionAsset.id });
+      const asset = AssetFactory.from({ livePhotoVideoId: motionAsset.id, isOffline })
+        .file({ type: AssetFileType.Sidecar })
+        .build();
       mocks.assetJob.getForAssetDeletion.mockResolvedValue(getForAssetDeletion(asset));
       mocks.asset.getLivePhotoCount.mockResolvedValue(0);
 
-      await sut.handleAssetDeletion({
-        id: asset.id,
-        deleteOnDisk: true,
-      });
+      await sut.handleAssetDeletion({ id: asset.id, deleteOnDisk: true });
 
       expect(mocks.job.queue.mock.calls).toEqual([
-        [{ name: JobName.AssetDelete, data: { id: motionAsset.id, deleteOnDisk: true } }],
-        [{ name: JobName.FileDelete, data: { files: [asset.originalPath] } }],
+        [{ name: JobName.AssetDelete, data: { id: motionAsset.id, deleteOnDisk } }],
+        [{ name: JobName.FileDelete, data: { files: deleteOnDisk ? [asset.files[0].path, asset.originalPath] : [] } }],
       ]);
     });
 
@@ -2162,7 +2389,7 @@ describe(AssetService.name, () => {
 
       mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([asset.id]));
 
-      await expect(sut.upsertMetadata(authStub.admin, asset.id, { items })).rejects.toThrowError(
+      await expect(sut.upsertMetadata(authStub.admin, asset.id, { items })).rejects.toThrow(
         'Duplicate items are not allowed:',
       );
 
@@ -2192,7 +2419,7 @@ describe(AssetService.name, () => {
 
       mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([asset.id]));
 
-      await expect(sut.upsertBulkMetadata(authStub.admin, { items })).rejects.toThrowError(
+      await expect(sut.upsertBulkMetadata(authStub.admin, { items })).rejects.toThrow(
         'Duplicate items are not allowed:',
       );
 
@@ -2364,7 +2591,7 @@ describe(AssetService.name, () => {
 
       await sut.copy(authStub.admin, { sourceId, targetId, favorite: false });
 
-      expect(mocks.asset.update).not.toHaveBeenCalledWith(expect.objectContaining({ isFavorite: true }));
+      expect(mocks.asset.update).not.toHaveBeenCalled();
     });
   });
 
@@ -2377,7 +2604,7 @@ describe(AssetService.name, () => {
 
     beforeEach(() => {
       cleanupSpy = vi.fn().mockResolvedValue(void 0);
-      vi.spyOn(sut as any, 'ensureLocalFile').mockImplementation(((p: string) =>
+      vi.spyOn((sut as any).backendMedia, 'ensureLocalFile').mockImplementation(((p: string) =>
         Promise.resolve({
           localPath: p.startsWith('/') ? p : `/tmp/dl-${path.basename(p)}`,
           cleanup: p.startsWith('/') ? async () => {} : cleanupSpy,
@@ -2393,7 +2620,7 @@ describe(AssetService.name, () => {
     it('disk → S3: uploads via backend.put', async () => {
       const backendPut = vi.fn().mockResolvedValue(void 0);
       const { StorageService } = await import('src/services/storage.service.js');
-      vi.spyOn(StorageService, 'resolveBackendForKey').mockReturnValue({ put: backendPut } as any);
+      vi.spyOn(StorageService, 'backendFor').mockReturnValue({ put: backendPut } as any);
 
       await (sut as any).copySidecar({ sourceAsset: { files: [diskSource] }, targetAsset: s3TargetAsset });
 
@@ -2414,7 +2641,7 @@ describe(AssetService.name, () => {
     it('S3 → S3: downloads source then uploads to target', async () => {
       const backendPut = vi.fn().mockResolvedValue(void 0);
       const { StorageService } = await import('src/services/storage.service.js');
-      vi.spyOn(StorageService, 'resolveBackendForKey').mockReturnValue({ put: backendPut } as any);
+      vi.spyOn(StorageService, 'backendFor').mockReturnValue({ put: backendPut } as any);
 
       await (sut as any).copySidecar({ sourceAsset: { files: [s3Source] }, targetAsset: s3TargetAsset });
 
@@ -2430,7 +2657,7 @@ describe(AssetService.name, () => {
       const target = { ...s3TargetAsset, files: [existingTarget] };
       const backendPut = vi.fn().mockResolvedValue(void 0);
       const { StorageService } = await import('src/services/storage.service.js');
-      vi.spyOn(StorageService, 'resolveBackendForKey').mockReturnValue({ put: backendPut } as any);
+      vi.spyOn(StorageService, 'backendFor').mockReturnValue({ put: backendPut } as any);
 
       const sourceStream = Readable.from(['<xml/>']);
       mocks.storage.createPlainReadStream.mockReturnValue(sourceStream);
@@ -2450,7 +2677,7 @@ describe(AssetService.name, () => {
     it('succeeds when target has no existing sidecar (files: []) — disk→S3 variant', async () => {
       const backendPut = vi.fn().mockResolvedValue(void 0);
       const { StorageService } = await import('src/services/storage.service.js');
-      vi.spyOn(StorageService, 'resolveBackendForKey').mockReturnValue({ put: backendPut } as any);
+      vi.spyOn(StorageService, 'backendFor').mockReturnValue({ put: backendPut } as any);
 
       await (sut as any).copySidecar({
         sourceAsset: { files: [diskSource] },
@@ -2463,7 +2690,7 @@ describe(AssetService.name, () => {
     it('succeeds when targetAsset.files is undefined (not just empty)', async () => {
       const backendPut = vi.fn().mockResolvedValue(void 0);
       const { StorageService } = await import('src/services/storage.service.js');
-      vi.spyOn(StorageService, 'resolveBackendForKey').mockReturnValue({ put: backendPut } as any);
+      vi.spyOn(StorageService, 'backendFor').mockReturnValue({ put: backendPut } as any);
 
       await (sut as any).copySidecar({
         sourceAsset: { files: [s3Source] },
@@ -2487,7 +2714,7 @@ describe(AssetService.name, () => {
     it('calls cleanup when backend.put fails', async () => {
       const backendPut = vi.fn().mockRejectedValue(new Error('S3 down'));
       const { StorageService } = await import('src/services/storage.service.js');
-      vi.spyOn(StorageService, 'resolveBackendForKey').mockReturnValue({ put: backendPut } as any);
+      vi.spyOn(StorageService, 'backendFor').mockReturnValue({ put: backendPut } as any);
 
       await expect(
         (sut as any).copySidecar({ sourceAsset: { files: [s3Source] }, targetAsset: s3TargetAsset }),
@@ -2571,7 +2798,6 @@ describe(AssetService.name, () => {
         livePhotoVideoId: null,
         originalPath: '/data/video.mp4',
         originalFileName: 'video.mp4',
-        duration: null,
         exifImageWidth: 1920,
         exifImageHeight: 1080,
         orientation: null,
@@ -2593,7 +2819,6 @@ describe(AssetService.name, () => {
         livePhotoVideoId: newUuid(),
         originalPath: '/data/image.jpg',
         originalFileName: 'image.jpg',
-        duration: null,
         exifImageWidth: 1920,
         exifImageHeight: 1080,
         orientation: null,
@@ -2615,7 +2840,6 @@ describe(AssetService.name, () => {
         livePhotoVideoId: null,
         originalPath: '/data/pano.jpg',
         originalFileName: 'pano.jpg',
-        duration: null,
         exifImageWidth: 1920,
         exifImageHeight: 1080,
         orientation: null,
@@ -2637,7 +2861,6 @@ describe(AssetService.name, () => {
         livePhotoVideoId: null,
         originalPath: '/data/image.gif',
         originalFileName: 'image.gif',
-        duration: null,
         exifImageWidth: 1920,
         exifImageHeight: 1080,
         orientation: null,
@@ -2659,7 +2882,6 @@ describe(AssetService.name, () => {
         livePhotoVideoId: null,
         originalPath: '/data/image.svg',
         originalFileName: 'image.svg',
-        duration: null,
         exifImageWidth: 1920,
         exifImageHeight: 1080,
         orientation: null,
@@ -2681,7 +2903,6 @@ describe(AssetService.name, () => {
         livePhotoVideoId: null,
         originalPath: '/data/image.jpg',
         originalFileName: 'image.jpg',
-        duration: null,
         exifImageWidth: null,
         exifImageHeight: null,
         orientation: null,
@@ -2703,7 +2924,6 @@ describe(AssetService.name, () => {
         livePhotoVideoId: null,
         originalPath: '/data/image.jpg',
         originalFileName: 'image.jpg',
-        duration: null,
         exifImageWidth: 100,
         exifImageHeight: 100,
         orientation: null,
@@ -2726,7 +2946,6 @@ describe(AssetService.name, () => {
         livePhotoVideoId: null,
         originalPath: '/data/image.jpg',
         originalFileName: 'image.jpg',
-        duration: null,
         exifImageWidth: 1920,
         exifImageHeight: 1080,
         orientation: null,
@@ -2759,7 +2978,6 @@ describe(AssetService.name, () => {
         livePhotoVideoId: null,
         originalPath: '/data/image.jpg',
         originalFileName: 'image.jpg',
-        duration: null,
         exifImageWidth: 100,
         exifImageHeight: 100,
         orientation: null,
@@ -2770,426 +2988,6 @@ describe(AssetService.name, () => {
       const result = await sut.editAsset(authStub.admin, assetId, { edits: editActions as any });
 
       expect(result).toEqual({ assetId, edits: returnedEdits });
-    });
-
-    it('should accept trim on video assets', async () => {
-      const assetId = newUuid();
-      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([assetId]));
-      mocks.assetEdit.getAll.mockResolvedValue([]);
-      mocks.asset.getForEdit.mockResolvedValue({
-        type: AssetType.Video,
-        livePhotoVideoId: null,
-        originalPath: '/data/library/video.mp4',
-        originalFileName: 'video.mp4',
-        duration: 30_000,
-        exifImageWidth: 1920,
-        exifImageHeight: 1080,
-        orientation: null,
-        projectionType: null,
-      });
-      mocks.media.probe.mockResolvedValue({
-        videoStreams: [{ width: 1920, height: 1080 }],
-        audioStreams: [{}],
-        format: {},
-      } as any);
-      mocks.assetEdit.replaceAll.mockResolvedValue([]);
-
-      await sut.editAsset(authStub.admin, assetId, {
-        edits: [{ action: AssetEditAction.Trim, parameters: { startTime: 5, endTime: 25 } }],
-      });
-
-      expect(mocks.assetEdit.replaceAll).toHaveBeenCalled();
-    });
-
-    it('should allow re-trimming wider than current trimmed duration using originalDuration', async () => {
-      const assetId = newUuid();
-      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([assetId]));
-      // Current duration is the trimmed duration (10s), not the original (30s)
-      mocks.asset.getForEdit.mockResolvedValue({
-        type: AssetType.Video,
-        livePhotoVideoId: null,
-        originalPath: '/data/library/video.mp4',
-        originalFileName: 'video.mp4',
-        duration: 10_000,
-        exifImageWidth: 1920,
-        exifImageHeight: 1080,
-        orientation: null,
-        projectionType: null,
-      });
-      mocks.media.probe.mockResolvedValue({
-        videoStreams: [{ width: 1920, height: 1080 }],
-        audioStreams: [{}],
-        format: {},
-      } as any);
-      // Existing trim edit has originalDuration of 30s
-      mocks.assetEdit.getAll.mockResolvedValue([
-        {
-          id: 'edit-1',
-          action: AssetEditAction.Trim,
-          parameters: { startTime: 10, endTime: 20, originalDuration: 30 },
-        },
-      ] as any);
-      mocks.assetEdit.replaceAll.mockResolvedValue([]);
-
-      // Re-trim to 5-25 (wider than current 10s duration, but within original 30s)
-      await sut.editAsset(authStub.admin, assetId, {
-        edits: [{ action: AssetEditAction.Trim, parameters: { startTime: 5, endTime: 25 } }],
-      });
-
-      expect(mocks.assetEdit.replaceAll).toHaveBeenCalled();
-    });
-
-    it('should reject trim on image assets', async () => {
-      const assetId = newUuid();
-      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([assetId]));
-      mocks.asset.getForEdit.mockResolvedValue({
-        type: AssetType.Image,
-        livePhotoVideoId: null,
-        originalPath: '/data/library/photo.jpg',
-        originalFileName: 'photo.jpg',
-        duration: null,
-        exifImageWidth: 1920,
-        exifImageHeight: 1080,
-        orientation: null,
-        projectionType: null,
-      });
-
-      await expect(
-        sut.editAsset(authStub.admin, assetId, {
-          edits: [{ action: AssetEditAction.Trim, parameters: { startTime: 0, endTime: 10 } }],
-        }),
-      ).rejects.toBeInstanceOf(BadRequestException);
-    });
-
-    it('should reject trim with endTime exceeding duration', async () => {
-      const assetId = newUuid();
-      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([assetId]));
-      mocks.assetEdit.getAll.mockResolvedValue([]);
-      mocks.asset.getForEdit.mockResolvedValue({
-        type: AssetType.Video,
-        livePhotoVideoId: null,
-        originalPath: '/data/library/video.mp4',
-        originalFileName: 'video.mp4',
-        duration: 30_000,
-        exifImageWidth: 1920,
-        exifImageHeight: 1080,
-        orientation: null,
-        projectionType: null,
-      });
-      mocks.media.probe.mockResolvedValue({
-        videoStreams: [{ width: 1920, height: 1080 }],
-        audioStreams: [{}],
-        format: {},
-      } as any);
-
-      await expect(
-        sut.editAsset(authStub.admin, assetId, {
-          edits: [{ action: AssetEditAction.Trim, parameters: { startTime: 0, endTime: 60 } }],
-        }),
-      ).rejects.toBeInstanceOf(BadRequestException);
-    });
-
-    it('should reject mixed spatial and trim edits', async () => {
-      const assetId = newUuid();
-      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([assetId]));
-      mocks.asset.getForEdit.mockResolvedValue({
-        type: AssetType.Video,
-        livePhotoVideoId: null,
-        originalPath: '/data/library/video.mp4',
-        originalFileName: 'video.mp4',
-        duration: 30_000,
-        exifImageWidth: 1920,
-        exifImageHeight: 1080,
-        orientation: null,
-        projectionType: null,
-      });
-
-      await expect(
-        sut.editAsset(authStub.admin, assetId, {
-          edits: [
-            { action: AssetEditAction.Trim, parameters: { startTime: 5, endTime: 25 } },
-            { action: AssetEditAction.Rotate, parameters: { angle: 90 } },
-          ],
-        }),
-      ).rejects.toBeInstanceOf(BadRequestException);
-    });
-
-    it('should accept trim on S3-backed videos and probe via a presigned url', async () => {
-      const assetId = newUuid();
-      const getReadableUrl = vi.fn().mockResolvedValue('https://bucket.s3/key?X-Amz-Signature=abc');
-      const { StorageService } = await import('src/services/storage.service.js');
-      vi.spyOn(StorageService, 'resolveBackendForKey').mockReturnValue({ getReadableUrl } as any);
-
-      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([assetId]));
-      mocks.asset.getForEdit.mockResolvedValue({
-        type: AssetType.Video,
-        livePhotoVideoId: null,
-        originalPath: 'upload/admin/ab/cd/video.mp4',
-        originalFileName: 'video.mp4',
-        duration: 30_000,
-        exifImageWidth: 1920,
-        exifImageHeight: 1080,
-        orientation: null,
-        projectionType: null,
-      } as any);
-      mocks.assetEdit.getAll.mockResolvedValue([]);
-      mocks.assetEdit.replaceAll.mockResolvedValue([] as any);
-      mocks.media.probe.mockResolvedValue({
-        videoStreams: [{}],
-        audioStreams: [{}],
-        format: {},
-      } as any);
-
-      await sut.editAsset(authStub.admin, assetId, {
-        edits: [{ action: AssetEditAction.Trim, parameters: { startTime: 5, endTime: 25 } }],
-      });
-
-      expect(getReadableUrl).toHaveBeenCalledWith('upload/admin/ab/cd/video.mp4');
-      expect(mocks.media.probe).toHaveBeenCalledWith('https://bucket.s3/key?X-Amz-Signature=abc');
-      expect(mocks.assetEdit.replaceAll).toHaveBeenCalled();
-      expect(mocks.job.queue).toHaveBeenCalledWith({
-        name: JobName.AssetEditThumbnailGeneration,
-        data: { id: assetId },
-      });
-
-      vi.restoreAllMocks();
-    });
-
-    it('surfaces a generic error, never the presigned url, when the probe fails', async () => {
-      const assetId = newUuid();
-      const getReadableUrl = vi.fn().mockResolvedValue('https://bucket.s3/key?X-Amz-Signature=SECRET');
-      const { StorageService } = await import('src/services/storage.service.js');
-      vi.spyOn(StorageService, 'resolveBackendForKey').mockReturnValue({ getReadableUrl } as any);
-
-      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([assetId]));
-      mocks.asset.getForEdit.mockResolvedValue({
-        type: AssetType.Video,
-        livePhotoVideoId: null,
-        originalPath: 'upload/admin/ab/cd/video.mp4',
-        originalFileName: 'video.mp4',
-        duration: 30_000,
-        exifImageWidth: 1920,
-        exifImageHeight: 1080,
-        orientation: null,
-        projectionType: null,
-      } as any);
-      mocks.assetEdit.getAll.mockResolvedValue([]);
-      // ffprobe echoes the input (the presigned url, with its signature) in its error message.
-      mocks.media.probe.mockRejectedValue(new Error('https://bucket.s3/key?X-Amz-Signature=SECRET: Invalid data'));
-
-      const error = await sut
-        .editAsset(authStub.admin, assetId, {
-          edits: [{ action: AssetEditAction.Trim, parameters: { startTime: 5, endTime: 25 } }],
-        })
-        .catch((error_: unknown) => error_);
-
-      expect(error).toBeInstanceOf(BadRequestException);
-      expect((error as Error).message).not.toContain('X-Amz-Signature');
-
-      vi.restoreAllMocks();
-    });
-
-    it('should reject trim on external library videos', async () => {
-      const assetId = newUuid();
-      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([assetId]));
-      mocks.asset.getForEdit.mockResolvedValue({
-        type: AssetType.Video,
-        livePhotoVideoId: null,
-        originalPath: '/mnt/external/video.mp4',
-        originalFileName: 'video.mp4',
-        duration: 30_000,
-        exifImageWidth: 1920,
-        exifImageHeight: 1080,
-        orientation: null,
-        projectionType: null,
-      } as any);
-
-      await expect(
-        sut.editAsset(authStub.admin, assetId, {
-          edits: [{ action: AssetEditAction.Trim, parameters: { startTime: 5, endTime: 25 } }],
-        }),
-      ).rejects.toThrow('Video trimming is not available for external library videos');
-    });
-
-    it('should reject trim on audio-only S3 files', async () => {
-      const assetId = newUuid();
-      const getReadableUrl = vi.fn().mockResolvedValue('https://bucket.s3/key?X-Amz-Signature=abc');
-      const { StorageService } = await import('src/services/storage.service.js');
-      vi.spyOn(StorageService, 'resolveBackendForKey').mockReturnValue({ getReadableUrl } as any);
-
-      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([assetId]));
-      mocks.asset.getForEdit.mockResolvedValue({
-        type: AssetType.Video,
-        livePhotoVideoId: null,
-        originalPath: 'upload/admin/ab/cd/audio.m4a',
-        originalFileName: 'audio.m4a',
-        duration: 180_000,
-        exifImageWidth: null,
-        exifImageHeight: null,
-        orientation: null,
-        projectionType: null,
-      } as any);
-      mocks.assetEdit.getAll.mockResolvedValue([]);
-      mocks.media.probe.mockResolvedValue({ videoStreams: [], audioStreams: [{}], format: {} } as any);
-
-      await expect(
-        sut.editAsset(authStub.admin, assetId, {
-          edits: [{ action: AssetEditAction.Trim, parameters: { startTime: 10, endTime: 60 } }],
-        }),
-      ).rejects.toThrow('Cannot trim audio-only files');
-
-      vi.restoreAllMocks();
-    });
-
-    it('should probe disk-backed videos by absolute path, without presigning', async () => {
-      const assetId = newUuid();
-      const { StorageService } = await import('src/services/storage.service.js');
-      const resolveSpy = vi.spyOn(StorageService, 'resolveBackendForKey');
-
-      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([assetId]));
-      mocks.asset.getForEdit.mockResolvedValue({
-        type: AssetType.Video,
-        livePhotoVideoId: null,
-        originalPath: '/data/library/video.mp4',
-        originalFileName: 'video.mp4',
-        duration: 30_000,
-        exifImageWidth: 1920,
-        exifImageHeight: 1080,
-        orientation: null,
-        projectionType: null,
-      } as any);
-      mocks.assetEdit.getAll.mockResolvedValue([]);
-      mocks.assetEdit.replaceAll.mockResolvedValue([] as any);
-      mocks.media.probe.mockResolvedValue({ videoStreams: [{}], audioStreams: [{}], format: {} } as any);
-
-      await sut.editAsset(authStub.admin, assetId, {
-        edits: [{ action: AssetEditAction.Trim, parameters: { startTime: 5, endTime: 25 } }],
-      });
-
-      expect(mocks.media.probe).toHaveBeenCalledWith('/data/library/video.mp4');
-      expect(resolveSpy).not.toHaveBeenCalled();
-
-      vi.restoreAllMocks();
-    });
-
-    it('should reject trim on audio-only files', async () => {
-      const assetId = newUuid();
-      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([assetId]));
-      mocks.asset.getForEdit.mockResolvedValue({
-        type: AssetType.Video,
-        livePhotoVideoId: null,
-        originalPath: '/data/library/audio.mp3',
-        originalFileName: 'audio.mp3',
-        duration: 180_000,
-        exifImageWidth: null,
-        exifImageHeight: null,
-        orientation: null,
-        projectionType: null,
-      });
-      mocks.media.probe.mockResolvedValue({
-        videoStreams: [],
-        audioStreams: [{}],
-        format: {},
-      } as any);
-
-      await expect(
-        sut.editAsset(authStub.admin, assetId, {
-          edits: [{ action: AssetEditAction.Trim, parameters: { startTime: 10, endTime: 60 } }],
-        }),
-      ).rejects.toThrow('Cannot trim audio-only files');
-    });
-
-    it('should reject trim on very short videos', async () => {
-      const assetId = newUuid();
-      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([assetId]));
-      mocks.assetEdit.getAll.mockResolvedValue([]);
-      mocks.asset.getForEdit.mockResolvedValue({
-        type: AssetType.Video,
-        livePhotoVideoId: null,
-        originalPath: '/data/library/video.mp4',
-        originalFileName: 'video.mp4',
-        duration: 1500,
-        exifImageWidth: 1920,
-        exifImageHeight: 1080,
-        orientation: null,
-        projectionType: null,
-      });
-      mocks.media.probe.mockResolvedValue({
-        videoStreams: [{ width: 1920, height: 1080 }],
-        audioStreams: [],
-        format: {},
-      } as any);
-
-      await expect(
-        sut.editAsset(authStub.admin, assetId, {
-          edits: [{ action: AssetEditAction.Trim, parameters: { startTime: 0, endTime: 1 } }],
-        }),
-      ).rejects.toBeInstanceOf(BadRequestException);
-    });
-
-    it('should reject full-duration trim (no-op)', async () => {
-      const assetId = newUuid();
-      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([assetId]));
-      mocks.assetEdit.getAll.mockResolvedValue([]);
-      mocks.asset.getForEdit.mockResolvedValue({
-        type: AssetType.Video,
-        livePhotoVideoId: null,
-        originalPath: '/data/library/video.mp4',
-        originalFileName: 'video.mp4',
-        duration: 30_000,
-        exifImageWidth: 1920,
-        exifImageHeight: 1080,
-        orientation: null,
-        projectionType: null,
-      });
-      mocks.media.probe.mockResolvedValue({
-        videoStreams: [{ width: 1920, height: 1080 }],
-        audioStreams: [],
-        format: {},
-      } as any);
-
-      await expect(
-        sut.editAsset(authStub.admin, assetId, {
-          edits: [{ action: AssetEditAction.Trim, parameters: { startTime: 0, endTime: 30 } }],
-        }),
-      ).rejects.toBeInstanceOf(BadRequestException);
-    });
-
-    it('should allow full-duration trim when undoing an existing trim', async () => {
-      const assetId = newUuid();
-      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([assetId]));
-      // Existing trim with originalDuration — user is dragging handles back to full range
-      mocks.assetEdit.getAll.mockResolvedValue([
-        {
-          id: 'edit-1',
-          action: AssetEditAction.Trim,
-          parameters: { startTime: 10, endTime: 20, originalDuration: 30 },
-        },
-      ] as any);
-      mocks.asset.getForEdit.mockResolvedValue({
-        type: AssetType.Video,
-        livePhotoVideoId: null,
-        originalPath: '/data/library/video.mp4',
-        originalFileName: 'video.mp4',
-        duration: 10_000,
-        exifImageWidth: 1920,
-        exifImageHeight: 1080,
-        orientation: null,
-        projectionType: null,
-      });
-      mocks.media.probe.mockResolvedValue({
-        videoStreams: [{ width: 1920, height: 1080 }],
-        audioStreams: [{}],
-        format: {},
-      } as any);
-      mocks.assetEdit.replaceAll.mockResolvedValue([]);
-
-      // Full-range trim (start=0, end=originalDuration) should succeed when undoing
-      await sut.editAsset(authStub.admin, assetId, {
-        edits: [{ action: AssetEditAction.Trim, parameters: { startTime: 0, endTime: 30 } }],
-      });
-
-      expect(mocks.assetEdit.replaceAll).toHaveBeenCalled();
     });
   });
 
@@ -3210,7 +3008,6 @@ describe(AssetService.name, () => {
       const asset = AssetFactory.create();
       mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([asset.id]));
       mocks.asset.getById.mockResolvedValue(asset as any);
-      mocks.assetEdit.getAll.mockResolvedValue([]);
       mocks.assetEdit.replaceAll.mockResolvedValue([]);
 
       await sut.removeAssetEdits(authStub.admin, asset.id);
@@ -3221,61 +3018,312 @@ describe(AssetService.name, () => {
         data: { id: asset.id },
       });
     });
+  });
 
-    it('should restore original duration when removing trim edits', async () => {
-      const asset = AssetFactory.create({ type: AssetType.Video });
-      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([asset.id]));
-      mocks.asset.getById.mockResolvedValue(asset as any);
-      mocks.assetEdit.getAll.mockResolvedValue([
-        {
-          id: newUuid(),
-          action: AssetEditAction.Trim,
-          parameters: { startTime: 5, endTime: 25, originalDuration: 30 } as any,
-        },
-      ]);
-      mocks.assetEdit.replaceAll.mockResolvedValue([]);
-
-      await sut.removeAssetEdits(authStub.admin, asset.id);
-
-      expect(mocks.asset.update).toHaveBeenCalledWith({
-        id: asset.id,
-        duration: 30_000,
-      });
-      expect(mocks.assetEdit.replaceAll).toHaveBeenCalledWith(asset.id, []);
-    });
-
-    it('should handle missing originalDuration gracefully on undo', async () => {
-      const asset = AssetFactory.create({ type: AssetType.Video });
-      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([asset.id]));
-      mocks.asset.getById.mockResolvedValue(asset as any);
-      mocks.assetEdit.getAll.mockResolvedValue([
-        {
-          id: newUuid(),
-          action: AssetEditAction.Trim,
-          parameters: { startTime: 5, endTime: 25 },
-        },
-      ]);
-      mocks.assetEdit.replaceAll.mockResolvedValue([]);
-
-      await sut.removeAssetEdits(authStub.admin, asset.id);
-
-      // Should not crash, should not update duration
-      expect(mocks.asset.update).not.toHaveBeenCalled();
-      expect(mocks.assetEdit.replaceAll).toHaveBeenCalledWith(asset.id, []);
-    });
-
-    it('should not update duration when removing non-trim edits', async () => {
+  describe('asset edits — space editor access (#734)', () => {
+    it('S-15: a space member can read the edits of a member asset (via AssetRead, not AssetEditGet)', async () => {
+      // getAssetEdits gates per-asset on Permission.AssetRead, not AssetEditGet — AssetRead's
+      // space arm is checkSpaceAccess, which admits any space member regardless of role. This
+      // does NOT exercise the AssetEditGet widening above (that case is unreachable from any
+      // current call site); do not "fix" this back to mocking checkSpaceEditAccess.
+      const auth = AuthFactory.create();
       const asset = AssetFactory.create();
-      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([asset.id]));
-      mocks.asset.getById.mockResolvedValue(asset as any);
-      mocks.assetEdit.getAll.mockResolvedValue([
-        { id: newUuid(), action: AssetEditAction.Rotate, parameters: { angle: 90 } },
-      ]);
+      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set());
+      mocks.access.spaceAsset.checkSpaceAccess.mockResolvedValue(new Set([asset.id]));
+      mocks.assetEdit.getAll.mockResolvedValue([]);
+
+      await expect(sut.getAssetEdits(auth, asset.id)).resolves.toEqual({ assetId: asset.id, edits: [] });
+    });
+
+    it('S-16: allows a space editor to WRITE edits on a member asset', async () => {
+      const auth = AuthFactory.create();
+      const asset = AssetFactory.create({ type: AssetType.Image });
+      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set());
+      mocks.access.spaceAsset.checkSpaceEditAccess.mockResolvedValue(new Set([asset.id]));
+      mocks.asset.getForEdit.mockResolvedValue({
+        type: AssetType.Image,
+        livePhotoVideoId: null,
+        originalPath: asset.originalPath,
+        originalFileName: asset.originalFileName,
+        exifImageWidth: 1920,
+        exifImageHeight: 1080,
+        orientation: null,
+        projectionType: null,
+      });
       mocks.assetEdit.replaceAll.mockResolvedValue([]);
 
-      await sut.removeAssetEdits(authStub.admin, asset.id);
+      await sut.editAsset(auth, asset.id, {
+        edits: [{ action: AssetEditAction.Rotate, parameters: { angle: 90 } }],
+      } as AssetEditsCreateDto);
 
-      expect(mocks.asset.update).not.toHaveBeenCalled();
+      expect(mocks.assetEdit.replaceAll).toHaveBeenCalled();
+    });
+
+    it('S-18: allows a space editor to REVERT edits on a member asset', async () => {
+      const auth = AuthFactory.create();
+      const asset = AssetFactory.create();
+      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set());
+      mocks.access.spaceAsset.checkSpaceEditAccess.mockResolvedValue(new Set([asset.id]));
+      mocks.asset.getById.mockResolvedValue(getForAsset(asset));
+      mocks.assetEdit.getAll.mockResolvedValue([]);
+      mocks.assetEdit.replaceAll.mockResolvedValue([]);
+
+      await expect(sut.removeAssetEdits(auth, asset.id)).resolves.not.toThrow();
+    });
+
+    it('S-19: still rejects an asset the caller has no space-edit access to', async () => {
+      const auth = AuthFactory.create();
+      const asset = AssetFactory.create();
+      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set());
+      mocks.access.spaceAsset.checkSpaceEditAccess.mockResolvedValue(new Set());
+
+      await expect(sut.editAsset(auth, asset.id, { edits: [] } as AssetEditsCreateDto)).rejects.toBeInstanceOf(
+        BadRequestException,
+      );
+    });
+
+    it('S-45: allows a space editor to upsert asset metadata on a member asset', async () => {
+      const auth = AuthFactory.create();
+      const asset = AssetFactory.create();
+      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set());
+      mocks.access.spaceAsset.checkSpaceEditAccess.mockResolvedValue(new Set([asset.id]));
+      mocks.asset.upsertMetadata.mockResolvedValue([]);
+
+      await expect(sut.upsertMetadata(auth, asset.id, { items: [] })).resolves.not.toThrow();
+    });
+  });
+
+  describe('canEdit / editable (#734)', () => {
+    it('S-29: sets canEdit true for a space editor viewing a member asset', async () => {
+      const auth = AuthFactory.create();
+      const asset = AssetFactory.create();
+      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set());
+      // AssetRead's space arm is checkSpaceAccess (any space member, not just editors) — this is what
+      // lets a space editor read the asset at all before the AssetUpdate check below decides canEdit.
+      // The brief's original mock omitted this and the test 400ed on the read gate before ever reaching
+      // canEdit; see also S-15's comment on the same checkSpaceAccess-vs-checkSpaceEditAccess split.
+      mocks.access.spaceAsset.checkSpaceAccess.mockResolvedValue(new Set([asset.id]));
+      mocks.access.spaceAsset.checkSpaceEditAccess.mockResolvedValue(new Set([asset.id]));
+      mocks.asset.getById.mockResolvedValue(getForAsset(asset));
+      mocks.sharedSpace.findSpaceForAssetAndUser.mockResolvedValue(void 0 as any);
+
+      const result = (await sut.get(auth, asset.id)) as AssetResponseDto;
+
+      expect(result.canEdit).toBe(true);
+    });
+
+    it('S-30: sets canEdit false when the caller has no edit access', async () => {
+      const auth = AuthFactory.create();
+      const asset = AssetFactory.create();
+      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set());
+      // Read access via space membership (see S-29's comment), but no edit access — the caller can see
+      // the asset but canEdit must resolve false.
+      mocks.access.spaceAsset.checkSpaceAccess.mockResolvedValue(new Set([asset.id]));
+      mocks.access.spaceAsset.checkSpaceEditAccess.mockResolvedValue(new Set());
+      mocks.asset.getById.mockResolvedValue(getForAsset(asset));
+      mocks.sharedSpace.findSpaceForAssetAndUser.mockResolvedValue(void 0 as any);
+
+      const result = (await sut.get(auth, asset.id)) as AssetResponseDto;
+
+      expect(result.canEdit).toBe(false);
+    });
+
+    it('S-32: mapAsset (the list-endpoint mapper) never carries a canEdit key — the N+1 guard', () => {
+      // canEdit is resolved once in get(), never inside mapAsset itself (see the comment above the
+      // call site in asset.service.ts): mapAsset has no AuthDto and feeds list endpoints, where
+      // resolving edit access per asset would be an N+1 access check. `in`, not `.toBe(false)` — see
+      // S-14's comment on why absence and `false` are different signals to the client.
+      const result = mapAsset(getForAsset(AssetFactory.create()));
+
+      expect('canEdit' in result).toBe(false);
+    });
+
+    it('S-14: never sets canEdit for a shared-link caller (showExif: true)', async () => {
+      // showExif: true takes the non-stripMetadata path through mapAsset, so this exercises the
+      // `if (!auth.sharedLink)` guard directly — showExif: false would return early via the
+      // stripMetadata branch and never reach the guard, proving less. Absence is asserted with
+      // `in`, not `.toBe(false)`: `canEdit: false` and "no canEdit" are different signals to the
+      // client (the web falls back to its own derivation only when the field is absent), so a
+      // `=== false` assertion would pass even if the guard were deleted and canEdit resolved false
+      // by accident.
+      const asset = AssetFactory.create();
+      mocks.access.asset.checkSharedLinkAccess.mockResolvedValue(new Set([asset.id]));
+      mocks.asset.getById.mockResolvedValue(getForAsset(asset));
+
+      const result = await sut.get(
+        { ...authStub.adminSharedLink, sharedLink: { ...authStub.adminSharedLink.sharedLink!, showExif: true } },
+        asset.id,
+      );
+
+      expect('canEdit' in result).toBe(false);
+    });
+  });
+
+  describe('cross-owner edit attribution (#734)', () => {
+    it('S-37: logs one activity row when an editor edits a member asset', async () => {
+      const auth = AuthFactory.create();
+      const asset = AssetFactory.create();
+      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set());
+      mocks.access.spaceAsset.checkSpaceEditAccess.mockResolvedValue(new Set([asset.id]));
+      mocks.asset.getById.mockResolvedValue(getForAsset(asset));
+      mocks.asset.update.mockResolvedValue(getForAsset(asset));
+      mocks.sharedSpace.findSpaceForAssetAndUser.mockResolvedValue({ spaceId: 'space-1' } as any);
+      // v3.2.0: `update()` now answers with `this.get(auth, id)` rather than mapping the written
+      // row, so the response path re-checks AssetRead and resolves the space's people. A space
+      // editor genuinely holds that read through `checkSpaceAccess`, so grant it here — without it
+      // the fixture denies the actor a read they really have and the test never reaches its
+      // assertion.
+      mocks.access.spaceAsset.checkSpaceAccess.mockResolvedValue(new Set([asset.id]));
+      mocks.sharedSpace.findSpacePersonsByLinkedPersonIds.mockResolvedValue(new Map());
+
+      await sut.update(auth, asset.id, { description: 'fixed' });
+
+      expect(mocks.sharedSpace.logActivity).toHaveBeenCalledWith(
+        expect.objectContaining({ spaceId: 'space-1', userId: auth.user.id, type: SharedSpaceActivityType.AssetEdit }),
+      );
+    });
+
+    it('S-38: logs nothing when the owner edits their own asset', async () => {
+      const asset = AssetFactory.create();
+      const auth = AuthFactory.create({ id: asset.ownerId });
+      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([asset.id]));
+      mocks.asset.getById.mockResolvedValue(getForAsset(asset));
+      mocks.asset.update.mockResolvedValue(getForAsset(asset));
+      // Deliberately mocked to resolve a real space, even though the correct implementation never
+      // reaches this call for an owned asset: findSpaceForAssetAndUser is a strict automock, so
+      // leaving it unconfigured would let a mutant that skips the ownership gate throw its way into
+      // the same silent catch this test is trying to prove doesn't fire — passing for the wrong
+      // reason. Mocking it to succeed makes the assertion below actually exercise the gate.
+      mocks.sharedSpace.findSpaceForAssetAndUser.mockResolvedValue({ spaceId: 'space-1' } as any);
+
+      await sut.update(auth, asset.id, { description: 'mine' });
+
+      expect(mocks.sharedSpace.logActivity).not.toHaveBeenCalled();
+    });
+
+    it('S-40: logs nothing, and does not throw, when no space contains the asset', async () => {
+      const auth = AuthFactory.create();
+      const asset = AssetFactory.create();
+      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set());
+      mocks.access.spaceAsset.checkSpaceEditAccess.mockResolvedValue(new Set([asset.id]));
+      mocks.asset.getById.mockResolvedValue(getForAsset(asset));
+      mocks.asset.update.mockResolvedValue(getForAsset(asset));
+      mocks.sharedSpace.findSpaceForAssetAndUser.mockResolvedValue(null as any);
+      mocks.access.spaceAsset.checkSpaceAccess.mockResolvedValue(new Set([asset.id]));
+
+      await expect(sut.update(auth, asset.id, { description: 'x' })).resolves.toBeDefined();
+      expect(mocks.sharedSpace.logActivity).not.toHaveBeenCalled();
+    });
+
+    it('S-41: a failing logActivity must not fail the edit', async () => {
+      const auth = AuthFactory.create();
+      const asset = AssetFactory.create();
+      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set());
+      mocks.access.spaceAsset.checkSpaceEditAccess.mockResolvedValue(new Set([asset.id]));
+      mocks.asset.getById.mockResolvedValue(getForAsset(asset));
+      mocks.asset.update.mockResolvedValue(getForAsset(asset));
+      mocks.sharedSpace.findSpaceForAssetAndUser.mockResolvedValue({ spaceId: 'space-1' } as any);
+      mocks.sharedSpace.logActivity.mockRejectedValue(new Error('activity insert failed'));
+      mocks.access.spaceAsset.checkSpaceAccess.mockResolvedValue(new Set([asset.id]));
+      mocks.sharedSpace.findSpacePersonsByLinkedPersonIds.mockResolvedValue(new Map());
+
+      await expect(sut.update(auth, asset.id, { description: 'x' })).resolves.toBeDefined();
+    });
+
+    it('S-46: groups a bulk edit by space — one row per space, none for spaceless assets', async () => {
+      const auth = AuthFactory.create();
+      const inA1 = newUuid();
+      const inA2 = newUuid();
+      const inB = newUuid();
+      const nowhere = newUuid();
+      const ids = [inA1, inA2, inB, nowhere];
+      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set());
+      mocks.access.spaceAsset.checkSpaceEditAccess.mockResolvedValue(new Set(ids));
+      // No getByIds mock: logCrossOwnerEdit derives cross-owner from the pure owner arm
+      // (checkOwnerAccess above returning empty) rather than fetching asset rows.
+      mocks.sharedSpace.findSpaceForAssetAndUser.mockImplementation((assetId: string) =>
+        Promise.resolve(
+          (assetId === inB ? { spaceId: 'space-b' } : assetId === nowhere ? null : { spaceId: 'space-a' }) as any,
+        ),
+      );
+      // logActivity is a strict automock: without a resolved value, the first call throws and
+      // (correctly, per logCrossOwnerEdit's single whole-method try/catch) aborts the loop before
+      // the second space's row is ever written, which masks the very grouping behaviour this test
+      // exists to prove. Configure it to succeed like every other repository call here.
+      mocks.sharedSpace.logActivity.mockResolvedValue(void 0);
+
+      await sut.updateAll(auth, { ids, description: 'bulk' });
+
+      expect(mocks.sharedSpace.logActivity).toHaveBeenCalledTimes(2);
+      expect(mocks.sharedSpace.logActivity).toHaveBeenCalledWith(
+        expect.objectContaining({ spaceId: 'space-a', data: expect.objectContaining({ count: 2 }) }),
+      );
+      expect(mocks.sharedSpace.logActivity).toHaveBeenCalledWith(
+        expect.objectContaining({ spaceId: 'space-b', data: expect.objectContaining({ count: 1 }) }),
+      );
+    });
+
+    it('S-52: caps space resolution at MAX_ATTRIBUTION_ASSETS cross-owner ids and marks the row truncated', async () => {
+      const auth = AuthFactory.create();
+      // Mirrors MAX_ATTRIBUTION_ASSETS in gallery/utils/cross-owner-edit.ts: this pins the cap's VALUE together
+      // with its enforcement, so a change to the constant must update this test too.
+      const CAP = 500;
+      const ids = Array.from({ length: CAP + 1 }, () => newUuid());
+      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set());
+      mocks.access.spaceAsset.checkSpaceEditAccess.mockResolvedValue(new Set(ids));
+      mocks.sharedSpace.findSpaceForAssetAndUser.mockResolvedValue({ spaceId: 'space-1' } as any);
+      mocks.sharedSpace.logActivity.mockResolvedValue(void 0);
+
+      await sut.updateAll(auth, { ids, description: 'bulk' });
+
+      // At most CAP queries — one over the cap would mean the amplification this fix closes is back.
+      expect(mocks.sharedSpace.findSpaceForAssetAndUser).toHaveBeenCalledTimes(CAP);
+      expect(mocks.sharedSpace.logActivity).toHaveBeenCalledWith(
+        expect.objectContaining({ spaceId: 'space-1', data: expect.objectContaining({ count: CAP, truncated: true }) }),
+      );
+    });
+
+    it('S-53: a bulk edit under the cap resolves every cross-owner id and never sets truncated', async () => {
+      const auth = AuthFactory.create();
+      const ids = Array.from({ length: 10 }, () => newUuid());
+      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set());
+      mocks.access.spaceAsset.checkSpaceEditAccess.mockResolvedValue(new Set(ids));
+      mocks.sharedSpace.findSpaceForAssetAndUser.mockResolvedValue({ spaceId: 'space-1' } as any);
+      mocks.sharedSpace.logActivity.mockResolvedValue(void 0);
+
+      await sut.updateAll(auth, { ids, description: 'bulk' });
+
+      expect(mocks.sharedSpace.findSpaceForAssetAndUser).toHaveBeenCalledTimes(10);
+      expect(mocks.sharedSpace.logActivity).toHaveBeenCalledTimes(1);
+      const [[{ data }]] = mocks.sharedSpace.logActivity.mock.calls;
+      expect(data).toMatchObject({ count: 10 });
+      expect(Object.hasOwn(data as object, 'truncated')).toBe(false);
+    });
+
+    it('S-47: an owner locking their own space asset does not log a cross-owner edit', async () => {
+      // Pins the review-caught #734 regression: checkOwnerAccess filters out a Locked row when
+      // hasElevatedPermission is falsy (e.g. any API-key session). The rbac-3 guard runs BEFORE the
+      // write, on the still-Timeline row, so it correctly sees the caller as owner (calls #1 and #2
+      // below). If logCrossOwnerEdit ran unguarded AFTER the write, its OWN checkOwnerAccess call
+      // would read the now-Locked row back as not-owned (call #3) and misclassify the owner's own
+      // lock as a cross-owner edit — this is what the skip in update() must prevent.
+      const asset = AssetFactory.create();
+      const auth = AuthFactory.create({ id: asset.ownerId });
+      mocks.access.asset.checkOwnerAccess
+        .mockResolvedValueOnce(new Set([asset.id])) // requireAccess(AssetUpdate): Timeline, owned
+        .mockResolvedValueOnce(new Set([asset.id])) // rbac-3 guard: Timeline, owned
+        .mockResolvedValueOnce(new Set()); // would-be post-write logCrossOwnerEdit check: Locked, not-owned
+      // v3.2.0: the response is now `this.get(auth, id)`, which re-checks AssetRead AFTER the write.
+      // Granted through the space arm on purpose: it leaves the checkOwnerAccess sequence above
+      // untouched, so a mutant that runs logCrossOwnerEdit still consumes the not-owned third value.
+      mocks.access.spaceAsset.checkSpaceAccess.mockResolvedValue(new Set([asset.id]));
+      mocks.asset.getById.mockResolvedValue(getForAsset(asset));
+      mocks.asset.update.mockResolvedValue({ ...getForAsset(asset), visibility: AssetVisibility.Locked });
+      mocks.sharedSpace.findSpaceForAssetAndUser.mockResolvedValue({ spaceId: 'space-1' } as any);
+
+      await sut.update(auth, asset.id, { visibility: AssetVisibility.Locked });
+
+      expect(mocks.sharedSpace.logActivity).not.toHaveBeenCalled();
     });
   });
 });

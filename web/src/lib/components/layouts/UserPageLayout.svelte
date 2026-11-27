@@ -3,12 +3,11 @@
 </script>
 
 <script lang="ts">
-  import { useActions, type ActionArray } from '$lib/actions/use-actions';
-  import NavigationBar from '$lib/components/shared-components/navigation-bar/NavigationBar.svelte';
-  import UserSidebar from '$lib/components/shared-components/side-bar/UserSidebar.svelte';
-  import { sidebarModeStore } from '$lib/stores/sidebar-mode.svelte';
-  import type { HeaderButtonActionItem } from '$lib/types';
-  import { openFileUploadDialog } from '$lib/utils/file-uploader';
+  import NavigationBar from '#lib/components/shared-components/navigation-bar/NavigationBar.svelte';
+  import UserSidebar from '#lib/components/shared-components/side-bar/UserSidebar.svelte';
+  import { sidebarModeStore } from '#lib/stores/sidebar-mode.svelte.ts';
+  import type { HeaderButtonActionItem } from '#lib/types.ts';
+  import { openFileUploadDialog } from '#lib/utils/file-uploader.ts';
   import { Button, ContextMenuButton, HStack, isMenuItemType, type MenuItemType } from '@immich/ui';
   import type { Snippet } from 'svelte';
   import { t } from 'svelte-i18n';
@@ -18,7 +17,6 @@
     title?: string | undefined;
     description?: string | undefined;
     scrollbar?: boolean;
-    use?: ActionArray;
     actions?: Array<HeaderButtonActionItem | MenuItemType>;
     leading?: Snippet;
     descriptionTrailing?: Snippet;
@@ -32,13 +30,13 @@
     title = undefined,
     description = undefined,
     scrollbar = true,
-    use = [],
     actions = [],
     leading,
     descriptionTrailing,
     sidebar,
     buttons,
     children,
+    ...rest
   }: Props = $props();
 
   const enabledActions = $derived(
@@ -100,7 +98,7 @@
   {/if}
 
   <main class="relative">
-    <div class="{scrollbarClass} absolute {hasTitleClass} w-full overflow-y-auto p-2" use:useActions={use}>
+    <div class="{scrollbarClass} absolute {hasTitleClass} w-full overflow-y-auto p-2" {...rest}>
       {@render children?.()}
     </div>
 
@@ -139,7 +137,7 @@
                   size="small"
                   color={action.color ?? 'secondary'}
                   leadingIcon={action.icon}
-                  onclick={() => action.onAction(action)}
+                  onclick={(event: MouseEvent) => action.onAction({ event, action })}
                   title={action.data?.title}
                 >
                   {action.title}

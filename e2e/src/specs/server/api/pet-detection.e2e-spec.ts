@@ -52,6 +52,14 @@ describe('/pet-detection', () => {
         enabled: false,
         modelName: 'rfdetr-nano',
         minScore: 0.3,
+        video: {
+          enabled: false,
+          sampleInterval: 2,
+          sceneDetection: true,
+          maxFrames: 900,
+          maxDistance: 0.55,
+          minSightings: 2,
+        },
       });
     });
 
@@ -161,6 +169,14 @@ describe('/pet-detection', () => {
         enabled: false,
         modelName: 'rfdetr-nano',
         minScore: 0.3,
+        video: {
+          enabled: false,
+          sampleInterval: 2,
+          sceneDetection: true,
+          maxFrames: 900,
+          maxDistance: 0.55,
+          minSightings: 2,
+        },
       });
     });
   });
@@ -670,14 +686,17 @@ describe('/pet-detection', () => {
       const asset = await utils.createAsset(admin.accessToken);
       integrationAssetId = asset.id;
 
-      integrationPetId = await utils.createPet(admin.userId, 'cat', 'Whiskers');
+      // An individual pet (a pet_search face); a species bucket is never listed.
+      ({ personGroupId: integrationPetId } = await utils.createPetWithEmbedding(
+        admin.userId,
+        'cat',
+        integrationAssetId,
+        'Whiskers',
+      ));
       const person = await utils.createPerson(admin.accessToken, { name: 'John' });
       integrationPersonId = person.id;
 
-      await Promise.all([
-        utils.createFace({ assetId: integrationAssetId, personGroupId: integrationPetId }),
-        utils.createFace({ assetId: integrationAssetId, personGroupId: integrationPersonId }),
-      ]);
+      await utils.createFace({ assetId: integrationAssetId, personGroupId: integrationPersonId });
     });
 
     it('should return both persons and pets in GET /people', async () => {
@@ -749,17 +768,13 @@ describe('/pet-detection', () => {
       ]);
       await utils.connectDatabase();
 
-      user1PetId = await utils.createPet(isoUser1.userId, 'dog', 'Rover');
-      user2PetId = await utils.createPet(isoUser2.userId, 'dog', 'Spot');
-
       const [a1, a2] = await Promise.all([
         utils.createAsset(isoUser1.accessToken),
         utils.createAsset(isoUser2.accessToken),
       ]);
-      await Promise.all([
-        utils.createFace({ assetId: a1.id, personGroupId: user1PetId }),
-        utils.createFace({ assetId: a2.id, personGroupId: user2PetId }),
-      ]);
+      // Individual pets (a pet_search face each); a species bucket is never listed.
+      ({ personGroupId: user1PetId } = await utils.createPetWithEmbedding(isoUser1.userId, 'dog', a1.id, 'Rover'));
+      ({ personGroupId: user2PetId } = await utils.createPetWithEmbedding(isoUser2.userId, 'dog', a2.id, 'Spot'));
     });
 
     it('should not show user1 pets to user2 in GET /people', async () => {

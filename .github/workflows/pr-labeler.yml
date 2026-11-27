@@ -1,12 +1,13 @@
 name: 'Pull Request Labeler'
 on:
   workflow_dispatch:
-    # Disabled for personal-use CI; keep the file for easy re-enable.
+    # Automatic runs disabled for this standalone private fork.
 
 permissions: {}
 
 jobs:
   labeler:
+    if: ${{ github.repository == 'immich-app/immich' }}
     permissions:
       contents: read
       pull-requests: write
@@ -15,3 +16,4 @@ jobs:
       - uses: actions/labeler@bf12e9b00b37c5c0ca2b87b79b2daf7891dbda13 # v7.0.0
         with:
           repo-token: ${{ github.token }}
+          sync-labels: true

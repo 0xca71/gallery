@@ -2,12 +2,13 @@ name: PR Label Validation
 
 on:
   workflow_dispatch:
-    # Disabled for personal-use CI; keep the file for easy re-enable.
+    # Automatic runs disabled for this standalone private fork.
 
 permissions: {}
 
 jobs:
   validate-release-label:
+    if: ${{ github.repository == 'immich-app/immich' }}
     runs-on: ubuntu-latest
     permissions:
       issues: write

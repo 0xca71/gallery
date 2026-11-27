@@ -13,6 +13,7 @@ describe(QueueService.name, () => {
     ({ sut, mocks } = newTestService(QueueService));
 
     mocks.config.getWorker.mockReturnValue(ImmichWorker.Microservices);
+    mocks.queueMaintenance.getJobTypes.mockResolvedValue([]);
   });
 
   it('should work', () => {
@@ -75,7 +76,7 @@ describe(QueueService.name, () => {
     it('should update concurrency', () => {
       sut.onConfigUpdate({ newConfig: defaults, oldConfig: {} as SystemConfig });
 
-      expect(mocks.job.setConcurrency).toHaveBeenCalledTimes(24);
+      expect(mocks.job.setConcurrency).toHaveBeenCalledTimes(26);
       expect(mocks.job.setConcurrency).toHaveBeenNthCalledWith(5, QueueName.FacialRecognition, 1);
       expect(mocks.job.setConcurrency).toHaveBeenNthCalledWith(7, QueueName.DuplicateDetection, 1);
       expect(mocks.job.setConcurrency).toHaveBeenNthCalledWith(8, QueueName.BackgroundTask, 5);
@@ -157,13 +158,13 @@ describe(QueueService.name, () => {
 
     it('should reconcile orphaned active jobs before starting workers on microservices', async () => {
       mocks.config.getWorker.mockReturnValue(ImmichWorker.Microservices);
-      mocks.job.reconcileOrphanedActiveJobs.mockResolvedValue();
+      mocks.queueMaintenance.reconcileOrphanedActiveJobs.mockResolvedValue();
 
       sut.setServices([]);
       await sut.onBootstrap();
 
-      expect(mocks.job.reconcileOrphanedActiveJobs).toHaveBeenCalled();
-      const reconcileOrder = mocks.job.reconcileOrphanedActiveJobs.mock.invocationCallOrder[0];
+      expect(mocks.queueMaintenance.reconcileOrphanedActiveJobs).toHaveBeenCalled();
+      const reconcileOrder = mocks.queueMaintenance.reconcileOrphanedActiveJobs.mock.invocationCallOrder[0];
       const startOrder = mocks.job.startWorkers.mock.invocationCallOrder[0];
       expect(reconcileOrder).toBeLessThan(startOrder);
     });
@@ -174,12 +175,12 @@ describe(QueueService.name, () => {
       sut.setServices([]);
       await sut.onBootstrap();
 
-      expect(mocks.job.reconcileOrphanedActiveJobs).not.toHaveBeenCalled();
+      expect(mocks.queueMaintenance.reconcileOrphanedActiveJobs).not.toHaveBeenCalled();
     });
 
     it('still starts workers when orphan reconciliation fails', async () => {
       mocks.config.getWorker.mockReturnValue(ImmichWorker.Microservices);
-      mocks.job.reconcileOrphanedActiveJobs.mockRejectedValue(new Error('redis down'));
+      mocks.queueMaintenance.reconcileOrphanedActiveJobs.mockRejectedValue(new Error('redis down'));
 
       sut.setServices([]);
       await sut.onBootstrap();
@@ -239,7 +240,7 @@ describe(QueueService.name, () => {
         { name: JobName.FacialRecognition, active: 0, waiting: 5, delayed: 0, paused: 0 },
       ];
       mocks.job.getJobCounts.mockResolvedValue(stats);
-      mocks.job.getJobTypes.mockResolvedValue(jobTypes);
+      mocks.queueMaintenance.getJobTypes.mockResolvedValue(jobTypes);
       mocks.job.isPaused.mockResolvedValue(false);
 
       const result = await sut.get(factory.auth(), QueueName.FacialRecognition);
@@ -358,6 +359,7 @@ describe(QueueService.name, () => {
         { name: JobName.PersonCleanup },
         { name: JobName.MemoryCleanup },
         { name: JobName.SessionCleanup },
+        { name: JobName.AuthChallengeCleanup },
         { name: JobName.HlsSessionCleanup },
         { name: JobName.AuditTableCleanup },
         { name: JobName.SharedSpaceAlbumGrantReconcileSweep },
@@ -616,6 +618,8 @@ describe(QueueService.name, () => {
         [QueueName.IntegrityCheck]: expected,
         [QueueName.Editor]: expected,
         [QueueName.Classification]: expected,
+        [QueueName.QualityAnalysis]: expected,
+        [QueueName.SpatialScene]: expected,
         [QueueName.StorageBackendMigration]: expected,
       });
     });
@@ -639,7 +643,7 @@ describe(QueueService.name, () => {
 
       await sut.getAllLegacy(factory.auth());
 
-      expect(mocks.job.getJobTypes).not.toHaveBeenCalled();
+      expect(mocks.queueMaintenance.getJobTypes).not.toHaveBeenCalled();
     });
   });
 
@@ -945,6 +949,18 @@ describe(QueueService.name, () => {
       await sut.runCommandLegacy(QueueName.PetRecognition, { command: QueueCommand.Start, force: false });
 
       expect(mocks.job.queue).toHaveBeenCalledWith({ name: JobName.PetRecognitionQueueAll, data: { force: false } });
+    });
+
+    it('should handle a start quality analysis command', async () => {
+      mocks.job.isActive.mockResolvedValue(false);
+      mocks.job.getJobCounts.mockResolvedValue(factory.queueStatistics());
+
+      await sut.runCommandLegacy(QueueName.QualityAnalysis, { command: QueueCommand.Start, force: false });
+
+      expect(mocks.job.queue).toHaveBeenCalledWith({
+        name: JobName.AssetAnalyzeQualityQueueAll,
+        data: { force: false },
+      });
     });
 
     it('should handle a start people backfill command', async () => {

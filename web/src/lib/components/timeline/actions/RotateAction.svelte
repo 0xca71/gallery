@@ -1,18 +1,36 @@
 <script lang="ts">
-  import MenuOption from '$lib/components/shared-components/context-menu/MenuOption.svelte';
-  import { assetMultiSelectManager } from '$lib/managers/asset-multi-select-manager.svelte';
-  import { eventManager } from '$lib/managers/event-manager.svelte';
-  import { mergeRotation } from '$lib/services/asset.service';
-  import { waitForWebsocketEvent } from '$lib/stores/websocket';
-  import { handleError } from '$lib/utils/handle-error';
+  import MenuOption from '#lib/components/shared-components/context-menu/MenuOption.svelte';
+  import { mergeRotation } from '#lib/gallery/asset-actions.ts';
+  import { getEditableAssetsWithWarning } from '#lib/gallery/utils/editable-assets.ts';
+  import { assetMultiSelectManager } from '#lib/managers/asset-multi-select-manager.svelte.ts';
+  import { eventManager } from '#lib/managers/event-manager.svelte.ts';
+  import { waitForWebsocketEvent } from '#lib/stores/websocket.ts';
+  import { handleError } from '#lib/utils/handle-error.ts';
   import { editAsset, getAssetEdits, getAssetInfo, removeAssetEdits } from '@immich/sdk';
   import { toastManager } from '@immich/ui';
   import { mdiRotateLeft, mdiRotateRight } from '@mdi/js';
   import { t } from 'svelte-i18n';
 
+  interface Props {
+    /**
+    #734: which of the current selection the caller may edit — send only these. Omitted on
+    surfaces that don't resolve it (every render site outside `SelectionToolbar.svelte`),
+    where it falls back to the pre-#734 ownership-only filter.
+    */
+    editableSelectedAssetIds?: string[];
+  }
+
+  let { editableSelectedAssetIds }: Props = $props();
+
   const handleRotate = async (angle: number) => {
     try {
-      const assets = [...assetMultiSelectManager.getOwnedAssets()].filter((asset) => asset.isImage);
+      // getEditableAssetsWithWarning also reports the skipped (not-editable) count via a toast.
+      const ids =
+        editableSelectedAssetIds === undefined
+          ? assetMultiSelectManager.getOwnedAssets().map((asset) => asset.id)
+          : getEditableAssetsWithWarning(assetMultiSelectManager.assets, editableSelectedAssetIds);
+      const editableIds = new Set(ids);
+      const assets = assetMultiSelectManager.assets.filter((asset) => editableIds.has(asset.id) && asset.isImage);
       if (assets.length === 0) {
         return;
       }

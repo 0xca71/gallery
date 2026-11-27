@@ -1,4 +1,4 @@
-import { zoomImageAction } from '$lib/actions/zoom-image';
+import { zoomImageAction } from '#lib/actions/zoom-image.ts';
 
 const { manager } = vi.hoisted(() => {
   const manager = {
@@ -13,11 +13,11 @@ const { manager } = vi.hoisted(() => {
   };
   return { manager };
 });
-vi.mock('$lib/managers/asset-viewer-manager.svelte', () => ({ assetViewerManager: manager }));
+vi.mock('#lib/managers/asset-viewer-manager.svelte.ts', () => ({ assetViewerManager: manager }));
 
 describe('unified photo double-click', () => {
   let node: HTMLDivElement;
-  let action: ReturnType<typeof zoomImageAction>;
+  let destroyAction: () => void;
   beforeEach(() => {
     manager.zoomState = { currentZoom: 1, currentRotation: 0, currentPositionX: 0, currentPositionY: 0, enable: true };
     node = document.createElement('div');
@@ -33,9 +33,13 @@ describe('unified photo double-click', () => {
       y: 0,
       toJSON: () => ({}),
     });
-    action = zoomImageAction(node, { zoomTarget: document.createElement('div'), image: { width: 4000, height: 3000 } });
+    const action = zoomImageAction(node, {
+      zoomTarget: document.createElement('div'),
+      image: { width: 4000, height: 3000 },
+    });
+    destroyAction = action.destroy;
   });
-  afterEach(() => action.destroy());
+  afterEach(() => destroyAction());
   const pointer = (type: string, x = 700, id = 1, primary = true) =>
     node.dispatchEvent(
       new PointerEvent(type, { pointerType: 'touch', pointerId: id, isPrimary: primary, clientX: x, clientY: 350 }),

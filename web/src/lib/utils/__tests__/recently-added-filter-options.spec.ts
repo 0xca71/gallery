@@ -1,12 +1,12 @@
-import { AssetOrder, AssetOrderBy, AssetTypeEnum, AssetVisibility } from '@immich/sdk';
-import { describe, expect, it } from 'vitest';
-import { createFilterState } from '$lib/components/filter-panel/filter-panel';
+import { createFilterState } from '#lib/components/filter-panel/filter-panel.ts';
 import {
   buildRecentlyAddedPickerBucketOptions,
   buildRecentlyAddedSuggestionRequest,
   buildRecentlyAddedTimelineOptions,
   shouldShowRecentlyAddedCount,
-} from '$lib/utils/recently-added-filter-options';
+} from '#lib/utils/recently-added-filter-options.ts';
+import { AssetOrder, AssetOrderBy, AssetTypeEnum, AssetVisibility } from '@immich/sdk';
+import { describe, expect, it } from 'vitest';
 
 const MY_USER_ID = 'cccccccc-cccc-4ccc-cccc-cccccccccccc';
 
@@ -80,10 +80,13 @@ describe('buildRecentlyAddedTimelineOptions', () => {
     );
   });
 
-  it('drops partner assets under a favorites filter (favorites are personal)', () => {
+  it('keeps partner assets under a favorites filter (favorites are per-user, #763)', () => {
+    // Pre-#763 a favorite was the owner's flag on the asset, so a partner's favorites were
+    // meaningless to the viewer and the partner scope was dropped. Favorites are now per-user
+    // (asset_favorite overlay), so the viewer's own favorites on partner assets must stay in scope.
     expect(
-      buildRecentlyAddedTimelineOptions({ ...createFilterState(), isFavorite: true }, MY_USER_ID),
-    ).not.toHaveProperty('withPartners');
+      buildRecentlyAddedTimelineOptions({ ...createFilterState(), isFavorite: true }, MY_USER_ID).withPartners,
+    ).toBe(true);
   });
 
   it('maps sortOrder to order without touching orderBy', () => {

@@ -3,6 +3,8 @@ import 'package:auto_route/auto_route.dart';
 import 'package:flutter/material.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:immich_mobile/extensions/build_context_extensions.dart';
+import 'package:immich_mobile/gallery/spaces/space_member_permissions.dart';
+import 'package:immich_mobile/generated/translations.g.dart';
 import 'package:immich_mobile/providers/shared_space.provider.dart';
 import 'package:immich_mobile/providers/user.provider.dart';
 import 'package:immich_mobile/repositories/shared_space_api.repository.dart';
@@ -18,8 +20,16 @@ class SpaceMembersPage extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    String roleLabel(SharedSpaceRole role) => switch (role) {
+      SharedSpaceRole.owner => context.t.owner,
+      SharedSpaceRole.editor => context.t.role_editor,
+      _ => context.t.role_viewer,
+    };
+
     final membersAsync = ref.watch(sharedSpaceMembersProvider(spaceId));
     final currentUser = ref.watch(currentUserProvider);
+    // Null while loading / on error: the helpers then fall back to owner-only, like an older server.
+    final space = ref.watch(sharedSpaceProvider(spaceId)).valueOrNull;
 
     SharedSpaceMemberResponseDto? getCurrentMember(List<SharedSpaceMemberResponseDto> members) {
       return members.where((m) => m.userId == currentUser?.id).firstOrNull;
@@ -30,16 +40,18 @@ class SpaceMembersPage extends HookConsumerWidget {
       final confirmed = await showDialog<bool>(
         context: context,
         builder: (ctx) => AlertDialog(
-          title: Text(isLeaving ? 'Leave Space' : 'Remove Member'),
+          title: Text(isLeaving ? ctx.t.spaces_leave : ctx.t.spaces_remove_member),
           content: Text(
-            isLeaving ? 'Are you sure you want to leave this space?' : 'Remove ${member.name} from this space?',
+            isLeaving
+                ? ctx.t.spaces_leave_this_space_confirmation
+                : ctx.t.spaces_remove_member_confirmation(name: member.name),
           ),
           actions: [
-            TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: const Text('Cancel')),
+            TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: Text(ctx.t.cancel)),
             TextButton(
               onPressed: () => Navigator.of(ctx).pop(true),
               style: TextButton.styleFrom(foregroundColor: Theme.of(ctx).colorScheme.error),
-              child: Text(isLeaving ? 'Leave' : 'Remove'),
+              child: Text(isLeaving ? ctx.t.leave : ctx.t.remove),
             ),
           ],
         ),
@@ -62,11 +74,15 @@ class SpaceMembersPage extends HookConsumerWidget {
             // itself without trying to re-fetch this (now inaccessible) space.
             await context.maybePop<String>('left');
           } else if (context.mounted) {
-            ImmichToast.show(context: context, msg: '${member.name} removed', toastType: ToastType.success);
+            ImmichToast.show(
+              context: context,
+              msg: context.t.spaces_activity_was_removed(name: member.name),
+              toastType: ToastType.success,
+            );
           }
         } catch (e) {
           if (context.mounted) {
-            ImmichToast.show(context: context, msg: 'Failed to remove member', toastType: ToastType.error);
+            ImmichToast.show(context: context, msg: context.t.errors.error_removing_member, toastType: ToastType.error);
           }
         }
       }
@@ -77,16 +93,24 @@ class SpaceMembersPage extends HookConsumerWidget {
         await ref.read(sharedSpaceApiRepositoryProvider).updateMember(spaceId, member.userId, newRole);
         ref.invalidate(sharedSpaceMembersProvider(spaceId));
         if (context.mounted) {
-          ImmichToast.show(context: context, msg: '${member.name} is now $newRole', toastType: ToastType.success);
+          ImmichToast.show(
+            context: context,
+            msg: context.t.spaces_changed_role(name: member.name, role: roleLabel(newRole)),
+            toastType: ToastType.success,
+          );
         }
       } catch (e) {
         if (context.mounted) {
-          ImmichToast.show(context: context, msg: 'Failed to update role', toastType: ToastType.error);
+          ImmichToast.show(
+            context: context,
+            msg: context.t.errors.error_updating_member_role,
+            toastType: ToastType.error,
+          );
         }
       }
     }
 
-    void showMemberActions(SharedSpaceMemberResponseDto member, bool isOwner) {
+    void showMemberActions(SharedSpaceMemberResponseDto member, bool isOwner, bool canChangeRoles) {
       unawaited(
         showModalBottomSheet(
           context: context,
@@ -98,10 +122,10 @@ class SpaceMembersPage extends HookConsumerWidget {
                   padding: const EdgeInsets.all(16),
                   child: Text(member.name, style: context.textTheme.titleMedium),
                 ),
-                if (isOwner && member.role != SharedSpaceRole.owner) ...[
+                if (canChangeRoles && member.role != SharedSpaceRole.owner && member.userId != currentUser?.id) ...[
                   ListTile(
                     leading: const Icon(Icons.edit_outlined),
-                    title: const Text('Set as Editor'),
+                    title: Text(ctx.t.role_editor),
                     trailing: member.role == SharedSpaceRole.editor ? const Icon(Icons.check) : null,
                     onTap: () {
                       Navigator.of(ctx).pop();
@@ -110,17 +134,19 @@ class SpaceMembersPage extends HookConsumerWidget {
                   ),
                   ListTile(
                     leading: const Icon(Icons.visibility_outlined),
-                    title: const Text('Set as Viewer'),
+                    title: Text(ctx.t.role_viewer),
                     trailing: member.role == SharedSpaceRole.viewer ? const Icon(Icons.check) : null,
                     onTap: () {
                       Navigator.of(ctx).pop();
                       unawaited(updateRole(member, SharedSpaceRole.viewer));
                     },
                   ),
+                ],
+                if (isOwner && member.role != SharedSpaceRole.owner) ...[
                   const Divider(),
                   ListTile(
                     leading: Icon(Icons.person_remove_outlined, color: Theme.of(ctx).colorScheme.error),
-                    title: Text('Remove from Space', style: TextStyle(color: Theme.of(ctx).colorScheme.error)),
+                    title: Text(ctx.t.remove_from_space, style: TextStyle(color: Theme.of(ctx).colorScheme.error)),
                     onTap: () {
                       Navigator.of(ctx).pop();
                       unawaited(removeMember(member));
@@ -130,7 +156,7 @@ class SpaceMembersPage extends HookConsumerWidget {
                 if (!isOwner && member.userId == currentUser?.id)
                   ListTile(
                     leading: Icon(Icons.exit_to_app, color: Theme.of(ctx).colorScheme.error),
-                    title: Text('Leave Space', style: TextStyle(color: Theme.of(ctx).colorScheme.error)),
+                    title: Text(ctx.t.spaces_leave, style: TextStyle(color: Theme.of(ctx).colorScheme.error)),
                     onTap: () {
                       Navigator.of(ctx).pop();
                       unawaited(removeMember(member));
@@ -145,13 +171,13 @@ class SpaceMembersPage extends HookConsumerWidget {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Members'),
+        title: Text(context.t.members),
         centerTitle: false,
         actions: [
           membersAsync.when(
             data: (members) {
               final currentMember = getCurrentMember(members);
-              if (currentMember?.role == SharedSpaceRole.owner) {
+              if (canAddSpaceMembers(space, currentMember?.role)) {
                 return IconButton(
                   icon: const Icon(Icons.person_add_outlined),
                   onPressed: () async {
@@ -161,7 +187,7 @@ class SpaceMembersPage extends HookConsumerWidget {
                     );
                     ref.invalidate(sharedSpaceMembersProvider(spaceId));
                   },
-                  tooltip: 'Add Member',
+                  tooltip: context.t.spaces_add_member,
                 );
               }
               return const SizedBox.shrink();
@@ -175,30 +201,38 @@ class SpaceMembersPage extends HookConsumerWidget {
         data: (members) {
           final currentMember = getCurrentMember(members);
           final isOwner = currentMember?.role == SharedSpaceRole.owner;
+          final canChangeRoles = canChangeSpaceRoles(space, currentMember?.role);
+          final showSettings = isOwner && space != null;
 
           return ListView.builder(
-            itemCount: members.length,
-            itemBuilder: (context, index) {
+            itemCount: members.length + (showSettings ? 1 : 0),
+            itemBuilder: (context, rawIndex) {
+              if (showSettings && rawIndex == 0) {
+                return SpaceMemberPermissionSettings(spaceId: spaceId, space: space);
+              }
+              final index = showSettings ? rawIndex - 1 : rawIndex;
               final member = members[index];
               return ListTile(
                 leading: CircleAvatar(child: Text(member.name.isNotEmpty ? member.name[0].toUpperCase() : '?')),
                 title: Text(member.name),
                 subtitle: Text(member.email),
                 trailing: Chip(
-                  label: Text(member.role.toString(), style: context.textTheme.labelSmall),
+                  label: Text(roleLabel(member.role), style: context.textTheme.labelSmall),
                   padding: EdgeInsets.zero,
                   visualDensity: VisualDensity.compact,
                 ),
                 onTap:
-                    (isOwner && member.role != SharedSpaceRole.owner) || (!isOwner && member.userId == currentUser?.id)
-                    ? () => showMemberActions(member, isOwner)
+                    (canChangeRoles && member.role != SharedSpaceRole.owner && member.userId != currentUser?.id) ||
+                        (isOwner && member.role != SharedSpaceRole.owner) ||
+                        (!isOwner && member.userId == currentUser?.id)
+                    ? () => showMemberActions(member, isOwner, canChangeRoles)
                     : null,
               );
             },
           );
         },
         loading: () => const Center(child: CircularProgressIndicator()),
-        error: (error, _) => Center(child: Text('Failed to load members: $error')),
+        error: (error, _) => Center(child: Text(context.t.spaces_members_load_failed(error: '$error'))),
       ),
     );
   }

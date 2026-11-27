@@ -1,6 +1,8 @@
+import type { EditActions } from '#lib/managers/edit/edit-manager.svelte.ts';
+import { scaleToFit, type Size } from '#lib/utils/container-utils.ts';
+import { normalizeTransformEdits } from '#lib/utils/editor.ts';
+import { AssetEditAction } from '@immich/sdk';
 import type { ZoomImageWheelState } from '@zoom-image/core';
-import type { Size } from '$lib/utils/container-utils';
-import { scaleToFit } from '$lib/utils/container-utils';
 
 export const MAX_PHOTO_ZOOM = 10;
 export const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
@@ -83,11 +85,11 @@ export function navigatorViewport(image: Size, viewport: Size, state: ZoomImageW
   };
 }
 
-/**
- * Converts the image portion visible in the photo viewer into source-image pixels.
- * Navigator coordinates are expressed in the displayed orientation, while editor
- * crop parameters are always expressed in the unrotated source orientation.
- */
+/*
+Converts the image portion visible in the photo viewer into source-image pixels.
+Navigator coordinates are expressed in the displayed orientation, while editor
+crop parameters are always expressed in the unrotated source orientation.
+*/
 export function visibleCropRegion(image: Size, viewport: Size, state: ZoomImageWheelState): CropRegion {
   const frame = navigatorViewport(image, viewport, state);
   const oriented = swapsDimensions(state.currentRotation) ? { width: image.height, height: image.width } : image;
@@ -144,7 +146,7 @@ export function panToNavigatorPoint(image: Size, viewport: Size, state: ZoomImag
 }
 
 export function resizePhotoViewport(image: Size, previous: Size, viewport: Size, state: ZoomImageWheelState) {
-  if (previous.width <= 0 || previous.height <= 0) {
+  if (previous.width <= 0 || previous.height <= 0 || viewport.width <= 0 || viewport.height <= 0) {
     return state;
   }
   const before = fittedPhoto(image, previous, state.currentRotation);
@@ -156,4 +158,62 @@ export function resizePhotoViewport(image: Size, previous: Size, viewport: Size,
     currentPositionX: viewport.width / 2 - state.currentZoom * (after.x + x * after.width),
     currentPositionY: viewport.height / 2 - state.currentZoom * (after.y + y * after.height),
   };
+}
+
+/** Compose a crop of the displayed edited image with existing geometry without duplicating crop actions. */
+export function composeViewerCrop(edits: EditActions, crop: CropRegion, source: Size, displayed: Size): EditActions {
+  const existingCrop = edits.find((edit) => edit.action === 'crop')?.parameters as CropRegion | undefined;
+  const transform = normalizeTransformEdits(edits);
+  const arbitrary = Math.abs(transform.rotation % 90) > 0.001;
+  let region: CropRegion;
+  if (arbitrary) {
+    const radians = (transform.rotation * Math.PI) / 180;
+    const rotated = {
+      width: Math.round(source.width * Math.abs(Math.cos(radians)) + source.height * Math.abs(Math.sin(radians))),
+      height: Math.round(source.width * Math.abs(Math.sin(radians)) + source.height * Math.abs(Math.cos(radians))),
+    };
+    const bounds = existingCrop ?? { x: 0, y: 0, ...rotated };
+    region = {
+      x: bounds.x + (crop.x * bounds.width) / displayed.width,
+      y: bounds.y + (crop.y * bounds.height) / displayed.height,
+      width: (crop.width * bounds.width) / displayed.width,
+      height: (crop.height * bounds.height) / displayed.height,
+    };
+  } else {
+    const bounds = existingCrop ?? { x: 0, y: 0, ...source };
+    const output = swapsDimensions(transform.rotation) ? { width: bounds.height, height: bounds.width } : bounds;
+    const map = (x: number, y: number) => {
+      const point = rotatePoint(
+        (x * output.width) / displayed.width - output.width / 2,
+        (y * output.height) / displayed.height - output.height / 2,
+        -transform.rotation,
+      );
+      return {
+        x: bounds.x + bounds.width / 2 + (transform.mirrorHorizontal ? -point.x : point.x),
+        y: bounds.y + bounds.height / 2 + (transform.mirrorVertical ? -point.y : point.y),
+      };
+    };
+    const topLeft = map(crop.x, crop.y);
+    const bottomRight = map(crop.x + crop.width, crop.y + crop.height);
+    region = {
+      x: Math.min(topLeft.x, bottomRight.x),
+      y: Math.min(topLeft.y, bottomRight.y),
+      width: Math.abs(bottomRight.x - topLeft.x),
+      height: Math.abs(bottomRight.y - topLeft.y),
+    };
+  }
+  const x = Math.max(0, Math.round(region.x));
+  const y = Math.max(0, Math.round(region.y));
+  return [
+    {
+      action: AssetEditAction.Crop,
+      parameters: {
+        x,
+        y,
+        width: Math.max(1, Math.round(region.x + region.width) - x),
+        height: Math.max(1, Math.round(region.y + region.height) - y),
+      },
+    },
+    ...edits.filter((edit) => edit.action !== 'crop'),
+  ];
 }

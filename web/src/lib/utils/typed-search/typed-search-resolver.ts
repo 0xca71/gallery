@@ -1,5 +1,5 @@
-import { getFilterSuggestions, getSearchSuggestions, searchPerson, SearchSuggestionType } from '@immich/sdk';
-import { createFilterState, type FilterState } from '$lib/components/filter-panel/filter-panel';
+import { createFilterState, type FilterState } from '#lib/components/filter-panel/filter-panel.ts';
+import { SearchSuggestionType, getFilterSuggestions, getSearchSuggestions, searchPerson } from '@immich/sdk';
 import type {
   TypedSearchIssue,
   TypedSearchParseResult,

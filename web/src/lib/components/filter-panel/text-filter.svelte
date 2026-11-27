@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { TEXT_FILTER_PARAM_MAX_LENGTH } from '$lib/utils/filter-url';
+  import { TEXT_FILTER_PARAM_MAX_LENGTH } from '#lib/utils/filter-url.ts';
   import { untrack } from 'svelte';
   import { t } from 'svelte-i18n';
 
@@ -17,6 +17,7 @@
     debounceMs?: number;
   }
 
+  // eslint-disable-next-line unicorn/prefer-default-parameters
   let { description, originalFileName, ocr, onChange, debounceMs = 250 }: Props = $props();
 
   // Local mirrors so typing stays responsive without waiting for the parent round-trip.

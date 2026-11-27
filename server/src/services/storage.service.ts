@@ -1,9 +1,7 @@
 import { Injectable } from '@nestjs/common';
-import { isAbsolute, join } from 'node:path';
-import type { JobOf, SystemFlags } from 'src/types.js';
+import { join } from 'node:path';
 import { DiskStorageBackend } from 'src/backends/disk-storage.backend.js';
 import { S3StorageBackend } from 'src/backends/s3-storage.backend.js';
-import { resolveBackend } from 'src/backends/storage-backend.provider.js';
 import { ErrorMessages } from 'src/constants.js';
 import { StorageCore } from 'src/cores/storage.core.js';
 import { OnEvent, OnJob } from 'src/decorators.js';
@@ -16,61 +14,26 @@ import {
   StorageFolder,
   SystemMetadataKey,
 } from 'src/enum.js';
+import { storageBackends } from 'src/gallery/utils/storage-backends.js';
 import { StorageBackend } from 'src/interfaces/storage-backend.interface.js';
 import { BaseService } from 'src/services/base.service.js';
+import type { JobOf, SystemFlags } from 'src/types.js';
 import { ImmichStartupError } from 'src/utils/misc.js';
+import { detectMediaLocation } from 'src/utils/storage.js';
 
 const docsMessage = `Please see https://docs.immich.app/administration/system-integrity#folder-checks for more information.`;
 
 @Injectable()
 export class StorageService extends BaseService {
-  private static diskBackend: DiskStorageBackend;
-  private static s3Backend: S3StorageBackend | undefined;
-  private static writeBackendType: 'disk' | 's3' = 'disk';
-
-  static getDiskBackend(): DiskStorageBackend {
-    return StorageService.diskBackend;
-  }
-
-  static getS3Backend(): S3StorageBackend | undefined {
-    return StorageService.s3Backend;
-  }
-
-  static getWriteBackend(): StorageBackend {
-    if (StorageService.writeBackendType === 's3' && StorageService.s3Backend) {
-      return StorageService.s3Backend;
-    }
-    return StorageService.diskBackend;
-  }
-
-  static resolveBackendForKey(key: string): StorageBackend {
-    if (StorageService.s3Backend) {
-      return resolveBackend(key, StorageService.diskBackend, StorageService.s3Backend);
-    }
-    return StorageService.diskBackend;
-  }
+  // the backends live in a leaf module (src/gallery/utils/storage-backends.ts) that StorageCore and utils can import
+  static getDiskBackend = (): DiskStorageBackend => storageBackends.diskBackend;
+  static getS3Backend = (): S3StorageBackend | undefined => storageBackends.s3Backend;
+  static getWriteBackend = (): StorageBackend => storageBackends.getWriteBackend();
+  static backendFor = (key: string, absoluteDisk?: StorageBackend) => storageBackends.backendFor(key, absoluteDisk);
 
   private detectMediaLocation(): string {
     const envData = this.configRepository.getEnv();
-    if (envData.storage.mediaLocation) {
-      return envData.storage.mediaLocation;
-    }
-
-    const targets: string[] = [];
-    const candidates = ['/data', '/usr/src/app/upload'];
-
-    for (const candidate of candidates) {
-      const isExists = this.storageRepository.existsSync(candidate);
-      if (isExists) {
-        targets.push(candidate);
-      }
-    }
-
-    if (targets.length === 1) {
-      return targets[0];
-    }
-
-    return '/usr/src/app/upload';
+    return detectMediaLocation(envData.storage.mediaLocation, (path) => this.storageRepository.existsSync(path));
   }
 
   @OnEvent({ name: 'AppBootstrap', priority: BootstrapEventPriority.StorageService })
@@ -79,15 +42,15 @@ export class StorageService extends BaseService {
 
     // Initialize storage backends
     const envData = this.configRepository.getEnv();
-    StorageService.diskBackend = new DiskStorageBackend(StorageCore.getMediaLocation());
-    StorageService.writeBackendType = envData.storage.backend;
+    storageBackends.diskBackend = new DiskStorageBackend(StorageCore.getMediaLocation(), this.storageRepository);
+    storageBackends.writeBackendType = envData.storage.backend;
 
     if (envData.storage.s3.bucket) {
-      StorageService.s3Backend = new S3StorageBackend(envData.storage.s3);
+      storageBackends.s3Backend = new S3StorageBackend(envData.storage.s3);
       this.logger.log(`S3 storage backend configured (bucket: ${envData.storage.s3.bucket})`);
     }
 
-    if (envData.storage.backend === 's3' && !StorageService.s3Backend) {
+    if (envData.storage.backend === 's3' && !storageBackends.s3Backend) {
       throw new ImmichStartupError('IMMICH_STORAGE_BACKEND is set to s3 but IMMICH_S3_BUCKET is not configured');
     }
 
@@ -117,10 +80,12 @@ export class StorageService extends BaseService {
           await this.verifyReadAccess(folder);
           await this.verifyWriteAccess(folder);
 
-          if (!flags.mountChecks[folder]) {
-            flags.mountChecks[folder] = true;
-            isUpdated = true;
+          if (flags.mountChecks[folder]) {
+            continue;
           }
+
+          flags.mountChecks[folder] = true;
+          isUpdated = true;
         }
 
         if (isUpdated) {
@@ -189,14 +154,8 @@ export class StorageService extends BaseService {
       }
 
       try {
-        if (isAbsolute(file)) {
-          // Disk file — existing behavior
-          await this.storageRepository.unlink(file);
-        } else {
-          // S3 object — delete via backend
-          const backend = StorageService.resolveBackendForKey(file);
-          await backend.delete(file);
-        }
+        const backend = await this.backendMedia.backendFor(file);
+        await backend.delete(file);
       } catch (error: any) {
         this.logger.warn('Unable to remove file', error);
       }

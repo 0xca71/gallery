@@ -1,24 +1,25 @@
 <script lang="ts">
-  import type { ComboBoxOption } from '$lib/components/shared-components/Combobox.svelte';
-  import SettingCombobox from './SettingCombobox.svelte';
-  import SidebarSettings from './sidebar-settings.svelte';
-  import SettingsLanguageSelector from '$lib/components/shared-components/settings/SettingsLanguageSelector.svelte';
-  import { fallbackLocale, locales } from '$lib/constants';
+  import type { ComboBoxOption } from '#lib/components/shared-components/Combobox.svelte';
+  import SettingsLanguageSelector from '#lib/components/shared-components/settings/SettingsLanguageSelector.svelte';
+  import { fallbackLocale, locales } from '#lib/constants.ts';
+  import SpaceBadgeSetting from '#lib/gallery/space-badge/SpaceBadgeSetting.svelte';
+  import { cropFacesFromAsset } from '#lib/gallery/stores/preferences.store.ts';
   import {
     alwaysLoadOriginalFile,
     alwaysLoadOriginalVideo,
     autoPlayVideo,
-    cropFacesFromAsset,
     locale,
     loopVideo,
     playVideoThumbnailOnHover,
     showDeleteModal,
-  } from '$lib/stores/preferences.store';
-  import { createDateFormatter, findLocale } from '$lib/utils';
-  import { Field, Switch, Text, Theme, themeManager, ThemePreference } from '@immich/ui';
+  } from '#lib/stores/preferences.store.ts';
+  import { createDateFormatter, findLocale } from '#lib/utils.ts';
+  import { Field, Switch, Text, Theme, ThemePreference, themeManager } from '@immich/ui';
   import { onMount } from 'svelte';
   import { t } from 'svelte-i18n';
   import { fade } from 'svelte/transition';
+  import SettingCombobox from './SettingCombobox.svelte';
+  import SidebarSettings from './sidebar-settings.svelte';
 
   let time = $state(new Date());
 
@@ -100,6 +101,8 @@
       <Field label={$t('crop_faces_from_photo')} description={$t('crop_faces_from_photo_description')}>
         <Switch bind:checked={$cropFacesFromAsset} />
       </Field>
+
+      <SpaceBadgeSetting />
 
       <Field label={$t('video_hover_setting')} description={$t('video_hover_setting_description')}>
         <Switch bind:checked={$playVideoThumbnailOnHover} />

@@ -1,39 +1,42 @@
-import type { CommandContext } from '$lib/managers/command-context-manager.svelte';
+import type { CommandContext } from '#lib/managers/command-context-manager.svelte.ts';
 
 /**
- * One struct of booleans deciding which bulk-selection actions the current
- * `CommandContext` allows. Pure and side-effect free: no `authManager`
- * reads, no `$state`. See
- * `specs/2026-07-24-selection-toolbar-consistency-design.md`
- * for the rule derivation ("the regular shared album is the reference model").
- */
+One struct of booleans deciding which bulk-selection actions the current
+`CommandContext` allows. Pure and side-effect free: no `authManager`
+reads, no `$state`. See
+`specs/2026-07-24-selection-toolbar-consistency-design.md`
+for the rule derivation ("the regular shared album is the reference model").
+*/
 export interface SelectionCapabilities {
   canSelectAll: boolean;
   canDownload: boolean;
   /**
-   * CreateSharedLink. True when *any* of the selection is the user's own — the action shares the
-   * owned subset, because `Permission.AssetShare` rejects the whole request if it names one asset
-   * the caller does not own. A space Owner/Editor is the exception (#1018): they can share the
-   * whole selection through the space, so the action is offered even when they own none of it.
-   */
+  CreateSharedLink. True when *any* of the selection is the user's own — the action shares the
+  owned subset, because `Permission.AssetShare` rejects the whole request if it names one asset
+  the caller does not own. A space Owner/Editor is the exception (#1018): they can share the
+  whole selection through the space, so the action is offered even when they own none of it.
+  */
   canShare: boolean;
   /**
-   * #1018: the link must be created against the space rather than against asset ownership, because
-   * the selection contains photos other members contributed. The modal warns before publishing, and
-   * the resulting link stays tethered to the space. Only ever set for a space Owner/Editor.
-   */
+  #1018: the link must be created against the space rather than against asset ownership, because
+  the selection contains photos other members contributed. The modal warns before publishing, and
+  the resulting link stays tethered to the space. Only ever set for a space Owner/Editor.
+  */
   shareScopedToSpace: boolean;
   canAddToAlbum: boolean;
-  /**
-   * The add-to-collection picker must offer only albums linked to this space, because the
-   * selection contains assets the user does not own. Those can only land as #764
-   * contributions (`album_space_asset`), which requires a space-linked album — never a
-   * personal album, a brand-new album, or any space's direct pool.
-   */
-  addToAlbumRestrictedToSpace: boolean;
   canFavorite: boolean;
-  /** Rotate, ChangeDate/Description/Location, Archive, SetVisibility */
+  /**
+  Rotate, ChangeDate, ChangeDescription, ChangeLocation. True on the editable *subset* of
+  the selection (#734) — the same shape `canShare` already uses for the owned subset — not
+  all-or-nothing ownership.
+  
+  Does NOT cover Archive/SetVisibility: those need `canSetVisibility` instead, because
+  rbac-3 restricts visibility changes to owned assets, so riding along on the editable
+  subset would produce guaranteed 403s for a space editor's non-owned assets.
+  */
   canEditMetadata: boolean;
+  /** Archive, SetVisibility. Owner-only — see `canEditMetadata`'s doc comment for why. */
+  canSetVisibility: boolean;
   canTag: boolean;
   canDelete: boolean;
   canSetCover: boolean;
@@ -47,9 +50,9 @@ const NO_CAPABILITIES: SelectionCapabilities = {
   canShare: false,
   shareScopedToSpace: false,
   canAddToAlbum: false,
-  addToAlbumRestrictedToSpace: false,
   canFavorite: false,
   canEditMetadata: false,
+  canSetVisibility: false,
   canTag: false,
   canDelete: false,
   canSetCover: false,
@@ -96,6 +99,12 @@ export function getSelectionCapabilities(ctx: CommandContext, tagsEnabled: boole
   // so this arm is deliberately keyed on `space`, not on `isEditorOfContext`.
   const isSpaceEditor = space !== null && space.canWrite;
 
+  // #734: an editable subset, not all-or-nothing — the same shape canShare already uses for
+  // the owned subset. `undefined` means unresolved, which SelectionToolbar treats as denied
+  // (hidden) rather than pending — see that component's resolution effect.
+  const editable = sel.editableSelectedAssetIds;
+  const hasEditable = sel.isAllUserOwned || (editable !== undefined && editable.length > 0);
+
   return {
     canSelectAll: true,
     canDownload: true,
@@ -105,10 +114,16 @@ export function getSelectionCapabilities(ctx: CommandContext, tagsEnabled: boole
     canShare: sel.ownedSelectedAssetIds.length > 0 || isSpaceEditor,
     shareScopedToSpace: isSpaceEditor && !sel.isAllUserOwned,
     canAddToAlbum: sel.isAllUserOwned || isSpaceEditor,
-    addToAlbumRestrictedToSpace: !sel.isAllUserOwned && isSpaceEditor,
-    canFavorite: sel.isAllUserOwned,
-    canEditMetadata: sel.isAllUserOwned,
-    canTag: sel.isAllUserOwned && tagsEnabled,
+    // Not `isAllUserOwned` (#763): a favorite is a per-user row in the `asset_favorite` overlay,
+    // not a flag on the asset, so favoriting never mutates someone else's asset. Any viewer who
+    // can see the selection may favorite it — including a shared-space member favoriting another
+    // member's photo. Mirrors `canFavoriteSelected` in selection-command-handlers.ts.
+    canFavorite: true,
+    canEditMetadata: hasEditable,
+    // Archive / SetVisibility are NOT metadata edits: rbac-3 restricts visibility changes to
+    // owned assets, so they must not ride on canEditMetadata the way they used to.
+    canSetVisibility: sel.isAllUserOwned,
+    canTag: hasEditable && tagsEnabled,
     canDelete: sel.isAllUserOwned,
     canSetCover: isEditorOfContext && sel.selectedAssetIds.length === 1,
     canRemoveFromAlbum,

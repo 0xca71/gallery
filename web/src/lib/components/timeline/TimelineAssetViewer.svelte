@@ -1,28 +1,30 @@
 <script lang="ts">
-  import { lazyComponent } from '$lib/utils/lazy-component.svelte';
-  import type { Action } from '$lib/components/asset-viewer/actions/action';
+  import OnEvents from '#lib/components/OnEvents.svelte';
   import type {
     AssetCursor,
     FilmstripAssetResolver,
     SlideshowRandomAssetResolver,
     SlideshowStepAssetResolver,
-  } from '$lib/components/asset-viewer/AssetViewer.svelte';
-  import type { FilmstripAsset } from '$lib/components/asset-viewer/AssetViewerFilmstrip.svelte';
-  import { AssetAction } from '$lib/constants';
-  import { assetViewerManager } from '$lib/managers/asset-viewer-manager.svelte';
-  import { assetCacheManager } from '$lib/managers/AssetCacheManager.svelte';
-  import { authManager } from '$lib/managers/auth-manager.svelte';
-  import { TimelineManager } from '$lib/managers/timeline-manager/timeline-manager.svelte';
-  import type { TimelineAsset } from '$lib/managers/timeline-manager/types';
-  import { websocketEvents } from '$lib/stores/websocket';
-  import { handlePromiseError } from '$lib/utils';
-  import { updateStackedAssetInTimeline, updateUnstackedAssetInTimeline } from '$lib/utils/actions';
-  import { navigateToAsset } from '$lib/utils/asset-utils';
-  import { handleErrorAsync } from '$lib/utils/handle-error';
-  import { navigate } from '$lib/utils/navigation';
-  import { toTimelineAsset } from '$lib/utils/timeline-util';
-  import { type AlbumResponseDto, type AssetResponseDto, type PersonResponseDto, getAssetInfo } from '@immich/sdk';
-  import { onDestroy, onMount } from 'svelte';
+  } from '#lib/components/asset-viewer/AssetViewer.svelte';
+  import type { FilmstripAsset } from '#lib/components/asset-viewer/AssetViewerFilmstrip.svelte';
+  import type { Action } from '#lib/components/asset-viewer/actions/action.ts';
+  import { AssetAction } from '#lib/constants.ts';
+  import { albumStackSuccessor } from '#lib/gallery/stack/album-stack-strip.ts';
+  import { setViewerSpace, type ViewerSpace } from '#lib/gallery/viewer-space.ts';
+  import { assetCacheManager } from '#lib/managers/AssetCacheManager.svelte.ts';
+  import { assetViewerManager } from '#lib/managers/asset-viewer-manager.svelte.ts';
+  import { authManager } from '#lib/managers/auth-manager.svelte.ts';
+  import { TimelineManager } from '#lib/managers/timeline-manager/timeline-manager.svelte.ts';
+  import type { TimelineAsset } from '#lib/managers/timeline-manager/types.ts';
+  import { websocketEvents } from '#lib/stores/websocket.ts';
+  import { handlePromiseError } from '#lib/utils.ts';
+  import { navigateToAsset } from '#lib/utils/asset-utils.ts';
+  import { handleErrorAsync } from '#lib/utils/handle-error.ts';
+  import { lazyComponent } from '#lib/utils/lazy-component.svelte.ts';
+  import { navigate } from '#lib/utils/navigation.ts';
+  import { toTimelineAsset } from '#lib/utils/timeline-util.ts';
+  import { getAssetInfo, type AlbumResponseDto, type AssetResponseDto, type PersonResponseDto } from '@immich/sdk';
+  import { onDestroy, onMount, untrack } from 'svelte';
   import { t } from 'svelte-i18n';
   import { SvelteSet } from 'svelte/reactivity';
 
@@ -35,8 +37,7 @@
     person?: PersonResponseDto;
     removeAction?: AssetAction.UNARCHIVE | AssetAction.ARCHIVE | AssetAction.SET_VISIBILITY_TIMELINE | null;
     spaceId?: string;
-    /** Shared-space surface + the caller's write capability on it — see `Timeline` (#889). */
-    space?: { id: string; canWrite: boolean };
+    space?: ViewerSpace['space'];
   }
 
   let {
@@ -51,6 +52,7 @@
     spaceId,
     space,
   }: Props = $props();
+  setViewerSpace(() => ({ spaceId, space }));
 
   const getAsset = (id: string) => {
     return handleErrorAsync(
@@ -126,8 +128,13 @@
     }
   };
 
+  let closeAssetsSequence = 0;
   const loadCloseAssets = async (currentAsset: AssetResponseDto) => {
+    const sequence = ++closeAssetsSequence;
     const [nextAsset, previousAsset] = await Promise.all([getNextAsset(currentAsset), getPreviousAsset(currentAsset)]);
+    if (sequence !== closeAssetsSequence || assetViewerManager.asset?.id !== currentAsset.id) {
+      return;
+    }
 
     assetCursor = {
       current: currentAsset,
@@ -140,8 +147,11 @@
   $effect(() => {
     const asset = assetViewerManager.asset;
     if (asset) {
-      handlePromiseError(loadCloseAssets(asset));
-      handlePromiseError(loadFilmstripAssets(asset));
+      // Neighbor loading must not subscribe this asset effect to the timeline buckets it reads.
+      untrack(() => {
+        handlePromiseError(loadCloseAssets(asset));
+        handlePromiseError(loadFilmstripAssets(asset));
+      });
     }
   });
 
@@ -154,7 +164,7 @@
     // Update the viewer as soon as the cached/full asset is available. The route navigation below
     // then reuses the same cached response instead of making the main image wait for navigation.
     assetViewerManager.setAsset(asset);
-    await navigate({ targetRoute: 'current', assetId: asset.id }, { replaceState: true, keepFocus: true });
+    await navigate({ targetRoute: 'current', assetId: asset.id }, { replace: true, reset: false });
   };
 
   const handleRandom = async () => {
@@ -199,18 +209,14 @@
     });
   };
 
-  const handleRemoveFromAlbum = async (assetIds: string[]) => {
-    timelineManager.removeAssets(assetIds);
-
-    if (!assetIds.includes(assetCursor.current.id)) {
-      return;
+  const onAlbumRemoveAssets = async ({ assetIds, albumIds }: { assetIds: string[]; albumIds: string[] }) => {
+    if (!!album && albumIds.includes(album.id) && assetIds.includes(assetCursor.current.id)) {
+      // eslint-disable-next-line @typescript-eslint/no-unused-expressions
+      (await navigateToAsset(await albumStackSuccessor(album.id, assetCursor.current))) ||
+        (await navigateToAsset(assetCursor?.nextAsset)) ||
+        (await navigateToAsset(assetCursor?.previousAsset)) ||
+        (await handleClose(assetCursor.current.id));
     }
-
-    // keep the cleanup workflow in viewer by moving to adjacent asset first
-    // eslint-disable-next-line @typescript-eslint/no-unused-expressions
-    (await navigateToAsset(assetCursor?.nextAsset)) ||
-      (await navigateToAsset(assetCursor?.previousAsset)) ||
-      (await handleClose(assetCursor.current.id));
   };
 
   const handlePreAction = async (action: Action) => {
@@ -241,52 +247,6 @@
       case AssetAction.ARCHIVE:
       case AssetAction.UNARCHIVE: {
         timelineManager.upsertAssets([action.asset]);
-        break;
-      }
-
-      case AssetAction.STACK: {
-        updateStackedAssetInTimeline(timelineManager, {
-          stack: action.stack,
-          toDeleteIds: action.stack.assets
-            .filter((asset) => asset.id !== action.stack.primaryAssetId)
-            .map((asset) => asset.id),
-        });
-        break;
-      }
-
-      case AssetAction.UNSTACK: {
-        updateUnstackedAssetInTimeline(timelineManager, action.assets);
-        break;
-      }
-      case AssetAction.REMOVE_ASSET_FROM_STACK: {
-        timelineManager.upsertAssets([toTimelineAsset(action.asset)]);
-        if (action.stack) {
-          //Have to unstack then restack assets in timeline in order to update the stack count in the timeline.
-          updateUnstackedAssetInTimeline(
-            timelineManager,
-            action.stack.assets.map((asset) => toTimelineAsset(asset)),
-          );
-          updateStackedAssetInTimeline(timelineManager, {
-            stack: action.stack,
-            toDeleteIds: action.stack.assets
-              .filter((asset) => asset.id !== action.stack?.primaryAssetId)
-              .map((asset) => asset.id),
-          });
-        }
-        break;
-      }
-      case AssetAction.SET_STACK_PRIMARY_ASSET: {
-        //Have to unstack then restack assets in timeline in order for the currently removed new primary asset to be made visible.
-        updateUnstackedAssetInTimeline(
-          timelineManager,
-          action.stack.assets.map((asset) => toTimelineAsset(asset)),
-        );
-        updateStackedAssetInTimeline(timelineManager, {
-          stack: action.stack,
-          toDeleteIds: action.stack.assets
-            .filter((asset) => asset.id !== action.stack.primaryAssetId)
-            .map((asset) => asset.id),
-        });
         break;
       }
       // no default
@@ -323,24 +283,27 @@
   });
 
   onDestroy(() => {
+    filmstripLoadSequence++;
+    filmstripSelectionSequence++;
+    closeAssetsSequence++;
     assetCacheManager.invalidate();
   });
 
   // Mounting the viewer through `{#await}` leaves it permanently unreactive on reopen.
   // See lazyComponent().
-  const LazyAssetViewer = lazyComponent(() => import('$lib/components/asset-viewer/AssetViewer.svelte'));
+  const LazyAssetViewer = lazyComponent(() => import('#lib/components/asset-viewer/AssetViewer.svelte'));
 </script>
 
+<OnEvents {onAlbumRemoveAssets} />
+
 {#if LazyAssetViewer.current}
-  {@const AssetViewer = LazyAssetViewer.current}
+  {const AssetViewer = $derived(LazyAssetViewer.current)}
   <AssetViewer
     {withStacked}
     cursor={assetCursor}
     {isShared}
     {album}
     {person}
-    {spaceId}
-    {space}
     onAssetChange={(asset) => {
       timelineManager?.upsertAssets([toTimelineAsset(asset)]);
     }}
@@ -355,7 +318,6 @@
     {resolveSlideshowRandomAsset}
     {filmstripAssets}
     onFilmstripAssetSelect={selectFilmstripAsset}
-    onRemoveFromAlbum={handleRemoveFromAlbum}
     onClose={handleClose}
   />
 {/if}

@@ -1,6 +1,6 @@
+import { Route } from '#lib/route.ts';
 import type { BreadcrumbItem } from '@immich/ui';
 import type { Translations } from 'svelte-i18n';
-import { Route } from '$lib/route';
 
 // The single place the Face cleanup console's page hierarchy is written down. Before this module every page
 // hand-wrote its own `BreadcrumbItem[]`, and two of them drifted: `/[personId]` and `/resolutions` both
@@ -28,15 +28,15 @@ export const manualCrumb = (t: Translate): BreadcrumbItem => ({
 });
 
 /**
- * The root crumb followed by `tail`, with the LAST crumb's href removed — you never link to the page you are
- * standing on.
- *
- * That rule is what lets `guidedCrumb($t)` be written identically on /scan and on /[personId] and still
- * render unlinked on the first and linked on the second. No page decides for itself whether its own crumb
- * should be a link, so no page can get it wrong.
- *
- * Returns new objects; the caller's crumbs are never mutated.
- */
+The root crumb followed by `tail`, with the LAST crumb's href removed — you never link to the page you are
+standing on.
+
+That rule is what lets `guidedCrumb($t)` be written identically on /scan and on /[personId] and still
+render unlinked on the first and linked on the second. No page decides for itself whether its own crumb
+should be a link, so no page can get it wrong.
+
+Returns new objects; the caller's crumbs are never mutated.
+*/
 export const faceCleanupBreadcrumbs = (t: Translate, ...tail: BreadcrumbItem[]): BreadcrumbItem[] => {
   const trail = [faceCleanupRootCrumb(t), ...tail];
 

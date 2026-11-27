@@ -1,102 +1,109 @@
-import { getAssetInfo, unlinkAndDeleteLivePhoto, updateAsset } from '@immich/sdk';
-import { modalManager } from '@immich/ui';
-import { fireEvent, screen, waitFor } from '@testing-library/svelte';
-import { assetMultiSelectManager } from '$lib/managers/asset-multi-select-manager.svelte';
-import { toTimelineAsset } from '$lib/utils/timeline-util';
-import { renderWithTooltips } from '$tests/helpers';
-import { assetFactory } from '@test-data/factories/asset-factory';
+import { assetMultiSelectManager } from '#lib/managers/asset-multi-select-manager.svelte.ts';
+import { authManager } from '#lib/managers/auth-manager.svelte.ts';
+import { toTimelineAsset } from '#lib/utils/timeline-util.ts';
+import { factory } from '#test/unit/factories.ts';
+import { test } from '#test/unit/fixtures.ts';
+import { t } from 'svelte-i18n';
+import { get } from 'svelte/store';
+import { expect } from 'vitest';
+import { render } from 'vitest-browser-svelte';
+import { page, userEvent } from 'vitest/browser';
 import LinkLivePhotoAction from './LinkLivePhotoAction.svelte';
 
-vi.mock('@immich/sdk', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('@immich/sdk')>()),
-  getAssetInfo: vi.fn(),
-  updateAsset: vi.fn(),
-  unlinkAndDeleteLivePhoto: vi.fn(),
-}));
-vi.mock('$lib/managers/asset-multi-select-manager.svelte', () => ({
-  assetMultiSelectManager: { ownedAssets: [], clear: vi.fn() },
-}));
-vi.mock('$lib/managers/auth-manager.svelte', () => ({ authManager: { params: {} } }));
-vi.mock('$lib/utils/handle-error', () => ({ handleError: vi.fn() }));
-vi.mock('@immich/ui', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('@immich/ui')>()),
-  modalManager: { showDialog: vi.fn() },
-}));
+test.beforeEach(async () => {
+  await authManager.load();
+  assetMultiSelectManager.clear();
+});
+test.afterEach(() => {
+  assetMultiSelectManager.clear();
+  vi.restoreAllMocks();
+});
 
-describe('LinkLivePhotoAction', () => {
-  const photo = assetFactory.build({ id: 'photo-id', livePhotoVideoId: 'video-id' });
-  const unlinkedPhoto = { ...photo, livePhotoVideoId: null };
-  const onLink = vi.fn();
-  const onUnlink = vi.fn();
+test('confirms permanent video deletion without restoring or fetching the motion asset', async ({ api }) => {
+  const photo = factory.asset({ ownerId: authManager.user.id, livePhotoVideoId: crypto.randomUUID() });
+  const updated = { ...photo, livePhotoVideoId: null };
+  api.on({ unlinkAndDeleteLivePhoto: () => ({ json: updated }) });
+  assetMultiSelectManager.selectAsset(toTimelineAsset(photo));
   const onUnlinkAndDelete = vi.fn();
-
-  beforeEach(() => {
-    vi.clearAllMocks();
-    assetMultiSelectManager.ownedAssets = [toTimelineAsset(photo)];
-    vi.mocked(modalManager.showDialog).mockResolvedValue(true);
-    vi.mocked(unlinkAndDeleteLivePhoto).mockResolvedValue(unlinkedPhoto);
-    vi.mocked(updateAsset).mockResolvedValue(unlinkedPhoto);
+  await render(LinkLivePhotoAction, {
+    menuItem: true,
+    unlink: true,
+    deleteVideo: true,
+    onLink: vi.fn(),
+    onUnlink: vi.fn(),
+    onUnlinkAndDelete,
   });
+  await userEvent.click(page.getByRole('menuitem'));
+  await userEvent.click(page.getByRole('button', { name: get(t)('permanently_delete'), exact: true }));
+  await vi.waitFor(() =>
+    expect(onUnlinkAndDelete).toHaveBeenCalledWith({
+      still: toTimelineAsset(updated),
+      motionId: photo.livePhotoVideoId,
+    }),
+  );
+  expect(api.unlinkAndDeleteLivePhoto).toHaveBeenCalledWith({ params: { id: photo.id } });
+  expect(api.updateAsset).not.toHaveBeenCalled();
+  expect(api.getAssetInfo).not.toHaveBeenCalled();
+  expect(assetMultiSelectManager.selectionActive).toBe(false);
+});
 
-  const render = (deleteVideo = true) =>
-    renderWithTooltips(LinkLivePhotoAction, {
-      menuItem: true,
-      unlink: true,
-      deleteVideo,
-      onLink,
-      onUnlink,
-      onUnlinkAndDelete,
-    });
-
-  it('confirms deletion and updates the photo without fetching or restoring the video', async () => {
-    render();
-    await fireEvent.click(screen.getByText('unlink_and_delete_motion_video'));
-    await waitFor(() =>
-      expect(onUnlinkAndDelete).toHaveBeenCalledWith({
-        still: toTimelineAsset(unlinkedPhoto),
-        motionId: 'video-id',
-      }),
-    );
-    expect(modalManager.showDialog).toHaveBeenCalled();
-    expect(unlinkAndDeleteLivePhoto).toHaveBeenCalledWith({ id: 'photo-id' });
-    expect(updateAsset).not.toHaveBeenCalled();
-    expect(getAssetInfo).not.toHaveBeenCalled();
-    expect(onUnlink).not.toHaveBeenCalled();
-    expect(assetMultiSelectManager.clear).toHaveBeenCalled();
+test('cancel leaves the association and selection intact', async ({ api }) => {
+  const photo = factory.asset({ ownerId: authManager.user.id, livePhotoVideoId: crypto.randomUUID() });
+  assetMultiSelectManager.selectAsset(toTimelineAsset(photo));
+  const onUnlinkAndDelete = vi.fn();
+  await render(LinkLivePhotoAction, {
+    menuItem: true,
+    unlink: true,
+    deleteVideo: true,
+    onLink: vi.fn(),
+    onUnlink: vi.fn(),
+    onUnlinkAndDelete,
   });
+  await userEvent.click(page.getByRole('menuitem'));
+  await userEvent.click(page.getByRole('button', { name: get(t)('cancel'), exact: true }));
+  await expect.element(page.getByRole('dialog')).not.toBeInTheDocument();
+  expect(api.unlinkAndDeleteLivePhoto).not.toHaveBeenCalled();
+  expect(onUnlinkAndDelete).not.toHaveBeenCalled();
+  expect(assetMultiSelectManager.hasSelectedAsset(photo.id)).toBe(true);
+});
 
-  it('keeps the selection and assets when deletion is cancelled', async () => {
-    vi.mocked(modalManager.showDialog).mockResolvedValue(false);
-    render();
-    await fireEvent.click(screen.getByText('unlink_and_delete_motion_video'));
-    await waitFor(() => expect(modalManager.showDialog).toHaveBeenCalled());
-    expect(unlinkAndDeleteLivePhoto).not.toHaveBeenCalled();
-    expect(onUnlinkAndDelete).not.toHaveBeenCalled();
-    expect(assetMultiSelectManager.clear).not.toHaveBeenCalled();
-  });
+test('plain unlink still restores the video through the official update/read flow', async ({ api }) => {
+  const video = factory.asset({ ownerId: authManager.user.id });
+  const photo = factory.asset({ ownerId: authManager.user.id, livePhotoVideoId: video.id });
+  const updated = { ...photo, livePhotoVideoId: null };
+  api.on({ updateAsset: () => ({ json: updated }), getAssetInfo: () => ({ json: video }) });
+  assetMultiSelectManager.selectAsset(toTimelineAsset(photo));
+  const onUnlink = vi.fn();
+  await render(LinkLivePhotoAction, { menuItem: true, unlink: true, onLink: vi.fn(), onUnlink });
+  await userEvent.click(page.getByRole('menuitem'));
+  await vi.waitFor(() =>
+    expect(onUnlink).toHaveBeenCalledWith({ still: toTimelineAsset(updated), motion: toTimelineAsset(video) }),
+  );
+  expect(api.unlinkAndDeleteLivePhoto).not.toHaveBeenCalled();
+  expect(api.updateAsset).toHaveBeenCalledWith({ params: { id: photo.id }, body: { livePhotoVideoId: null } });
+  expect(api.getAssetInfo).toHaveBeenCalledWith({ params: { id: video.id } });
+});
 
-  it('preserves the original unlink-only action', async () => {
-    const video = assetFactory.build({ id: 'video-id' });
-    vi.mocked(getAssetInfo).mockResolvedValue(video);
-    render(false);
-    await fireEvent.click(screen.getByText('unlink_motion_video'));
-    await waitFor(() =>
-      expect(onUnlink).toHaveBeenCalledWith({
-        still: toTimelineAsset(unlinkedPhoto),
-        motion: toTimelineAsset(video),
-      }),
-    );
-    expect(updateAsset).toHaveBeenCalledWith({ id: 'photo-id', updateAssetDto: { livePhotoVideoId: null } });
-    expect(unlinkAndDeleteLivePhoto).not.toHaveBeenCalled();
-    expect(modalManager.showDialog).not.toHaveBeenCalled();
+test('a rejected delete leaves the still and selection unchanged', async ({ api, logger }) => {
+  const photo = factory.asset({ ownerId: authManager.user.id, livePhotoVideoId: crypto.randomUUID() });
+  assetMultiSelectManager.selectAsset(toTimelineAsset(photo));
+  api.on({
+    unlinkAndDeleteLivePhoto: () => ({ status: 409, json: { message: 'Video is still linked', statusCode: 409 } }),
   });
-
-  it('does not remove assets from the timeline when the API fails', async () => {
-    vi.mocked(unlinkAndDeleteLivePhoto).mockRejectedValue(new Error('Video is shared'));
-    render();
-    await fireEvent.click(screen.getByText('unlink_and_delete_motion_video'));
-    await waitFor(() => expect(unlinkAndDeleteLivePhoto).toHaveBeenCalled());
-    expect(onUnlinkAndDelete).not.toHaveBeenCalled();
-    expect(assetMultiSelectManager.clear).not.toHaveBeenCalled();
+  const onUnlinkAndDelete = vi.fn();
+  await render(LinkLivePhotoAction, {
+    menuItem: true,
+    unlink: true,
+    deleteVideo: true,
+    onLink: vi.fn(),
+    onUnlink: vi.fn(),
+    onUnlinkAndDelete,
   });
+  await userEvent.click(page.getByRole('menuitem'));
+  await userEvent.click(page.getByRole('button', { name: get(t)('permanently_delete'), exact: true }));
+  expect(api.unlinkAndDeleteLivePhoto).toHaveBeenCalledWith({ params: { id: photo.id } });
+  expect(logger.error).toHaveBeenCalledWith(/\[handleError\].*Error: 409/);
+  await vi.waitFor(() => expect(logger.error.calls.length).toBeGreaterThan(0));
+  expect(onUnlinkAndDelete).not.toHaveBeenCalled();
+  expect(assetMultiSelectManager.hasSelectedAsset(photo.id)).toBe(true);
 });

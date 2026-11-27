@@ -1,46 +1,52 @@
-import { AssetEditSaveMode } from '@immich/sdk';
-import '@testing-library/jest-dom';
-import { cleanup, render, screen, waitFor } from '@testing-library/svelte';
-import userEvent from '@testing-library/user-event';
+import { renderWithTooltips } from '#test/unit/helpers.ts';
+import { AssetEditSaveFormat, AssetEditSaveMode } from '@immich/sdk';
+import { page } from 'vitest/browser';
 import AssetEditSaveModal from './AssetEditSaveModal.svelte';
 
-afterEach(async () => {
-  cleanup();
-  await new Promise((resolve) => setTimeout(resolve, 30));
-});
+const capabilities = {
+  canCopy: true,
+  canOverwrite: true,
+  overwriteUnavailableReason: null,
+  outputFormat: AssetEditSaveFormat.Png,
+} as const;
 
 describe('image save selection', () => {
-  const capabilities = { canCopy: true, canOverwrite: true, overwriteUnavailableReason: null, outputFormat: 'png' };
-
-  it('defaults to an independent copy', async () => {
+  it('defaults to a separate copy and submits it', async () => {
     const onClose = vi.fn();
-    render(AssetEditSaveModal, { capabilities, onClose });
-    expect(screen.getAllByRole('radio')[0]).toBeChecked();
-    await userEvent.click(screen.getByRole('button', { name: 'editor_save_copy' }));
-    await waitFor(() => expect(onClose).toHaveBeenCalledWith(AssetEditSaveMode.Copy));
+    await renderWithTooltips(AssetEditSaveModal, { capabilities, onClose });
+    await expect.element(page.getByRole('radio').nth(0)).toBeChecked();
+    await page.getByRole('button', { name: 'editor_save_copy', exact: true }).click();
+    await expect.poll(() => onClose.mock.calls).toEqual([[AssetEditSaveMode.Copy]]);
   });
 
-  it('cancels without choosing either save mode', async () => {
+  it('cancels without saving', async () => {
     const onClose = vi.fn();
-    render(AssetEditSaveModal, { capabilities, onClose });
-    await userEvent.click(screen.getByRole('button', { name: 'cancel' }));
-    await waitFor(() => expect(onClose).toHaveBeenCalledWith(null));
+    await renderWithTooltips(AssetEditSaveModal, { capabilities, onClose });
+    await page.getByRole('button', { name: 'cancel', exact: true }).click();
+    await expect.poll(() => onClose.mock.calls).toEqual([[null]]);
   });
 
-  it('requires selecting overwrite before replacing the original', async () => {
+  it('requires explicitly selecting overwrite', async () => {
     const onClose = vi.fn();
-    render(AssetEditSaveModal, { capabilities, onClose });
-    await userEvent.click(screen.getAllByRole('radio')[1]);
-    await userEvent.click(screen.getByRole('button', { name: 'editor_save_overwrite' }));
-    await waitFor(() => expect(onClose).toHaveBeenCalledWith(AssetEditSaveMode.Overwrite));
+    await renderWithTooltips(AssetEditSaveModal, { capabilities, onClose });
+    await page.getByRole('radio').nth(1).click();
+    await page.getByRole('button', { name: 'editor_save_overwrite', exact: true }).click();
+    await expect.poll(() => onClose.mock.calls).toEqual([[AssetEditSaveMode.Overwrite]]);
   });
 
-  it('disables overwrite and explains a read-only external source', () => {
-    render(AssetEditSaveModal, {
-      capabilities: { ...capabilities, canOverwrite: false, overwriteUnavailableReason: 'not_writable' },
-      onClose: vi.fn(),
-    });
-    expect(screen.getAllByRole('radio')[1]).toBeDisabled();
-    expect(screen.getByText('editor_save_unavailable_not_writable')).toBeInTheDocument();
-  });
+  it.each(['not_writable', 'unsupported_format', 'save_in_progress'] as const)(
+    'explains unavailable overwrite: %s',
+    async (reason) => {
+      await renderWithTooltips(AssetEditSaveModal, {
+        capabilities: {
+          ...capabilities,
+          canOverwrite: false,
+          overwriteUnavailableReason: reason,
+        },
+        onClose: vi.fn(),
+      });
+      await expect.element(page.getByRole('radio').nth(1)).toBeDisabled();
+      await expect.element(page.getByText(`editor_save_unavailable_${reason}`)).toBeVisible();
+    },
+  );
 });

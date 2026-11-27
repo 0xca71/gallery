@@ -1,9 +1,9 @@
 <script lang="ts">
-  import SearchPeople from '$lib/components/faces-page/PeopleSearch.svelte';
+  import ImageThumbnail from '#lib/components/assets/thumbnail/ImageThumbnail.svelte';
+  import SearchPeople from '#lib/components/faces-page/PeopleSearch.svelte';
   import { type PersonResponseDto } from '@immich/sdk';
   import { Button } from '@immich/ui';
   import { t } from 'svelte-i18n';
-  import ImageThumbnail from '$lib/components/assets/thumbnail/ImageThumbnail.svelte';
 
   interface Props {
     person: PersonResponseDto;
@@ -41,6 +41,7 @@
       bind:searchedPeopleLocal={suggestedPeople}
       type="input"
       numberPeopleToSearch={5}
+      withSharedSpaces
       inputClass="w-full gap-2 bg-gray-100 dark:bg-gray-700 dark:text-white"
       bind:showLoadingSpinner={isSearchingPeople}
     />

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { AssetOrder, UserMetadataKey } from 'src/enum.js';
+import { AssetOrder, PersonUpdateStrategy, UserMetadataKey } from 'src/enum.js';
 import { UserMetadataItem, UserPreferences } from 'src/types.js';
 import { HumanReadableSize } from 'src/utils/bytes.js';
 import { getPreferences, getPreferencesPartial, mergePreferences } from 'src/utils/preferences.js';
@@ -18,7 +18,6 @@ const getDefaultPreferences = (): UserPreferences => ({
     sidebarWeb: true,
     types: {
       on_this_day: true,
-      birthday: true,
       recent_trip: true,
       month_recap: true,
       favorites_throwback: true,
@@ -35,6 +34,7 @@ const getDefaultPreferences = (): UserPreferences => ({
     enabled: true,
     sidebarWeb: false,
     minimumFaces: 3,
+    updateStrategy: PersonUpdateStrategy.Everyone,
   },
   sharedLinks: {
     enabled: true,
@@ -184,7 +184,6 @@ describe('getPreferences', () => {
     const result = getPreferences([]);
     expect(result.memories.types).toEqual({
       on_this_day: true,
-      birthday: true,
       recent_trip: true,
       month_recap: true,
       favorites_throwback: true,
@@ -202,11 +201,11 @@ describe('getPreferences', () => {
     const metadata: UserMetadataItem[] = [
       {
         key: UserMetadataKey.Preferences,
-        value: { memories: { types: { birthday: false } } },
+        value: { memories: { types: { month_recap: false } } },
       },
     ];
     const result = getPreferences(metadata);
-    expect(result.memories.types.birthday).toBe(false);
+    expect(result.memories.types.month_recap).toBe(false);
     expect(result.memories.types.on_this_day).toBe(true);
     expect(result.memories.types.recent_trip).toBe(true);
   });
@@ -283,9 +282,9 @@ describe('getPreferencesPartial', () => {
 
   it('should persist only the changed memory type and not unchanged type keys', () => {
     const preferences = getDefaultPreferences();
-    preferences.memories.types = { on_this_day: true, birthday: false, recent_trip: true };
+    preferences.memories.types = { on_this_day: true, month_recap: false, recent_trip: true };
     const result = getPreferencesPartial(preferences);
-    expect(result).toEqual({ memories: { types: { birthday: false } } });
+    expect(result).toEqual({ memories: { types: { month_recap: false } } });
   });
 
   it('should drop a memory-type key that has no registry default while keeping known changes', () => {
@@ -294,9 +293,9 @@ describe('getPreferencesPartial', () => {
     // registry keys, so a key outside the registry has no default path to be diffed against. Only a
     // downgrade or hand-edited metadata can produce one, and dropping it is the safe outcome.
     const preferences = getDefaultPreferences();
-    preferences.memories.types = { ...preferences.memories.types, birthday: false, future_type: true };
+    preferences.memories.types = { ...preferences.memories.types, month_recap: false, future_type: true };
     const result = getPreferencesPartial(preferences);
-    expect(result).toEqual({ memories: { types: { birthday: false } } });
+    expect(result).toEqual({ memories: { types: { month_recap: false } } });
   });
 });
 
@@ -350,11 +349,11 @@ describe('mergePreferences', () => {
 
   it('should merge a single memory type without clobbering the others', () => {
     const preferences = getDefaultPreferences();
-    preferences.memories.types = { on_this_day: true, birthday: true, recent_trip: true };
+    preferences.memories.types = { on_this_day: true, month_recap: true, recent_trip: true };
     const dto = { memories: { types: { recent_trip: false } } };
     const result = mergePreferences(preferences, dto as any);
     expect(result.memories.types.recent_trip).toBe(false);
-    expect(result.memories.types.birthday).toBe(true);
+    expect(result.memories.types.month_recap).toBe(true);
     expect(result.memories.types.on_this_day).toBe(true);
   });
 });

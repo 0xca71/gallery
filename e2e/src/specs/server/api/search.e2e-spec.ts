@@ -1,6 +1,7 @@
 import {
   AssetMediaResponseDto,
   AssetResponseDto,
+  AssetTypeEnum,
   AssetVisibility,
   deleteAssets,
   LoginResponseDto,
@@ -51,6 +52,12 @@ describe('/search', () => {
   let assetOneJpg5: AssetMediaResponseDto;
   let assetSprings: AssetMediaResponseDto;
   let assetLast: AssetMediaResponseDto;
+  // The asset /search/metadata returns first: the latest local taken time (its sort key, with the id
+  // as tie-break) among the assets that every "newest asset" case below can see. It is not simply
+  // the last upload: a file with no date in its metadata keeps its upload time in the zone of its
+  // coordinates (#1147), so a dateless asset placed east of UTC sorts ahead of later uploads with
+  // no zone. Derived from each asset's own detail rather than hardcoded, so it follows the fixtures.
+  let assetNewest: AssetMediaResponseDto;
 
   beforeAll(async () => {
     await utils.resetDatabase();
@@ -152,6 +159,19 @@ describe('/search', () => {
     assetLast = assets.at(-1) as AssetMediaResponseDto;
 
     await deleteAssets({ assetBulkDeleteDto: { ids: [assetSilver.id] } }, { headers: asBearerAuth(admin.accessToken) });
+
+    const details = await Promise.all(assets.map(({ id }) => utils.getAssetInfo(admin.accessToken, id)));
+    const [newest] = details
+      .filter(
+        (asset) =>
+          !asset.isTrashed &&
+          !asset.isFavorite &&
+          asset.visibility === AssetVisibility.Timeline &&
+          asset.type === AssetTypeEnum.Image &&
+          !asset.libraryId,
+      )
+      .toSorted((a, b) => b.localDateTime.localeCompare(a.localDateTime) || b.id.localeCompare(a.id));
+    assetNewest = assets.find(({ id }) => id === newest.id) as AssetMediaResponseDto;
   }, 30_000);
 
   afterAll(async () => {
@@ -162,7 +182,7 @@ describe('/search', () => {
     const searchTests = [
       {
         should: 'should get my assets',
-        deferred: () => ({ dto: { size: 1 }, assets: [assetLast] }),
+        deferred: () => ({ dto: { size: 1 }, assets: [assetNewest] }),
       },
       {
         should: 'should sort my assets in reverse',
@@ -187,7 +207,7 @@ describe('/search', () => {
       },
       {
         should: 'should search by isFavorite (false)',
-        deferred: () => ({ dto: { size: 1, isFavorite: false }, assets: [assetLast] }),
+        deferred: () => ({ dto: { size: 1, isFavorite: false }, assets: [assetNewest] }),
       },
       {
         should: 'should search by visibility (AssetVisibility.Archive)',
@@ -195,11 +215,11 @@ describe('/search', () => {
       },
       {
         should: 'should search by visibility (AssetVisibility.Timeline)',
-        deferred: () => ({ dto: { size: 1, visibility: AssetVisibility.Timeline }, assets: [assetLast] }),
+        deferred: () => ({ dto: { size: 1, visibility: AssetVisibility.Timeline }, assets: [assetNewest] }),
       },
       {
         should: 'should search by type (image)',
-        deferred: () => ({ dto: { size: 1, type: 'IMAGE' }, assets: [assetLast] }),
+        deferred: () => ({ dto: { size: 1, type: 'IMAGE' }, assets: [assetNewest] }),
       },
       {
         should: 'should search by type (video)',
@@ -241,12 +261,13 @@ describe('/search', () => {
         should: 'should search by takenAfter',
         deferred: () => ({
           dto: { size: 1, takenAfter: DateTime.fromObject({ year: 1234 }).toJSDate() },
-          assets: [assetLast],
+          assets: [assetNewest],
         }),
       },
       {
         should: 'should search by takenAfter (no results)',
-        deferred: () => ({ dto: { takenAfter: today.plus({ hour: 1 }).toJSDate() }, assets: [] }),
+        // a day ahead: taken times are local, and a zone can be up to 14 hours ahead of UTC
+        deferred: () => ({ dto: { takenAfter: today.plus({ days: 1 }).toJSDate() }, assets: [] }),
       },
       {
         should: 'should search by originalFilename',
@@ -349,7 +370,7 @@ describe('/search', () => {
         should: 'should allow searching the upload library (libraryId: null)',
         deferred: () => ({
           dto: { libraryId: null, size: 1 },
-          assets: [assetLast],
+          assets: [assetNewest],
         }),
       },
     ];
@@ -395,6 +416,27 @@ describe('/search', () => {
         .send({ albumIds: [album.id] });
       expect(status).toBe(200);
       expect(body.assets.items).toEqual([expect.objectContaining({ id: asset.id })]);
+    });
+
+    it('should strip metadata for a shared link without metadata', async () => {
+      const asset = await utils.createAsset(admin.accessToken);
+      const album = await utils.createAlbum(admin.accessToken, { albumName: 'foo', assetIds: [asset.id] });
+      const sharedLink = await utils.createSharedLink(admin.accessToken, {
+        type: SharedLinkType.Album,
+        albumId: album.id,
+        showMetadata: false,
+      });
+
+      const { status, body } = await request(app)
+        .post(`/search/metadata?key=${sharedLink.key}`)
+        .send({ albumIds: [album.id], withExif: true });
+      expect(status).toBe(200);
+      expect(body.assets.items).toHaveLength(1);
+      expect(body.assets.items[0]).toEqual(expect.objectContaining({ id: asset.id, hasMetadata: false }));
+      expect(body.assets.items[0]).not.toHaveProperty('exifInfo');
+      expect(body.assets.items[0]).not.toHaveProperty('originalPath');
+      expect(body.assets.items[0]).not.toHaveProperty('originalFileName');
+      expect(body.assets.items[0]).not.toHaveProperty('ownerId');
     });
   });
 
@@ -503,6 +545,7 @@ describe('/search', () => {
         .get('/search/suggestions?type=country&includeNull=true')
         .set('Authorization', `Bearer ${admin.accessToken}`);
       expect(body).toEqual([
+        'China',
         'Cuba',
         'France',
         'Georgia',
@@ -510,12 +553,11 @@ describe('/search', () => {
         'Ghana',
         'Japan',
         'Morocco',
-        "People's Republic of China",
-        'Russian Federation',
+        'Russia',
         'Singapore',
         'Spain',
         'Switzerland',
-        'United States of America',
+        'United States',
         null,
       ]);
       expect(status).toBe(200);
@@ -526,6 +568,7 @@ describe('/search', () => {
         .get('/search/suggestions?type=country')
         .set('Authorization', `Bearer ${admin.accessToken}`);
       expect(body).toEqual([
+        'China',
         'Cuba',
         'France',
         'Georgia',
@@ -533,12 +576,11 @@ describe('/search', () => {
         'Ghana',
         'Japan',
         'Morocco',
-        "People's Republic of China",
-        'Russian Federation',
+        'Russia',
         'Singapore',
         'Spain',
         'Switzerland',
-        'United States of America',
+        'United States',
       ]);
       expect(status).toBe(200);
     });
@@ -558,7 +600,7 @@ describe('/search', () => {
         'New York',
         'Shanghai',
         'State of Berlin',
-        'St.-Petersburg',
+        'St. Petersburg',
         'Tbilisi',
         'Tokyo',
         'Virginia',
@@ -582,7 +624,7 @@ describe('/search', () => {
         'New York',
         'Shanghai',
         'State of Berlin',
-        'St.-Petersburg',
+        'St. Petersburg',
         'Tbilisi',
         'Tokyo',
         'Virginia',
@@ -650,6 +692,9 @@ describe('/search', () => {
         'NIKON CORPORATION',
         'PENTAX Corporation',
         'samsung',
+        // Gallery's test-assets pin includes a Samsung video with no Make tag; immich-29375 now
+        // derives 'Samsung' from its SamsungModel tag.
+        'Samsung',
         'SONY',
         null,
       ]);
@@ -667,6 +712,9 @@ describe('/search', () => {
         'NIKON CORPORATION',
         'PENTAX Corporation',
         'samsung',
+        // Gallery's test-assets pin includes a Samsung video with no Make tag; immich-29375 now
+        // derives 'Samsung' from its SamsungModel tag.
+        'Samsung',
         'SONY',
       ]);
       expect(status).toBe(200);

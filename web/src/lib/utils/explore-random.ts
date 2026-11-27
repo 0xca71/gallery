@@ -12,7 +12,7 @@ export const dateRanges = ['all', 'last_year', 'years_1_3', 'years_3_5', 'years_
 export type RandomDateRange = (typeof dateRanges)[number] | 'custom';
 export const dateRangeOptions = [...dateRanges, 'custom'] satisfies RandomDateRange[];
 
-type RandomSearchQuery = Pick<RandomSearchDto, 'albumIds' | 'takenAfter' | 'takenBefore' | 'type'>;
+export type RandomSearchQuery = Omit<RandomSearchDto, 'size'>;
 
 export type RandomFilterState = {
   mediaType: 'all' | 'image' | 'video';
@@ -104,6 +104,21 @@ export function buildRandomSearchFilter(
   return query;
 }
 
+/** Compose a browse scope without widening its existing date interval. */
+export function buildRandomSearchQuery(state: RandomFilterState, scope: RandomSearchQuery = {}): RandomSearchQuery {
+  const filters = buildRandomSearchFilter(state);
+  const query = { ...scope, ...filters };
+  if (scope.takenAfter && filters.takenAfter) {
+    query.takenAfter =
+      Date.parse(scope.takenAfter) > Date.parse(filters.takenAfter) ? scope.takenAfter : filters.takenAfter;
+  }
+  if (scope.takenBefore && filters.takenBefore) {
+    query.takenBefore =
+      Date.parse(scope.takenBefore) < Date.parse(filters.takenBefore) ? scope.takenBefore : filters.takenBefore;
+  }
+  return query;
+}
+
 export const RANDOM_BATCH_SIZE = 200;
 
 export function mergeUniqueAssets(assets: AssetResponseDto[], incoming: AssetResponseDto[]) {
@@ -123,7 +138,7 @@ export function loadRandomBatch(query: RandomSearchQuery, signal: AbortSignal, s
 }
 
 export async function loadRandomTotal(query: RandomSearchQuery, signal: AbortSignal) {
-  const statisticsQuery: Pick<StatisticsSearchDto, keyof RandomSearchQuery> = query;
+  const statisticsQuery: StatisticsSearchDto = query;
   const { total } = await searchAssetStatistics({ statisticsSearchDto: statisticsQuery }, { signal });
   return total;
 }

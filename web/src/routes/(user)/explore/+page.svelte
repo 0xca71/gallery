@@ -1,33 +1,61 @@
 <script lang="ts">
-  import { lazyComponent } from '$lib/utils/lazy-component.svelte';
-  import ExploreAssetRow from '$lib/components/explore/ExploreAssetRow.svelte';
-  import RandomSection from '$lib/components/explore/RandomSection.svelte';
-  import type { AssetResponseDto } from '@immich/sdk';
-  import ImageThumbnail from '$lib/components/assets/thumbnail/ImageThumbnail.svelte';
-  import UserPageLayout from '$lib/components/layouts/UserPageLayout.svelte';
-  import OnEvents from '$lib/components/OnEvents.svelte';
-  import EmptyPlaceholder from '$lib/components/shared-components/EmptyPlaceholder.svelte';
-  import SingleGridRow from '$lib/components/shared-components/SingleGridRow.svelte';
-  import { assetViewerManager } from '$lib/managers/asset-viewer-manager.svelte';
-  import { Route } from '$lib/route';
-  import { getAssetMediaUrl, memoryLaneTitle } from '$lib/utils';
-  import { getNextAsset, getPreviousAsset } from '$lib/utils/asset-utils';
-  import { getGlobalPersonHref, getGlobalPersonThumbnailUrl } from '$lib/utils/global-person-route';
-  import { getAssetInfo, AssetMediaSize, type PersonResponseDto, type SearchExploreResponseDto } from '@immich/sdk';
-  import { authManager } from '$lib/managers/auth-manager.svelte';
-  import { Icon, ImageCarousel } from '@immich/ui';
-  import { mdiHeart } from '@mdi/js';
+  import OnEvents from '#lib/components/OnEvents.svelte';
+  import type { FilmstripAsset } from '#lib/components/asset-viewer/AssetViewerFilmstrip.svelte';
+  import ImageThumbnail from '#lib/components/assets/thumbnail/ImageThumbnail.svelte';
+  import RandomSection from '#lib/components/explore/RandomSection.svelte';
+  import PersonIndicator from '#lib/components/faces-page/PersonIndicator.svelte';
+  import UserPageLayout from '#lib/components/layouts/UserPageLayout.svelte';
+  import MemoryCard from '#lib/components/memories/MemoryCard.svelte';
+  import EmptyPlaceholder from '#lib/components/shared-components/EmptyPlaceholder.svelte';
+  import SingleGridRow from '#lib/components/shared-components/SingleGridRow.svelte';
+  import Portal from '#lib/elements/Portal.svelte';
+  import { keepSpacesLoaded } from '#lib/gallery/library-view/library-view.svelte.ts';
+  import { peopleSortManager } from '#lib/gallery/managers/people-sort-manager.svelte.ts';
+  import { assetViewerManager } from '#lib/managers/asset-viewer-manager.svelte.ts';
+  import { authManager } from '#lib/managers/auth-manager.svelte.ts';
+  import { Route } from '#lib/route.ts';
+  import { getAssetMediaUrl, memoryLaneTitle } from '#lib/utils.ts';
+  import { getNextAsset, getPreviousAsset } from '#lib/utils/asset-utils.ts';
+  import { getGlobalPersonHref, getGlobalPersonThumbnailUrl } from '#lib/utils/global-person-route.ts';
+  import { lazyComponent } from '#lib/utils/lazy-component.svelte.ts';
+  import { getAltText } from '#lib/utils/thumbnail-util.ts';
+  import { toTimelineAsset } from '#lib/utils/timeline-util.ts';
+  import {
+    AssetMediaSize,
+    getAssetInfo,
+    type AssetResponseDto,
+    type PersonResponseDto,
+    type SearchExploreResponseDto,
+  } from '@immich/sdk';
+  import { ImageCarousel } from '@immich/ui';
   import { t } from 'svelte-i18n';
   import type { PageData } from './$types';
-  import { toTimelineAsset } from '$lib/utils/timeline-util';
-  import { getAltText } from '$lib/utils/thumbnail-util';
-  import Portal from '$lib/elements/Portal.svelte';
 
   interface Props {
     data: PageData;
   }
 
   let { data }: Props = $props();
+  keepSpacesLoaded();
+  let randomViewerAssets = $state<AssetResponseDto[]>([]);
+  const onRandomSelect = (assets: AssetResponseDto[], asset: AssetResponseDto) => {
+    randomViewerAssets = assets;
+    assetViewerManager.setAsset(asset);
+  };
+  const randomViewerIndex = $derived(
+    randomViewerAssets.findIndex((asset) => asset.id === assetViewerManager.asset?.id),
+  );
+  const selectFilmstripAsset = (asset: FilmstripAsset) => {
+    if ('type' in asset) {
+      assetViewerManager.setAsset(asset);
+    }
+  };
+  const resolveSlideshowStepAsset = (asset: AssetResponseDto, order: 'previous' | 'next') =>
+    order === 'previous' ? getPreviousAsset(randomViewerAssets, asset) : getNextAsset(randomViewerAssets, asset);
+  const resolveSlideshowRandomAsset = (isPlayable: (asset: AssetResponseDto) => boolean) => {
+    const playable = randomViewerAssets.filter((asset) => isPlayable(asset));
+    return playable[Math.floor(Math.random() * playable.length)];
+  };
 
   const getFieldItems = (items: SearchExploreResponseDto[], field: string) => {
     const targetField = items.find((item) => item.fieldName === field);
@@ -39,6 +67,7 @@
     getFieldItems(data.explore, 'createdAt').sort((a, b) => new Date(b.value).getTime() - new Date(a.value).getTime()),
   );
   let people = $state(data.people.people);
+  let sortedPeople = $derived(peopleSortManager.sort(people));
   let memories = $derived(
     data.memories.map((memory) => ({
       id: memory.id,
@@ -46,6 +75,7 @@
       href: Route.viewMemory({ id: memory.id, assetId: memory.assets[0].id }),
       alt: $t('memory_lane_title', { values: { title: $getAltText(toTimelineAsset(memory.assets[0])) } }),
       src: getAssetMediaUrl({ id: memory.assets[0].id }),
+      type: memory.type,
     })),
   );
 
@@ -59,33 +89,17 @@
     }
   };
 
-  let viewerAssets = $state<AssetResponseDto[]>([]);
-
-  const onRandomSelect = (assets: AssetResponseDto[], asset: AssetResponseDto) => {
-    viewerAssets = assets;
-    assetViewerManager.setAsset(asset);
-  };
-
   const onViewAsset = async (id: string) => {
-    viewerAssets = [];
+    randomViewerAssets = [];
     const asset = await getAssetInfo({ ...authManager.params, id });
     assetViewerManager.setAsset(asset);
   };
 
-  const viewerIndex = $derived(viewerAssets.findIndex((asset) => asset.id === assetViewerManager.asset?.id));
   const assetCursor = $derived({
-    previousAsset: viewerIndex > 0 ? viewerAssets[viewerIndex - 1] : undefined,
-    nextAsset: viewerIndex >= 0 ? viewerAssets[viewerIndex + 1] : undefined,
     current: assetViewerManager.asset!,
+    previousAsset: randomViewerAssets[randomViewerIndex - 1],
+    nextAsset: randomViewerAssets[randomViewerIndex + 1],
   });
-
-  const resolveSlideshowStepAsset = (asset: AssetResponseDto, order: 'previous' | 'next') =>
-    order === 'previous' ? getPreviousAsset(viewerAssets, asset) : getNextAsset(viewerAssets, asset);
-
-  const resolveSlideshowRandomAsset = (isPlayable: (asset: AssetResponseDto) => boolean) => {
-    const playableAssets = viewerAssets.filter((asset) => isPlayable(asset));
-    return playableAssets[Math.floor(Math.random() * playableAssets.length)];
-  };
 
   const getPersonHref = (person: PersonResponseDto) => getGlobalPersonHref(person, Route.explore());
 
@@ -93,12 +107,28 @@
 
   // Mounting the viewer through `{#await}` leaves it permanently unreactive on reopen.
   // See lazyComponent().
-  const LazyAssetViewer = lazyComponent(() => import('$lib/components/asset-viewer/AssetViewer.svelte'));
+  const LazyAssetViewer = lazyComponent(() => import('#lib/components/asset-viewer/AssetViewer.svelte'));
 </script>
 
 <OnEvents {onPersonThumbnailReady} />
 
 <UserPageLayout title={data.meta.title}>
+  <div class="px-2 md:px-4">
+    <RandomSection
+      onselect={onRandomSelect}
+      viewerAssetId={assetViewerManager.isViewing && randomViewerAssets.length > 0
+        ? assetViewerManager.asset?.id
+        : undefined}
+      onassetschange={(assets) => {
+        if (randomViewerAssets.length > 0) {
+          randomViewerAssets = assets;
+          if (assets.length === 0) {
+            assetViewerManager.showAssetViewer(false);
+          }
+        }
+      }}
+    />
+  </div>
   {#if hasPeople}
     <div class="mt-2 mb-6 px-2 md:px-4">
       <div class="flex justify-between">
@@ -111,14 +141,18 @@
       </div>
       <SingleGridRow class="grid grid-flow-col grid-auto-fill-20 gap-x-4 md:grid-auto-fill-28">
         {#snippet children({ itemCount })}
-          {#each people.slice(0, itemCount) as person (person.id)}
-            <a href={getPersonHref(person)} class="relative text-center">
-              <ImageThumbnail circle shadow url={getPersonThumbnail(person)} altText={person.name} widthStyle="100%" />
-              {#if person.isFavorite}
-                <div class="absolute inset-s-2 top-2">
-                  <Icon icon={mdiHeart} size="24" class="text-white" />
-                </div>
-              {/if}
+          {#each sortedPeople.slice(0, itemCount) as person (person.id)}
+            <a href={getPersonHref(person)} class="text-center">
+              <div class="@container relative">
+                <ImageThumbnail
+                  circle
+                  shadow
+                  url={getPersonThumbnail(person)}
+                  altText={person.name}
+                  widthStyle="100%"
+                />
+                <PersonIndicator {person} />
+              </div>
               <p class="mt-2 text-sm font-medium text-ellipsis dark:text-white">{person.name}</p>
             </a>
           {/each}
@@ -174,21 +208,13 @@
           draggable="false">{$t('view_all')}</a
         >
       </div>
-      <ImageCarousel items={memories} />
+      <ImageCarousel items={memories}>
+        {#snippet child(item)}
+          <MemoryCard {item} />
+        {/snippet}
+      </ImageCarousel>
     </div>
   {/if}
-
-  <div class="px-2 md:px-4">
-    <RandomSection
-      onselect={onRandomSelect}
-      viewerAssetId={assetViewerManager.isViewing && viewerAssets.length > 0 ? assetViewerManager.asset?.id : undefined}
-      onassetschange={(assets) => {
-        if (viewerAssets.length > 0) {
-          viewerAssets = assets;
-        }
-      }}
-    />
-  </div>
 
   {#if recents.length > 0}
     <div class="mt-2 mb-6 px-2 md:px-4">
@@ -200,7 +226,22 @@
           draggable="false">{$t('view_all')}</a
         >
       </div>
-      <ExploreAssetRow assets={recents.map((item) => item.data)} onselect={(asset) => onViewAsset(asset.id)} />
+      <div class="flex h-24 max-w-fit flex-wrap gap-x-1 overflow-hidden md:h-42">
+        {#each recents as item (item.data.id)}
+          <button
+            type="button"
+            class="relative h-full flex-auto"
+            onclick={() => onViewAsset(item.data.id)}
+            draggable="false"
+          >
+            <img
+              src={getAssetMediaUrl({ id: item.data.id, size: AssetMediaSize.Thumbnail })}
+              alt={$getAltText(toTimelineAsset(item.data))}
+              class="size-full min-w-max rounded-xl object-cover"
+            />
+          </button>
+        {/each}
+      </div>
     </div>
   {/if}
 
@@ -211,11 +252,13 @@
 
 {#if assetViewerManager.isViewing}
   {#if LazyAssetViewer.current}
-    {@const AssetViewer = LazyAssetViewer.current}
+    {const AssetViewer = $derived(LazyAssetViewer.current)}
     <Portal target="body">
       <AssetViewer
         cursor={assetCursor}
-        showNavigation={viewerAssets.length > 1}
+        showNavigation={randomViewerAssets.length > 1}
+        filmstripAssets={randomViewerAssets}
+        onFilmstripAssetSelect={selectFilmstripAsset}
         {resolveSlideshowStepAsset}
         {resolveSlideshowRandomAsset}
         onClose={() => assetViewerManager.showAssetViewer(false)}

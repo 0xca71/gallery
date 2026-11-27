@@ -1,18 +1,31 @@
+import 'dart:async';
+
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:immich_mobile/domain/models/person.model.dart';
 import 'package:immich_mobile/providers/api.provider.dart';
+import 'package:immich_mobile/providers/background_sync.provider.dart';
 import 'package:immich_mobile/repositories/api.repository.dart';
 import 'package:immich_mobile/services/api.service.dart';
 import 'package:immich_mobile/utils/people_sort.dart';
-import 'package:immich_mobile/utils/space_permissions.dart';
 import 'package:openapi/api.dart';
 
-final sharedSpaceApiRepositoryProvider = Provider((ref) => SharedSpaceApiRepository(ref.watch(apiServiceProvider)));
+final sharedSpaceApiRepositoryProvider = Provider(
+  (ref) => SharedSpaceApiRepository(
+    ref.watch(apiServiceProvider),
+    // Queued behind a sync already running, which may have read the space before the change.
+    onSpaceChanged: () => unawaited(ref.read(backgroundSyncProvider).syncRemote(enqueue: true)),
+  ),
+);
 
 class SharedSpaceApiRepository extends ApiRepository {
   final ApiService _apiService;
 
-  SharedSpaceApiRepository(this._apiService);
+  /// Called once the server has taken a change to a space's photos or look. The timeline's space marks read the
+  /// local tables, which the change reaches at the next sync, so the provider asks for one now. Here rather than at
+  /// the call sites so that every surface that adds, removes or edits gets it.
+  final void Function()? _onSpaceChanged;
+
+  SharedSpaceApiRepository(this._apiService, {this._onSpaceChanged});
 
   // Resolved lazily on each call. `ApiService.setEndpoint()` reassigns the
   // `*Api` fields to new instances tied to a fresh ApiClient (and basePath);
@@ -58,7 +71,25 @@ class SharedSpaceApiRepository extends ApiRepository {
       description: description == null ? const Optional.absent() : Optional.present(description),
       color: color == null ? const Optional.absent() : Optional.present(color),
     );
-    return await checkNull(_api.updateSpace(id, dto));
+    final space = await checkNull(_api.updateSpace(id, dto));
+    _onSpaceChanged?.call();
+    return space;
+  }
+
+  /// Sets one of the per-space member-management overrides (`editorsCanAddMembers` /
+  /// `editorsCanChangeRoles`). [value] `null` resets it to the server default, so it is sent as an
+  /// explicit JSON null (`Optional.present(null)`), unlike [update] where null means "unchanged".
+  Future<SharedSpaceResponseDto> updateMemberPermission(
+    String spaceId, {
+    required String field,
+    required bool? value,
+  }) async {
+    final dto = switch (field) {
+      'editorsCanAddMembers' => SharedSpaceUpdateDto(editorsCanAddMembers: Optional.present(value)),
+      'editorsCanChangeRoles' => SharedSpaceUpdateDto(editorsCanChangeRoles: Optional.present(value)),
+      _ => throw ArgumentError.value(field, 'field'),
+    };
+    return await checkNull(_api.updateSpace(spaceId, dto));
   }
 
   Future<void> delete(String id) async {
@@ -146,24 +177,6 @@ class SharedSpaceApiRepository extends ApiRepository {
     );
   }
 
-  /// Whether [userId] may edit Space-scoped people in [spaceId] (owner or editor role).
-  /// Mirrors the web resolveSpaceEditable (person.service.ts): the server enforces the role
-  /// on every write, so a membership-lookup failure fails open (returns true) rather than
-  /// hiding a working action. `getMembers` only requires membership, so viewers can call it.
-  Future<bool> isSpaceEditor(String spaceId, String userId) async {
-    try {
-      final members = await getMembers(spaceId);
-      for (final member in members) {
-        if (member.userId == userId) {
-          return roleIsWritable(member.role);
-        }
-      }
-      return false;
-    } catch (_) {
-      return true;
-    }
-  }
-
   /// Edits a Space-scoped person via the editor-gated shared-space endpoint. Personal/owned
   /// people must NOT use this — they go through the owner-only [PersonApiRepository.update].
   Future<SharedSpacePersonResponseDto> updateSpacePerson(
@@ -207,11 +220,23 @@ class SharedSpaceApiRepository extends ApiRepository {
   Future<void> addAssets(String spaceId, List<String> assetIds) async {
     final dto = SharedSpaceAssetAddDto(assetIds: assetIds);
     await _api.addAssets(spaceId, dto);
+    _onSpaceChanged?.call();
   }
 
-  Future<void> removeAssets(String spaceId, List<String> assetIds) async {
+  /// The server removes only the assets added to the space directly (with their stacks) and returns those.
+  Future<List<String>> removeAssets(String spaceId, List<String> assetIds) async {
     final dto = SharedSpaceAssetRemoveDto(assetIds: assetIds);
-    await _api.removeAssets(spaceId, dto);
+    final removed = await _api.removeAssets(spaceId, dto) ?? const <String>[];
+    _onSpaceChanged?.call();
+    return removed;
+  }
+
+  /// The names of the albums linked to the space that hold [assetIds], once each.
+  Future<List<String>> linkedAlbumNames(String spaceId, List<String> assetIds) async {
+    final albums = await _api.getSharedSpaceAssetLinkedAlbums(spaceId, SharedSpaceAssetRemoveDto(assetIds: assetIds));
+    return [
+      ...{for (final album in albums ?? const <SharedSpaceAssetLinkedAlbumDto>[]) album.albumName},
+    ];
   }
 
   /// Link an album to a shared space (PUT /shared-spaces/{id}/albums/{albumId}).

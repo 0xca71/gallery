@@ -1,12 +1,13 @@
-name: Close likely duplicates
 on:
   workflow_dispatch:
-    # Disabled for personal-use CI; keep the file for easy re-enable.
+    # Automatic runs disabled for this standalone private fork.
 
+name: Close likely duplicates
 permissions: {}
 
 jobs:
   should_run:
+    if: ${{ github.repository == 'immich-app/immich' }}
     runs-on: ubuntu-latest
     outputs:
       should_run: ${{ steps.should_run.outputs.run }}
@@ -21,7 +22,7 @@ jobs:
   get_body:
     runs-on: ubuntu-latest
     needs: should_run
-    if: ${{ needs.should_run.outputs.should_run == 'true' }}
+    if: ${{ github.repository == 'immich-app/immich' && (needs.should_run.outputs.should_run == 'true') }}
     env:
       EVENT: ${{ toJSON(github.event) }}
     outputs:
@@ -35,9 +36,9 @@ jobs:
   get_checkbox_json:
     runs-on: ubuntu-latest
     needs: [get_body, should_run]
-    if: ${{ needs.should_run.outputs.should_run == 'true' }}
+    if: ${{ github.repository == 'immich-app/immich' && (needs.should_run.outputs.should_run == 'true') }}
     container:
-      image: ghcr.io/immich-app/mdq:main@sha256:ef9eab1055b07aed9111b6dd3f0d70e1b2e08c862d982d4f4560d6353c9e2b9d
+      image: ghcr.io/immich-app/mdq:main@sha256:476bd00d0b41a95cd799b6feff86ca221d795a1576e7d691e4fbe1c476a9767d
     outputs:
       checked: ${{ steps.get_checkbox.outputs.checked }}
     steps:
@@ -51,7 +52,7 @@ jobs:
   close_and_comment:
     runs-on: ubuntu-latest
     needs: [get_checkbox_json, should_run]
-    if: ${{ needs.should_run.outputs.should_run == 'true' && needs.get_checkbox_json.outputs.checked != 'true' }}
+    if: ${{ github.repository == 'immich-app/immich' && (needs.should_run.outputs.should_run == 'true' && needs.get_checkbox_json.outputs.checked != 'true') }}
     permissions:
       issues: write
       discussions: write

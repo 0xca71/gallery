@@ -1,14 +1,11 @@
 import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { Kysely, Transaction } from 'kysely';
-import type { FilteredMapMarkerDto } from 'src/dtos/gallery-map.dto.js';
-import type { MapMarkerResponseDto } from 'src/dtos/map.dto.js';
-import type { ArgOf } from 'src/repositories/event.repository.js';
-import type { SpaceFaceAssignment } from 'src/repositories/shared-space.repository.js';
-import type { JobOf } from 'src/types.js';
 import { AssetFace, SharedSpacePerson } from 'src/database.js';
 import { OnEvent, OnJob } from 'src/decorators.js';
 import { MapAlbumDto, mapAlbum } from 'src/dtos/album.dto.js';
 import { AuthDto } from 'src/dtos/auth.dto.js';
+import type { FilteredMapMarkerDto } from 'src/dtos/gallery-map.dto.js';
+import type { MapMarkerResponseDto } from 'src/dtos/map.dto.js';
 import { mapNotification } from 'src/dtos/notification.dto.js';
 import {
   PeopleFaceStatisticsResponseDto,
@@ -24,6 +21,7 @@ import {
   SharedSpacePersonMergeDto,
   SharedSpacePersonResponseDto,
   SharedSpacePersonUpdateDto,
+  SpaceAssetFaceResponseDto,
   SpacePeopleQueryDto,
   SpaceRepresentativeFaceUpdateDto,
 } from 'src/dtos/shared-space-person.dto.js';
@@ -66,27 +64,41 @@ import {
   QueueName,
   SharedSpaceActivityType,
   SharedSpaceRole,
+  SourceType,
   SystemMetadataKey,
   UserAvatarColor,
 } from 'src/enum.js';
+import { requireSpaceShareAccess } from 'src/gallery/utils/access-grants.js';
+import {
+  resolveSpaceMemberManagement,
+  type ServerMemberPermissionSettings,
+  type SpaceMemberPermissionSettings,
+} from 'src/gallery/utils/space-member-management.js';
 import { AlbumAssetCount } from 'src/repositories/album.repository.js';
+import type { ArgOf } from 'src/repositories/event.repository.js';
 import {
   SHARED_SPACE_ALBUM_FOLDER_MAX_DEPTH,
   visibleSpaceAssetVisibilities,
+  type SpaceFaceAssignment,
 } from 'src/repositories/shared-space.repository.js';
 import { DB } from 'src/schema/index.js';
 import {
-  type ReconciliationClaim,
   buildAutomaticReconciliationClaim,
   chooseAutomaticTargetIdentity,
   filterUnambiguousReconciliationClaims,
+  type ReconciliationClaim,
 } from 'src/services/accessible-identity-reconciliation.js';
 import { BaseService } from 'src/services/base.service.js';
+import type { JobOf } from 'src/types.js';
+import { convertFaceBoxToOriginalImageSpace, getDimensions } from 'src/utils/asset.util.js';
+import { retryOnDeadlock } from 'src/utils/database.js';
 import { asDateString, asDateTimeString } from 'src/utils/date.js';
+import { isSuggestionScanTarget } from 'src/utils/face-repair.js';
 import { ImmichMediaResponse } from 'src/utils/file.js';
 import { createCrossOwnerMergeAuthorizer } from 'src/utils/merge-policy.js';
 import { mimeTypes } from 'src/utils/mime-types.js';
 import { isFaceSuggestionEnabled } from 'src/utils/misc.js';
+import { transformFaceBoundingBox } from 'src/utils/transform.js';
 
 const ROLE_HIERARCHY: Record<SharedSpaceRole, number> = {
   [SharedSpaceRole.Viewer]: 0,
@@ -106,40 +118,47 @@ const NAME_SOURCE_PRECEDENCE: Record<string, number> = {
 };
 const getNameSourcePrecedence = (nameSource: string) => NAME_SOURCE_PRECEDENCE[nameSource] ?? 0;
 
+// §6.3.1: an owner person and an identity-less space person with the same non-empty name are taken
+// to be the same human. Case and surrounding whitespace are not meaningful in a person's name.
+const isSamePersonName = (ownerPersonName: string | null | undefined, spacePersonName: string) => {
+  const owner = ownerPersonName?.trim().toLocaleLowerCase();
+  return !!owner && owner === spacePersonName.trim().toLocaleLowerCase();
+};
+
 /**
- * Upper bound on chained {@link SharedSpaceService.handleSharedSpacePersonDedup} passes for one
- * space. Each job runs a single pass and re-queues the next; this caps the chain so a pathological
- * always-reappears bug can't queue passes forever.
- */
+Upper bound on chained {@link SharedSpaceService.handleSharedSpacePersonDedup} passes for one
+space. Each job runs a single pass and re-queues the next; this caps the chain so a pathological
+always-reappears bug can't queue passes forever.
+*/
 export const SHARED_SPACE_DEDUP_MAX_PASSES = 100;
 
 /**
- * Root is depth 1; the cap is inclusive, so a folder at depth 10 cannot take a child.
- *
- * Defined in the repository — the writer enforces it under the advisory lock — and re-exported
- * here, which is where every caller has always imported it from.
- */
+Root is depth 1; the cap is inclusive, so a folder at depth 10 cannot take a child.
+
+Defined in the repository — the writer enforces it under the advisory lock — and re-exported
+here, which is where every caller has always imported it from.
+*/
 export { SHARED_SPACE_ALBUM_FOLDER_MAX_DEPTH } from 'src/repositories/shared-space.repository.js';
 /** Bounds the whole-space folder fetch the web client uses to render the tree. */
 export const SHARED_SPACE_ALBUM_FOLDER_MAX_PER_SPACE = 500;
 
 /**
- * The three folder-write rejection messages, in one place.
- *
- * All three are load-bearing STRINGS, not just copy. The mobile client has no error codes to work
- * with — `_folderErrorKey` in `mobile/lib/pages/library/spaces/space_albums.page.dart`
- * substring-matches each of these to choose a specific toast over a generic one, against the
- * fragments in `mobile/lib/pages/library/spaces/space_album_folder_errors.dart`. Rewording any of
- * them past its fragment silently downgrades mobile to "something went wrong".
- *
- * `shared-space.service.spec.ts` asserts each message still contains the fragment mobile looks
- * for, so that coupling fails a test rather than failing quietly in the app.
- *
- * The name-conflict message is additionally shared by the optimistic pre-check
- * ({@link SharedSpaceService.assertNoAlbumFolderNameConflict}) and the raced-23505 mapper
- * ({@link SharedSpaceService.withAlbumFolderConstraintsMapped}), so the two 400 paths cannot
- * drift apart in wording.
- */
+The three folder-write rejection messages, in one place.
+
+All three are load-bearing STRINGS, not just copy. The mobile client has no error codes to work
+with — `_folderErrorKey` in `mobile/lib/pages/library/spaces/space_albums.page.dart`
+substring-matches each of these to choose a specific toast over a generic one, against the
+fragments in `mobile/lib/pages/library/spaces/space_album_folder_errors.dart`. Rewording any of
+them past its fragment silently downgrades mobile to "something went wrong".
+
+`shared-space.service.spec.ts` asserts each message still contains the fragment mobile looks
+for, so that coupling fails a test rather than failing quietly in the app.
+
+The name-conflict message is additionally shared by the optimistic pre-check
+({@link SharedSpaceService.assertNoAlbumFolderNameConflict}) and the raced-23505 mapper
+({@link SharedSpaceService.withAlbumFolderConstraintsMapped}), so the two 400 paths cannot
+drift apart in wording.
+*/
 export const SHARED_SPACE_ALBUM_FOLDER_NAME_CONFLICT_MESSAGE = 'A folder with that name already exists here';
 
 /** @see SHARED_SPACE_ALBUM_FOLDER_NAME_CONFLICT_MESSAGE — mobile matches on 'nesting is limited to'. */
@@ -150,20 +169,20 @@ export const sharedSpaceAlbumFolderDepthMessage = (resultingDepth: number) =>
 export const SHARED_SPACE_ALBUM_FOLDER_CAP_MESSAGE = `A space is limited to ${SHARED_SPACE_ALBUM_FOLDER_MAX_PER_SPACE} folders`;
 
 /**
- * Why a promote-on-delete was refused, worded per cause.
- *
- * The `parent` arm exists because the two collisions need opposite advice. A `sibling` collision is
- * genuinely at the destination — the user should look there. A `parent` collision is with the
- * folder being deleted itself, which still holds its unique-index entry while its children are
- * promoted past it; pointing at "the destination" sends the user to a parent where nothing is
- * wrong, and the actual fix is to rename the child. The old wording claimed `destination` for both,
- * and for the nameless raced case too.
- *
- * Unlike the depth/cap/name-conflict messages, mobile does NOT map these onto a localized string —
- * `space_album_folder_errors.dart` has no 'Cannot delete:' fragment, so all three surface as the
- * generic "Unable to delete folder" there. That is a separate gap; the wording still has to be
- * right for web, which shows the server message verbatim.
- */
+Why a promote-on-delete was refused, worded per cause.
+
+The `parent` arm exists because the two collisions need opposite advice. A `sibling` collision is
+genuinely at the destination — the user should look there. A `parent` collision is with the
+folder being deleted itself, which still holds its unique-index entry while its children are
+promoted past it; pointing at "the destination" sends the user to a parent where nothing is
+wrong, and the actual fix is to rename the child. The old wording claimed `destination` for both,
+and for the nameless raced case too.
+
+Unlike the depth/cap/name-conflict messages, mobile does NOT map these onto a localized string —
+`space_album_folder_errors.dart` has no 'Cannot delete:' fragment, so all three surface as the
+generic "Unable to delete folder" there. That is a separate gap; the wording still has to be
+right for web, which shows the server message verbatim.
+*/
 export const sharedSpaceAlbumFolderPromotionConflictMessage = (
   name: string,
   reason: 'sibling' | 'parent' | 'unknown',
@@ -178,15 +197,15 @@ export const sharedSpaceAlbumFolderPromotionConflictMessage = (
 };
 
 /**
- * The foreign keys that point AT a folder row. Used by
- * {@link SharedSpaceService.withAlbumFolderConstraintsMapped} to recognise "the folder was
- * deleted underneath us" and nothing else.
- *
- * Keyed on the constraint name rather than on error code 23503 alone, because the same writes
- * touch other foreign keys: a `shared_space_album` row also references the album and the space,
- * so a blanket 23503 → "Folder not found" would confidently misreport a concurrently-deleted
- * album as a missing folder.
- */
+The foreign keys that point AT a folder row. Used by
+{@link SharedSpaceService.withAlbumFolderConstraintsMapped} to recognise "the folder was
+deleted underneath us" and nothing else.
+
+Keyed on the constraint name rather than on error code 23503 alone, because the same writes
+touch other foreign keys: a `shared_space_album` row also references the album and the space,
+so a blanket 23503 → "Folder not found" would confidently misreport a concurrently-deleted
+album as a missing folder.
+*/
 const SHARED_SPACE_ALBUM_FOLDER_REFERENCE_CONSTRAINTS = new Set([
   // shared_space_album.folderId -> shared_space_album_folder.id
   'shared_space_album_folderId_fkey',
@@ -195,15 +214,15 @@ const SHARED_SPACE_ALBUM_FOLDER_REFERENCE_CONSTRAINTS = new Set([
 ]);
 
 /**
- * The partial unique indexes that enforce case-insensitive sibling-name uniqueness — the only two
- * ways a folder write can legitimately raise 23505.
- *
- * Narrowed by name for the same reason {@link SHARED_SPACE_ALBUM_FOLDER_REFERENCE_CONSTRAINTS} is:
- * the wrapped operations touch more than these indexes. `linkAlbum` wraps `addAlbum`, whose
- * transaction also writes `shared_space_album` and `album_space_asset`, so a blanket 23505 →
- * "A folder with that name already exists here" would report a re-linked album as a folder-name
- * clash — naming a folder the caller never mentioned.
- */
+The partial unique indexes that enforce case-insensitive sibling-name uniqueness — the only two
+ways a folder write can legitimately raise 23505.
+
+Narrowed by name for the same reason {@link SHARED_SPACE_ALBUM_FOLDER_REFERENCE_CONSTRAINTS} is:
+the wrapped operations touch more than these indexes. `linkAlbum` wraps `addAlbum`, whose
+transaction also writes `shared_space_album` and `album_space_asset`, so a blanket 23505 →
+"A folder with that name already exists here" would report a re-linked album as a folder-name
+clash — naming a folder the caller never mentioned.
+*/
 const SHARED_SPACE_ALBUM_FOLDER_NAME_CONSTRAINTS = new Set([
   'shared_space_album_folder_nested_name_key',
   'shared_space_album_folder_root_name_key',
@@ -247,21 +266,29 @@ export class SharedSpaceService extends BaseService {
       role: SharedSpaceRole.Owner,
     });
 
-    return this.mapSpace(space);
+    return {
+      ...this.mapSpace(space),
+      memberManagement: await this.memberManagementFor(SharedSpaceRole.Owner, space),
+    };
   }
 
   async getAll(auth: AuthDto): Promise<SharedSpaceResponseDto[]> {
     const spaces = await this.sharedSpaceRepository.getAllByUserId(auth.user.id);
+    // One config read per call, not per space.
+    const { server } = await this.getConfig({ withCache: false });
 
     const results: SharedSpaceResponseDto[] = [];
+    // Spaces stay one at a time so a user in many spaces does not take over the connection pool; the reads for
+    // one space are independent, so they run side by side, as in get() (#817).
     for (const space of spaces) {
-      const members = await this.sharedSpaceRepository.getMembers(space.id);
-      const assetCount = await this.sharedSpaceRepository.getAssetCount(space.id);
-      const recentAssets = await this.sharedSpaceRepository.getRecentAssets(space.id);
-      const albumCount = await this.sharedSpaceRepository.getLinkedAlbumCount(space.id);
-
-      // Recency badge data
-      const membership = await this.sharedSpaceRepository.getMember(space.id, auth.user.id);
+      const [members, { count: assetCount, recentAssets }, albumCount, membership, links] = await Promise.all([
+        this.sharedSpaceRepository.getMembers(space.id),
+        this.sharedSpaceRepository.getAssetSummary(space.id),
+        this.sharedSpaceRepository.getLinkedAlbumCount(space.id),
+        // Recency badge data
+        this.sharedSpaceRepository.getMember(space.id, auth.user.id),
+        auth.user.isAdmin ? this.sharedSpaceRepository.getLinkedLibraries(space.id) : undefined,
+      ]);
       let newAssetCount: number;
       let lastContributor: { id: string; name: string } | null = null;
 
@@ -276,11 +303,11 @@ export class SharedSpaceService extends BaseService {
       }
 
       let linkedLibraries: SharedSpaceLinkedLibraryDto[] | undefined;
-      if (auth.user.isAdmin) {
-        const links = await this.sharedSpaceRepository.getLinkedLibraries(space.id);
+      if (links) {
+        const libraries = await Promise.all(links.map((link) => this.libraryRepository.get(link.libraryId)));
         linkedLibraries = [];
-        for (const link of links) {
-          const library = await this.libraryRepository.get(link.libraryId);
+        for (const [index, link] of links.entries()) {
+          const library = libraries[index];
           if (library) {
             linkedLibraries.push({
               libraryId: link.libraryId,
@@ -305,6 +332,11 @@ export class SharedSpaceService extends BaseService {
 
       results.push({
         ...this.mapSpace(space),
+        memberManagement: await this.memberManagementFor(
+          membership?.role as SharedSpaceRole | undefined,
+          space,
+          server,
+        ),
         memberCount: members.length,
         assetCount,
         albumCount,
@@ -322,14 +354,16 @@ export class SharedSpaceService extends BaseService {
   async get(auth: AuthDto, id: string): Promise<SharedSpaceResponseDto> {
     const membership = await this.requireMembership(auth, id);
 
-    const space = await this.sharedSpaceRepository.getById(id);
+    // Independent reads; the asset summary dominates, so run them side by side.
+    const [space, members, { count: assetCount, recentAssets }, newAssetCount] = await Promise.all([
+      this.sharedSpaceRepository.getById(id),
+      this.sharedSpaceRepository.getMembers(id),
+      this.sharedSpaceRepository.getAssetSummary(id),
+      membership.lastViewedAt ? this.sharedSpaceRepository.getNewAssetCount(id, membership.lastViewedAt) : 0,
+    ]);
     if (!space) {
       throw new BadRequestException('Shared space not found');
     }
-
-    const members = await this.sharedSpaceRepository.getMembers(id);
-    const assetCount = await this.sharedSpaceRepository.getAssetCount(id);
-    const recentAssets = await this.sharedSpaceRepository.getRecentAssets(id);
 
     let { thumbnailAssetId } = space;
     if (thumbnailAssetId) {
@@ -339,10 +373,6 @@ export class SharedSpaceService extends BaseService {
         await this.sharedSpaceRepository.update(id, { thumbnailAssetId: null });
       }
     }
-
-    const newAssetCount = membership.lastViewedAt
-      ? await this.sharedSpaceRepository.getNewAssetCount(id, membership.lastViewedAt)
-      : 0;
 
     let hasPets: boolean | undefined;
     if (space.faceRecognitionEnabled) {
@@ -379,6 +409,7 @@ export class SharedSpaceService extends BaseService {
 
     return {
       ...this.mapSpace(space),
+      memberManagement: await this.memberManagementFor(membership.role as SharedSpaceRole, space),
       thumbnailAssetId,
       memberCount: members.length,
       assetCount,
@@ -398,9 +429,15 @@ export class SharedSpaceService extends BaseService {
     // changes the whole space's people list. Naming/appearance (name, description, color) and the
     // cover are editor-level. The check runs against the WHOLE dto before any write, so a mixed
     // payload from an editor is rejected outright rather than partially applied.
-    const isOwnerOnlySettingsUpdate = dto.faceRecognitionEnabled !== undefined || dto.petsEnabled !== undefined;
+    // The member-management switches are owner-only too, including a reset to null: an editor must not be
+    // able to undo an owner's choice.
+    const isOwnerOnlySettingsUpdate =
+      dto.faceRecognitionEnabled !== undefined ||
+      dto.petsEnabled !== undefined ||
+      dto.editorsCanAddMembers !== undefined ||
+      dto.editorsCanChangeRoles !== undefined;
     const minimumRole = isOwnerOnlySettingsUpdate ? SharedSpaceRole.Owner : SharedSpaceRole.Editor;
-    await this.requireRole(auth, id, minimumRole);
+    const callerMembership = await this.requireRole(auth, id, minimumRole);
 
     // Validate thumbnail asset belongs to the space
     if (dto.thumbnailAssetId !== undefined && dto.thumbnailAssetId !== null) {
@@ -438,6 +475,12 @@ export class SharedSpaceService extends BaseService {
     }
     if (dto.petsEnabled !== undefined) {
       updatePayload.petsEnabled = dto.petsEnabled;
+    }
+    if (dto.editorsCanAddMembers !== undefined) {
+      updatePayload.editorsCanAddMembers = dto.editorsCanAddMembers;
+    }
+    if (dto.editorsCanChangeRoles !== undefined) {
+      updatePayload.editorsCanChangeRoles = dto.editorsCanChangeRoles;
     }
 
     const space =
@@ -484,7 +527,10 @@ export class SharedSpaceService extends BaseService {
       }
     }
 
-    return this.mapSpace(space);
+    return {
+      ...this.mapSpace(space),
+      memberManagement: await this.memberManagementFor(callerMembership.role as SharedSpaceRole, space),
+    };
   }
 
   async remove(auth: AuthDto, id: string): Promise<void> {
@@ -500,9 +546,11 @@ export class SharedSpaceService extends BaseService {
   async getMembers(auth: AuthDto, spaceId: string): Promise<SharedSpaceMemberResponseDto[]> {
     await this.requireMembership(auth, spaceId);
 
-    const members = await this.sharedSpaceRepository.getMembers(spaceId);
-    const contributions = await this.sharedSpaceRepository.getContributionCounts(spaceId);
-    const activity = await this.sharedSpaceRepository.getMemberActivity(spaceId);
+    const [members, contributions, activity] = await Promise.all([
+      this.sharedSpaceRepository.getMembers(spaceId),
+      this.sharedSpaceRepository.getContributionCounts(spaceId),
+      this.sharedSpaceRepository.getMemberActivity(spaceId),
+    ]);
 
     const countMap = new Map(contributions.map((c) => [c.addedById, Number(c.count)]));
     const activityMap = new Map(activity.map((a) => [a.addedById, a]));
@@ -532,7 +580,22 @@ export class SharedSpaceService extends BaseService {
     spaceId: string,
     dto: SharedSpaceMemberCreateDto,
   ): Promise<SharedSpaceMemberResponseDto> {
-    await this.requireRole(auth, spaceId, SharedSpaceRole.Owner);
+    const caller = await this.requireRole(auth, spaceId, SharedSpaceRole.Editor);
+
+    // The permission gate runs before the existing-member check, so an editor without permission cannot probe
+    // who is a member through the 400 below.
+    if (caller.role !== SharedSpaceRole.Owner) {
+      const management = await this.memberManagementForSpace(caller.role as SharedSpaceRole, spaceId);
+      if (!management.canAddMembers) {
+        throw new ForbiddenException('Not allowed to add members');
+      }
+      if (dto.role === SharedSpaceRole.Owner) {
+        throw new ForbiddenException('Only an owner can add an owner');
+      }
+      if (dto.role === SharedSpaceRole.Editor && !management.canChangeRoles) {
+        throw new ForbiddenException('Not allowed to add an editor');
+      }
+    }
 
     const existing = await this.sharedSpaceRepository.getMember(spaceId, dto.userId);
     if (existing) {
@@ -578,7 +641,15 @@ export class SharedSpaceService extends BaseService {
     userId: string,
     dto: SharedSpaceMemberUpdateDto,
   ): Promise<SharedSpaceMemberResponseDto> {
-    await this.requireRole(auth, spaceId, SharedSpaceRole.Owner);
+    const caller = await this.requireRole(auth, spaceId, SharedSpaceRole.Editor);
+    const callerIsOwner = caller.role === SharedSpaceRole.Owner;
+
+    if (!callerIsOwner) {
+      const management = await this.memberManagementForSpace(caller.role as SharedSpaceRole, spaceId);
+      if (!management.canChangeRoles) {
+        throw new ForbiddenException('Not allowed to change roles');
+      }
+    }
 
     if (auth.user.id === userId) {
       throw new BadRequestException('Cannot change your own role');
@@ -587,6 +658,16 @@ export class SharedSpaceService extends BaseService {
     const existingMember = await this.sharedSpaceRepository.getMember(spaceId, userId);
     if (!existingMember) {
       throw new BadRequestException('Member not found');
+    }
+
+    // Editors manage only viewers and editors: they can neither touch an owner nor make one.
+    if (!callerIsOwner) {
+      if (existingMember.role === SharedSpaceRole.Owner) {
+        throw new ForbiddenException("Cannot change an owner's role");
+      }
+      if (dto.role === SharedSpaceRole.Owner) {
+        throw new ForbiddenException('Only an owner can add an owner');
+      }
     }
 
     // rbac-4: a promoted co-Owner must not be able to demote the space creator.
@@ -687,7 +768,7 @@ export class SharedSpaceService extends BaseService {
   //
   // This is NOT computed by diffing two in-memory hypothetical `TimelineHiddenScope`s: the real
   // timeline predicate's "another visible path rescues this asset" arm
-  // (asset.repository.ts `withTimeBucketAssetFilters`'s `timelineSpaceIds` branch) re-checks LIVE
+  // (gallery/utils/time-bucket-filter.ts `withTimeBucketAssetFilters`'s `timelineSpaceIds` branch) re-checks LIVE
   // per-user state for some path types, so an in-memory simulation of that arm would silently
   // disagree with reality whenever a photo has more than one path into a space (S6/S4-shaped
   // cases in the design doc's truth table). Instead this performs the REAL write — flipping
@@ -700,14 +781,14 @@ export class SharedSpaceService extends BaseService {
     await this.requireMembership(auth, spaceId);
     const callerId = auth.user.id;
 
-    const before = await this.countOwnTimeline(callerId);
+    const before = await this.countOwnTimeline(auth);
     // Both reads run inside the SAME rolled-back transaction, so they observe one consistent
     // hypothetical state: `after` is the whole timeline, `retained` narrows it to this space.
     const { after, retained } = await this.sharedSpaceRepository.previewInRolledBackTransaction(
       (trx) => this.sharedSpaceRepository.updateMember(spaceId, callerId, { showInTimeline: false }, trx).then(),
       async (trx) => ({
-        after: await this.countOwnTimeline(callerId, trx),
-        retained: await this.countOwnTimeline(callerId, trx, spaceId),
+        after: await this.countOwnTimeline(auth, trx),
+        retained: await this.countOwnTimeline(auth, trx, spaceId),
       }),
     );
 
@@ -729,14 +810,14 @@ export class SharedSpaceService extends BaseService {
     await this.requireAlbumLinked(spaceId, albumId);
     const callerId = auth.user.id;
 
-    const before = await this.countOwnTimeline(callerId);
+    const before = await this.countOwnTimeline(auth);
     // Both reads run inside the SAME rolled-back transaction, so they observe one consistent
     // hypothetical state — mirrors getTimelineHidePreview above.
     const { after, retained } = await this.sharedSpaceRepository.previewInRolledBackTransaction(
       (trx) => this.sharedSpaceRepository.hideAlbumForUser(spaceId, albumId, callerId, trx),
       async (trx) => ({
-        after: await this.countOwnTimeline(callerId, trx),
-        retained: await this.countOwnTimeline(callerId, trx, undefined, { spaceId, albumId }),
+        after: await this.countOwnTimeline(auth, trx),
+        retained: await this.countOwnTimeline(auth, trx, undefined, { spaceId, albumId }),
       }),
     );
 
@@ -751,7 +832,7 @@ export class SharedSpaceService extends BaseService {
   // `retainedAssetCount` is measured: after the hypothetical hide, anything still counted here is a
   // photo of that space some OTHER visible path is keeping on the timeline (§3).
   private async countOwnTimeline(
-    callerId: string,
+    auth: AuthDto,
     db?: Kysely<DB> | Transaction<DB>,
     spaceId?: string,
     // #1041 follow-up: narrows the same count to ONE linked album, which is how the album preview's
@@ -760,18 +841,15 @@ export class SharedSpaceService extends BaseService {
     // the album.
     album?: { spaceId: string; albumId: string },
   ): Promise<number> {
-    const [hiddenScope, spaceRows] = await Promise.all([
-      this.sharedSpaceRepository.getTimelineHiddenScope(callerId, db),
-      this.sharedSpaceRepository.getSpaceIdsForTimeline(callerId, db),
-    ]);
-    const timelineSpaceIds = spaceRows.map((row) => row.spaceId);
-    return this.assetRepository.getTimelineAssetCount(
+    const callerId = auth.user.id;
+    const scope = await this.resolveViewerScope(auth, 'timeline', { userId: callerId, withSharedSpaces: true }, db);
+    return this.galleryAssetRepository.getTimelineAssetCount(
       {
         userIds: [callerId],
         callerId,
-        hiddenScope,
-        timelineSpaceIds: timelineSpaceIds.length > 0 ? timelineSpaceIds : undefined,
-        visibleSpaceIds: timelineSpaceIds,
+        timelineSpaceIds: scope.timelineSpaceIds,
+        hiddenScope: scope.hiddenScope,
+        visibleSpaceIds: scope.visibleSpaceIds,
         spaceId,
         albumId: album?.albumId,
         albumSpaceIds: album ? [album.spaceId] : undefined,
@@ -874,7 +952,7 @@ export class SharedSpaceService extends BaseService {
     unlinkedAlbumIds: string[],
   ): Promise<void> {
     for (const albumId of unlinkedAlbumIds) {
-      const album = await this.albumRepository.getById(albumId, { withAssets: false });
+      const album = await this.albumRepository.getById(albumId);
       await this.sharedSpaceRepository.logActivity({
         spaceId,
         userId: actingUserId,
@@ -885,14 +963,14 @@ export class SharedSpaceService extends BaseService {
   }
 
   /**
-   * Expand a set of asset ids to include every live sibling that shares a stack
-   * with them, so shared-space membership stays stack-atomic (discussion #751).
-   * The explicitly-passed ids are always preserved (even if soft-deleted) so an
-   * explicit add/remove is never silently dropped; the added siblings are the
-   * live stack members only.
-   */
+  Expand a set of asset ids to include every live sibling that shares a stack
+  with them, so shared-space membership stays stack-atomic (discussion #751).
+  The explicitly-passed ids are always preserved (even if soft-deleted) so an
+  explicit add/remove is never silently dropped; the added siblings are the
+  live stack members only.
+  */
   private async expandStackAssetIds(assetIds: string[], visibilities?: AssetVisibility[]): Promise<string[]> {
-    const stacked = await this.stackRepository.getStackedAssetIds(assetIds, visibilities);
+    const stacked = await this.sharedSpaceRepository.getStackedAssetIds(assetIds, visibilities);
     return [...new Set([...assetIds, ...stacked])];
   }
 
@@ -904,14 +982,15 @@ export class SharedSpaceService extends BaseService {
     // stack-collapsed timeline (#751). Auto-expanded siblings are restricted to
     // space-eligible visibility so we never pull a Hidden/Locked frame in, and
     // access is checked on the full expanded set so we never contribute a
-    // sibling the actor cannot read.
-    const assetIds = await this.expandStackAssetIds(dto.assetIds, visibleSpaceAssetVisibilities);
+    // sibling the actor cannot share. Inaccessible automatic siblings are omitted;
+    // every explicitly requested id must still pass (#1330).
+    const expandedAssetIds = await this.expandStackAssetIds(dto.assetIds, visibleSpaceAssetVisibilities);
     // rbac-2: AssetRead's space arm (checkSpaceAccess) includes an un-role-gated shared_space_album branch,
     // so a space Viewer of a space linking album X could read X's assets and re-add them as DIRECT assets
-    // into a space they own — gaining AssetUpdate over the owner's assets via checkSpaceEditAccess. AssetShare
-    // (owner ∪ partner only, no album/space arm) is the same permission album-add already requires and closes
-    // the read→re-share→write escalation.
-    await this.requireAccess({ auth, permission: Permission.AssetShare, ids: assetIds });
+    // into a space they own — gaining edit access over the owner's assets via checkSpaceEditAccess. AssetShare
+    // (owner ∪ partner only, no album/space arm) closes the read→re-share→write escalation. Upstream's AssetShare now
+    // also admits album members (immich-32609), so this checks the narrower pre-32609 rule explicitly.
+    const assetIds = await requireSpaceShareAccess(this.accessRepository, auth, dto.assetIds, expandedAssetIds);
     const inserted = await this.sharedSpaceRepository.addAssets(
       assetIds.map((assetId) => ({ spaceId, assetId, addedById: auth.user.id })),
     );
@@ -964,6 +1043,7 @@ export class SharedSpaceService extends BaseService {
     });
 
     // Only queue face sync for newly created links (not duplicates)
+    // eslint-disable-next-line unicorn/prefer-early-return
     if (result) {
       const space = await this.sharedSpaceRepository.getById(spaceId);
       if (space?.faceRecognitionEnabled) {
@@ -1015,7 +1095,7 @@ export class SharedSpaceService extends BaseService {
           data: { spaceId, albumId },
         });
       }
-      const album = await this.albumRepository.getById(albumId, { withAssets: false });
+      const album = await this.albumRepository.getById(albumId);
       await this.sharedSpaceRepository.logActivity({
         spaceId,
         userId: auth.user.id,
@@ -1062,7 +1142,7 @@ export class SharedSpaceService extends BaseService {
       throw new NotFoundException('Album is not linked to this space');
     }
 
-    const album = await this.albumRepository.getById(albumId, { withAssets: false });
+    const album = await this.albumRepository.getById(albumId);
     const orphanedAssetIds = await this.sharedSpaceRepository.getAlbumAssetIdsWithoutOtherSpacePath(spaceId, albumId);
     await this.sharedSpaceRepository.removeAlbum(spaceId, albumId);
     await this.sharedSpaceRepository.logActivity({
@@ -1332,6 +1412,8 @@ export class SharedSpaceService extends BaseService {
     }
   }
 
+  // `??` (not a default parameter) also covers a null name.
+  // eslint-disable-next-line unicorn/prefer-default-parameters
   private normalizeAlbumFolderName(rawName: string): string {
     const name = (rawName ?? '').trim();
     if (!name) {
@@ -1356,28 +1438,28 @@ export class SharedSpaceService extends BaseService {
   }
 
   /**
-   * Maps the two ways a folder write can lose a race with another editor onto the same 400s the
-   * service's own pre-checks produce. Every other error propagates unchanged — the same error
-   * object, not rewrapped — so neither arm can swallow a genuine failure.
-   *
-   * **23505, a name collision.** The pre-check above (assertNoAlbumFolderNameConflict) is
-   * optimistic — see moveAlbumFolderChecked's comment on why a full re-check under lock isn't
-   * worth the cost for plain create/rename/move. A concurrent request can still race past it and
-   * hit one of the partial unique indexes (shared_space_album_folder_nested_name_key /
-   * _root_name_key). Mapped to the same shared message the pre-check throws.
-   *
-   * **23503, the folder was deleted underneath us.** Every folder write here is
-   * check-then-write, and another editor can delete the folder in between: `setAlbumFolder`
-   * validates with getAlbumFolderById and then writes `folderId`, `moveAlbumFolderChecked` reads
-   * its target and then reparents. Postgres rejects the write with a foreign-key violation, and
-   * without this arm that surfaced as a 500 — design §5.7 C-03 promises the move 400s, and the
-   * medium test `C-03b` in shared-space-album-folder.repository.spec.ts pins the raw repository
-   * behaviour being mapped here. [missingMessage] is the caller's own wording for that folder,
-   * so a missing destination and a missing placement target don't have to share one message.
-   *
-   * Only constraints in {@link SHARED_SPACE_ALBUM_FOLDER_REFERENCE_CONSTRAINTS} count — see that
-   * constant for why the error code alone is not enough.
-   */
+  Maps the two ways a folder write can lose a race with another editor onto the same 400s the
+  service's own pre-checks produce. Every other error propagates unchanged — the same error
+  object, not rewrapped — so neither arm can swallow a genuine failure.
+  
+  **23505, a name collision.** The pre-check above (assertNoAlbumFolderNameConflict) is
+  optimistic — see moveAlbumFolderChecked's comment on why a full re-check under lock isn't
+  worth the cost for plain create/rename/move. A concurrent request can still race past it and
+  hit one of the partial unique indexes (shared_space_album_folder_nested_name_key /
+  _root_name_key). Mapped to the same shared message the pre-check throws.
+  
+  **23503, the folder was deleted underneath us.** Every folder write here is
+  check-then-write, and another editor can delete the folder in between: `setAlbumFolder`
+  validates with getAlbumFolderById and then writes `folderId`, `moveAlbumFolderChecked` reads
+  its target and then reparents. Postgres rejects the write with a foreign-key violation, and
+  without this arm that surfaced as a 500 — design §5.7 C-03 promises the move 400s, and the
+  medium test `C-03b` in shared-space-album-folder.repository.spec.ts pins the raw repository
+  behaviour being mapped here. [missingMessage] is the caller's own wording for that folder,
+  so a missing destination and a missing placement target don't have to share one message.
+  
+  Only constraints in {@link SHARED_SPACE_ALBUM_FOLDER_REFERENCE_CONSTRAINTS} count — see that
+  constant for why the error code alone is not enough.
+  */
   private async withAlbumFolderConstraintsMapped<T>(operation: () => Promise<T>, missingMessage: string): Promise<T> {
     try {
       return await operation();
@@ -1506,6 +1588,9 @@ export class SharedSpaceService extends BaseService {
         ) {
           data.albumName = albumNames.get(data.albumId);
         }
+        if (a.type === SharedSpaceActivityType.MemberJoin && a.invitedByName) {
+          data.invitedByName = a.invitedByName;
+        }
         return {
           id: a.id,
           type: a.type,
@@ -1578,11 +1663,11 @@ export class SharedSpaceService extends BaseService {
   }
 
   /**
-   * The linked albums that project the given assets into this space. The web uses this to explain why
-   * "Remove from space" removed nothing for an album-projected asset (it's present via a linked album,
-   * not as a direct member) and to name the album the user should manage it in. Membership-gated: only
-   * surfaces albums linked to a space the caller belongs to (the same visibility as `getLinkedAlbums`).
-   */
+  The linked albums that project the given assets into this space. The web uses this to explain why
+  "Remove from space" removed nothing for an album-projected asset (it's present via a linked album,
+  not as a direct member) and to name the album the user should manage it in. Membership-gated: only
+  surfaces albums linked to a space the caller belongs to (the same visibility as `getLinkedAlbums`).
+  */
   async getAssetLinkedAlbums(
     auth: AuthDto,
     spaceId: string,
@@ -1595,7 +1680,7 @@ export class SharedSpaceService extends BaseService {
     return this.sharedSpaceRepository.getLinkedAlbumsContainingAssets(spaceId, dto.assetIds);
   }
 
-  async getMapMarkers(auth: AuthDto, id: string) {
+  async getMapMarkers(auth: AuthDto, id: string): Promise<MapMarkerResponseDto[]> {
     await this.requireAccess({ auth, permission: Permission.SharedSpaceRead, ids: [id] });
 
     const markers = await this.sharedSpaceRepository.getMapMarkers(id);
@@ -1629,81 +1714,37 @@ export class SharedSpaceService extends BaseService {
       await this.requireAccess({ auth, permission: Permission.AlbumRead, ids: [dto.albumId] });
     }
 
-    // timelineSpaceIds has TWO independent consumers, and they do NOT want it under the same
-    // conditions. Conflating them has now produced the same silently-empty map twice (00a7fd6bac,
-    // and again below), so they are computed as two separate predicates.
-    //
-    // CONSUMER 1 — the space-scope WIDENING (searchAssetBuilder, database.ts:688). It only applies
-    // to the plain (non-album, non-space) query, where it widens the result to shared-space assets
-    // in the caller's timeline. It is skipped for a favorites query: `isFavorite` is the asset
-    // OWNER'S flag, so widening would pin other members' favourites on the caller's favourites map
-    // (timeline.service.ts:158-168 refuses the same combination outright rather than answer it).
-    //
-    // The album map matches the album grid on SCOPE: album ACCESS (AlbumRead, checked above) IS the
-    // boundary for an album query — same as the album grid (asset.repository.ts
-    // withTimeBucketAssetFilters, a plain album_asset join with no space scoping) and the pre-fork
-    // GET /albums/{id}/map-markers endpoint (map.repository.ts). Re-gating an album query by the
-    // caller's shared-space timeline visibility on top of that hid pins the grid shows — whenever a
-    // shared album asset also lived in a space the caller wasn't a member of, or had simply toggled
-    // out of their timeline (#656). (It matches the grid on VISIBILITY too — see the `visibility`
-    // option below.) On the album path timelineSpaceIds is therefore inert for the gate (albumAccessIsBoundary
-    // skips albumSharedSpaceScope, and with userIds unset the widening arm cannot fire either).
-    const spaceScopeWidensToTimelineSpaces = !dto.spaceId && dto.withSharedSpaces === true && dto.isFavorite !== true;
-
-    // CONSUMER 2 — scoped person-token resolution. resolveScopedMapPersonFilters forwards
-    // timelineSpaceIds to faceIdentityRepository.resolveScopedPersonTokens to resolve
-    // `space-person:<id>` tokens: face-identity.repository.ts's spaceMatchesScope requires
-    // timelineSpaceIds.size > 0 whenever withSharedSpaces is truthy, or it treats the token as
-    // inaccessible -> hasInaccessibleToken -> forceEmptyResult -> ZERO pins. This consumer is
-    // conditioned on neither albumId nor isFavorite — a caller can combine
-    // ?withSharedSpaces=true&isFavorite=true&personIds=space-person:<id> (the /photos favourite chip
-    // and person chip are one-click co-reachable, and its map icon carries both), just as they can
-    // combine ?albumId=&withSharedSpaces=true&personIds=space-person:<id>. Narrowing this predicate
-    // to the widening one starves it and silently empties the map for a legitimate space member —
-    // that was the albumId bug fixed in 00a7fd6bac, and the isFavorite bug fixed here. So do NOT
-    // re-fold this back into the condition above.
-    const hasScopedPersonTokens = !dto.spaceId && !!dto.personIds?.some((token) => token.includes(':'));
-    const personScopeNeedsTimelineSpaceIds = dto.withSharedSpaces === true && hasScopedPersonTokens;
-
-    let timelineSpaceIds: string[] | undefined;
-    if (spaceScopeWidensToTimelineSpaces || personScopeNeedsTimelineSpaceIds) {
-      const spaceRows = await this.sharedSpaceRepository.getSpaceIdsForTimeline(auth.user.id);
-      if (spaceRows.length > 0) {
-        timelineSpaceIds = spaceRows.map((row) => row.spaceId);
-      }
-    }
-
-    const scopedPersonFilters = await this.resolveScopedMapPersonFilters(auth, {
+    // Under a space scope the endpoint's person ids are that space's people. The album map matches the
+    // album grid on SCOPE: album ACCESS (checked above) is the boundary, so the viewer's timeline spaces
+    // never widen or re-gate it (#656) — see the `filtered-map` row in src/utils/viewer-scope.ts for
+    // when they widen the query and when they only resolve person tokens.
+    const scope = await this.resolveViewerScope(auth, 'filtered-map', {
+      ...dto,
       personIds: dto.spaceId ? undefined : dto.personIds,
       spacePersonIds: dto.spaceId ? dto.personIds : undefined,
-      withSharedSpaces: dto.withSharedSpaces,
-      timelineSpaceIds,
-      spaceId: dto.spaceId,
     });
 
     const markers = await this.sharedSpaceRepository.getFilteredMapMarkers({
       // Album ACCESS is the scope (checked above), never asset ownership: leaving userIds set would
       // hide the album owner's pins from a viewer of a shared album — the issue #656 bug class, which
       // album.service.ts:112-123 calls out by name. albumAccessIsBoundary opts the album branch out of
-      // albumSharedSpaceScope's shared-space re-gate (database.ts:713): album membership is already the
+      // albumConfinedToViewer's shared-space re-gate: album membership is already the
       // boundary here, matching the grid and the old map endpoint — see the comment above.
       userIds: dto.spaceId || dto.albumId ? undefined : [auth.user.id],
+      // #763: the favourite overlay resolves against the CALLER, which userIds no longer names on
+      // the space/album arms above.
+      authUserId: auth.user.id,
       spaceId: dto.spaceId,
       albumAccessIsBoundary: !!dto.albumId,
-      // Consumer 1 only (see above): a favorites query resolved timelineSpaceIds purely to make its
-      // space-person tokens resolvable, and must NOT be widened by it — the query stays owner-scoped.
-      timelineSpaceIds: spaceScopeWidensToTimelineSpaces ? timelineSpaceIds : undefined,
-      personIds: scopedPersonFilters.personIds,
-      spacePersonIds: scopedPersonFilters.spacePersonIds,
-      identityIds: scopedPersonFilters.identityIds,
-      forceEmptyResult: scopedPersonFilters.forceEmptyResult,
+      timelineSpaceIds: scope.timelineSpaceIds,
+      personIds: scope.personIds,
+      spacePersonIds: scope.spacePersonIds,
+      identityIds: scope.identityIds,
+      forceEmptyResult: scope.forceEmptyResult,
       tagIds: dto.tagIds,
       make: dto.make,
       model: dto.model,
       rating: dto.rating,
-      // `rating` is documented as a MINIMUM. Without this flag searchAssetBuilder falls to its
-      // `=` branch, so markers matched exact ratings while every other surface matched `>=`.
-      ratingIsMinimum: dto.rating === undefined ? undefined : true,
       description: dto.description,
       originalFileName: dto.originalFileName,
       ocr: dto.ocr,
@@ -1745,44 +1786,6 @@ export class SharedSpaceService extends BaseService {
       country: marker.country ?? null,
       formattedAddress: marker.formattedAddress ?? null,
     }));
-  }
-
-  private async resolveScopedMapPersonFilters(
-    auth: AuthDto,
-    filters: {
-      personIds?: string[];
-      spacePersonIds?: string[];
-      identityIds?: string[];
-      forceEmptyResult?: boolean;
-      withSharedSpaces?: boolean;
-      timelineSpaceIds?: string[];
-      spaceId?: string;
-    },
-  ) {
-    const tokens = filters.personIds?.filter(Boolean) ?? [];
-    const hasScopedTokens = tokens.some((token) => token.includes(':'));
-
-    if (tokens.length === 0 || !hasScopedTokens) {
-      return filters;
-    }
-
-    const resolution = await this.faceIdentityRepository.resolveScopedPersonTokens({
-      userId: auth.user.id,
-      tokens,
-      scope: {
-        withSharedSpaces: filters.withSharedSpaces,
-        timelineSpaceIds: filters.timelineSpaceIds,
-        spaceId: filters.spaceId,
-      },
-    });
-
-    return {
-      ...filters,
-      personIds: resolution.legacyPersonIds,
-      identityIds: resolution.identityIds,
-      spacePersonIds: [...new Set([...(filters.spacePersonIds ?? []), ...resolution.legacySpacePersonIds])],
-      forceEmptyResult: filters.forceEmptyResult || resolution.hasInaccessibleToken,
-    };
   }
 
   async getSpacePeople(
@@ -1979,9 +1982,12 @@ export class SharedSpaceService extends BaseService {
     // transaction makes the whole confirm all-or-nothing, mirroring the personal confirm path. Every call
     // below threads `trx` — never `this.db` inside this callback (issue #595).
     const claimed = await this.databaseRepository.transaction(async (trx) => {
-      const identity = await this.faceIdentityRepository.ensureSpacePersonIdentity(person.id, trx);
+      // Ensured up front, before the claim, so claimPendingForSpacePerson's own negative-verdict
+      // exclusion (matched by identityId as well as spacePersonId) has a non-null identityId to join
+      // against even when this confirm turns out to be a no-op below.
+      await this.faceIdentityRepository.ensureSpacePersonIdentity(person.id, trx);
       // Claim the queue row first so a double-submit resolves exactly once. No 'confirmed' status is written:
-      // the durable positive verdict is the manual identity link set immediately below.
+      // the durable positive verdict is the manual identity link set inside linkFaceToSpacePerson below.
       // Slice 3 (F5): pass the SAME band `hasPendingForSpacePerson` just checked, so the claim itself is gated
       // by the identical eligibility — not just the read that preceded it.
       const claimed = await this.facePersonVerdictRepository.claimPendingForSpacePerson(
@@ -1994,11 +2000,57 @@ export class SharedSpaceService extends BaseService {
         return claimed;
       }
 
+      // The suggestion confirm only ever handles an unassigned face (that is what made it pending in the
+      // first place), so it always writes the identity — see linkFaceToSpacePerson's doc comment for the one
+      // caller that passes false. ensureSpacePersonIdentity above already created it; this re-fetches the
+      // same row (idempotent) so linkFaceToSpacePerson stays the single implementation of the write.
+      await this.linkFaceToSpacePerson(trx, person, assetFaceId, { writeIdentity: true });
+      return claimed;
+    });
+    return claimed > 0;
+  }
+
+  /**
+  The single implementation of "this face belongs to this space person" (spec §6.3).
+  
+  `writeIdentity: false` is §6.3.1 row 3 — the face already belongs to an owner `person`
+  carrying a different identity. Writing the identity there would re-point an identity the
+  OWNER's person depends on, and `applyResolvedPersonMetadata` resolves the owner's own view
+  of names and ages through exactly that identity. Space-person reads go through
+  `shared_space_person_face`, not the identity layer, so the projection alone is enough for
+  the space to show the new name while the owner's library stays untouched.
+  */
+  private async linkFaceToSpacePerson(
+    trx: Transaction<DB>,
+    person: SharedSpacePerson,
+    assetFaceId: string,
+    { writeIdentity }: { writeIdentity: boolean },
+  ): Promise<void> {
+    // §3: read first -- whether the owner is a space member, and which of the owner's people already
+    // holds this face, decide both the identity below and the owner-layer write at the end.
+    const ownerLink = await this.facePersonVerdictRepository.getFaceOwnerLink(person.spaceId, assetFaceId, trx);
+
+    // §6.3.1 (revised): the identity is now resolved on BOTH paths, not just the writeIdentity one.
+    // Propagating the edit to the owner's `asset_face.personId` needs an identity to bridge the space
+    // person onto a person the owner owns, so a space person that has never carried one gets it here.
+    //
+    // A space person with no identity yet, carrying the same name as the owner's person on this face,
+    // is the same human: it adopts that person's identity, so the owner keeps one "Dad" instead of
+    // gaining a second one beside it. A different name is a correction (F-36) and gets a fresh
+    // identity as before. ensureSpacePersonIdentity ignores the hint once the person has an identity.
+    const adoptIdentityId =
+      ownerLink?.ownerIsSpaceMember && isSamePersonName(ownerLink.ownerPersonName, person.name)
+        ? ownerLink.identityId
+        : null;
+    const identity = await this.faceIdentityRepository.ensureSpacePersonIdentity(person.id, trx, {
+      adoptIdentityId,
+    });
+
+    if (writeIdentity) {
       await this.faceIdentityRepository.replaceFaceIdentity(
         { assetFaceId, identityId: identity.id, source: 'manual' },
         trx,
       );
-      await this.facePersonVerdictRepository.resolveAssignedFace(assetFaceId, trx);
       // Slice 8 (F15): the editor just stated a fact ("this face IS this space person") that contradicts
       // any durable rejected/ignored row for this SAME target. As with the personal confirm,
       // claimPendingForSpacePerson's own eligibility gate already refuses the claim whenever such a row
@@ -2009,13 +2061,499 @@ export class SharedSpaceService extends BaseService {
         [assetFaceId],
         trx,
       );
-      // D3: write the space projection so getAssignedFaceIdsForSpace excludes this face from the same space's
-      // next scan, for every space person — not just this one. addPersonFaces is onConflict().doNothing(), so
-      // this is idempotent if a concurrent face-match backfill already wrote the same row.
-      await this.sharedSpaceRepository.addPersonFaces([{ personId: person.id, assetFaceId }], undefined, trx);
-      return claimed;
+    }
+    await this.facePersonVerdictRepository.drainPendingForFaces([assetFaceId], trx);
+    // D3: write the space projection so getAssignedFaceIdsForSpace excludes this face from the same space's
+    // next scan, for every space person — not just this one. addPersonFaces is onConflict().doNothing(), so
+    // this is idempotent if a concurrent face-match backfill already wrote the same row.
+    await this.sharedSpaceRepository.addPersonFaces([{ personId: person.id, assetFaceId }], undefined, trx);
+
+    // §6.3.1 (revised): propagate the attach into the OWNER's layer so the space and the owner's own
+    // library agree about who is in the photo. This deliberately reverses the original decision to
+    // keep `asset_face.personGroupId` untouched -- see the section for why the insulated model was
+    // dropped. The owner may have never named this human, in which case a person row is created for
+    // them (an editor naming a face can therefore add a person to the owner's People page).
+    //
+    // §3: only when the owner is a member of this space. An owner reached through a linked album
+    // never joined it, so the space has no say over their library and the edit stays in the
+    // projection above -- the insulated model, which `writeIdentity: false` completes for row 3.
+    if (!ownerLink?.ownerIsSpaceMember) {
+      return;
+    }
+    const ownerPerson = await this.galleryPersonRepository.getOrCreateOwnerPersonForIdentity(
+      {
+        ownerId: ownerLink.assetOwnerId,
+        identityId: identity.id,
+        name: person.name,
+        type: person.type,
+      },
+      trx,
+    );
+    await this.galleryPersonRepository.setFaceOwnerPerson(
+      { assetFaceId, personGroupId: ownerPerson.personGroupId },
+      trx,
+    );
+  }
+
+  /**
+  #734 follow-up (spec §6.3): attach a space person to a face directly — no pending ML
+  suggestion required, unlike `confirmSpacePersonFaceSuggestion` above.
+  
+  The transaction below shares `linkFaceToSpacePerson` with that method (Slice 2), so the two
+  can never drift on what "this face belongs to this space person" means.
+  
+  Idempotent: `addPersonFaces` is onConflict-doNothing and `replaceFaceIdentity` upserts, so
+  a double-submit is a no-op. Returns whether it acted, matching the S11 convention on the
+  sibling confirm/reject routes (a 200-vs-204 status signal is unreadable through
+  @oazapfts/runtime's ok()).
+  */
+  async attachFaceToSpacePerson(
+    auth: AuthDto,
+    spaceId: string,
+    personId: string,
+    assetFaceId: string,
+  ): Promise<boolean> {
+    await this.requireRole(auth, spaceId, SharedSpaceRole.Editor);
+    const person = await this.requireSpacePersonInSpace(spaceId, personId);
+
+    if (!(await this.facePersonVerdictRepository.isFaceAssignableInSpace(spaceId, assetFaceId))) {
+      throw new BadRequestException('Face not found');
+    }
+
+    return this.databaseRepository.transaction(async (trx) => {
+      // F-37: lock first, before any read below, so a second concurrent attach on this SAME face
+      // waits for this transaction to commit rather than racing its own read of who holds the
+      // face right now.
+      await this.facePersonVerdictRepository.lockFaceForAssignment(assetFaceId, trx);
+
+      // §6.3.1: does this face already belong to one of the OWNER's own people? If so, and that
+      // person's identity differs from (or is absent, and so can never equal) the target space
+      // person's own identity, the attach is still granted but must NOT rewrite the face's global
+      // identity — see linkFaceToSpacePerson's doc comment for why the projection alone suffices.
+      const ownerLink = await this.facePersonVerdictRepository.getFaceOwnerLink(spaceId, assetFaceId, trx);
+      // §6.3.1 (revised): row 3 -- "the owner already named this face as someone else" -- no longer
+      // skips the identity write when the owner is a space member. Propagating only
+      // `asset_face.personId` while pinning the identity would leave the owner's OWN two layers
+      // disagreeing about one face: the person row would say "Uncle Tom" while `face_identity_face`
+      // still said "Dad", and applyResolvedPersonMetadata resolves the owner's names and birthdays
+      // through the identity. That split is precisely what the original §6.3.1 existed to prevent, so
+      // the editor's edit moves both layers together.
+      //
+      // §3: an owner who is NOT a space member keeps the original insulated row 3 -- the owner layer
+      // is not propagated (see linkFaceToSpacePerson), so the identity they name the face by must not
+      // be re-pointed either. The negative verdict stops the suggestion pipeline re-offering the face.
+      const writeIdentity =
+        !!ownerLink?.ownerIsSpaceMember ||
+        !ownerLink?.personGroupId ||
+        (ownerLink.identityId !== null && ownerLink.identityId === person.identityId);
+      if (!writeIdentity) {
+        await this.facePersonVerdictRepository.markRejectedForSpacePerson(
+          person.id,
+          assetFaceId,
+          { identityId: ownerLink!.identityId, source: 'suggestion', actorId: auth.user.id },
+          trx,
+        );
+      }
+
+      // F-13 (spec §6.3): reassign — attaching a face already held by a DIFFERENT space person in
+      // this same space moves it. Remove every current holder's projection row (a plain re-attach
+      // to the SAME person is a harmless no-op here, since linkFaceToSpacePerson re-adds it below),
+      // recount the ones that actually changed (§6.4), and record a negative verdict for each so
+      // the suggestion pipeline does not immediately re-offer the face back to them.
+      const allRemovedPersonIds = await this.sharedSpaceRepository.removePersonFaceAssignmentsForSpaceFace(
+        spaceId,
+        assetFaceId,
+        trx,
+      );
+      const removedPersonIds = allRemovedPersonIds.filter((removedPersonId) => removedPersonId !== person.id);
+      if (removedPersonIds.length > 0) {
+        await this.sharedSpaceRepository.recountPersons(removedPersonIds, trx);
+        for (const removedPersonId of removedPersonIds) {
+          await this.facePersonVerdictRepository.markRejectedForSpacePerson(
+            removedPersonId,
+            assetFaceId,
+            { source: 'suggestion', actorId: auth.user.id },
+            trx,
+          );
+        }
+      }
+
+      await this.linkFaceToSpacePerson(trx, person, assetFaceId, { writeIdentity });
+
+      // §6.7 (F-24/F-26): attribute the attach in the space's activity feed, unless the actor
+      // owns the asset -- an owner naming their own photos should not flood their own feed,
+      // matching #992's asset_edit rule. Ownership comes from the ASSET (ownerLink.assetOwnerId
+      // above), never from the actor's space role. Written inside this same transaction so a row
+      // can never describe a link that then rolled back.
+      if (ownerLink?.assetOwnerId !== auth.user.id) {
+        await this.sharedSpaceRepository.logActivity(
+          {
+            spaceId,
+            userId: auth.user.id,
+            type: SharedSpaceActivityType.PersonFaceAssign,
+            data: { personId: person.id, personName: person.name, count: 1 },
+          },
+          trx,
+        );
+      }
+
+      return true;
     });
-    return claimed > 0;
+  }
+
+  /**
+  Spec §6.4 (Slice 4, revised): detach a face from a space person. Removes the space's
+  `shared_space_person_face` projection row and, where the owner layer is the space's to touch,
+  the face's `face_identity_face` link to this person's identity and the owner's tag. Like attach,
+  the identity change reaches every space sharing that identity (§5.1).
+  
+  Writes a negative verdict first so the suggestion pipeline does not immediately re-offer the
+  face back to this same person, mirroring the reassign arm of `attachFaceToSpacePerson`.
+  
+  F-38: `isFaceAssignableInSpace` is re-checked here at write time, never trusted from the
+  §6.1 read — a face the read returned a moment ago may have left the space since.
+  */
+  async detachFaceFromSpacePerson(
+    auth: AuthDto,
+    spaceId: string,
+    personId: string,
+    assetFaceId: string,
+  ): Promise<boolean> {
+    await this.requireRole(auth, spaceId, SharedSpaceRole.Editor);
+    const person = await this.requireSpacePersonInSpace(spaceId, personId);
+
+    if (!(await this.facePersonVerdictRepository.isFaceAssignableInSpace(spaceId, assetFaceId))) {
+      throw new BadRequestException('Face not found');
+    }
+
+    return this.databaseRepository.transaction(async (trx) => {
+      // §6.7: read before the face's projection row is removed below, for the asset owner id it
+      // carries. Since §6.3.1 was revised the personGroupId/identityId half is used too -- see the
+      // owner-layer clear at the end of this transaction.
+      const ownerLink = await this.facePersonVerdictRepository.getFaceOwnerLink(spaceId, assetFaceId, trx);
+
+      // §6.4 (revised): every person grid -- the owner's person page and the space's filtered timeline,
+      // which resolves a space person to its identity -- reads `face_identity_face`, so a detach that
+      // leaves the face linked to this person's identity keeps the photo on their grid. Take the link
+      // off whenever the owner layer is ours to touch, the same gate attach's `writeIdentity` uses: an
+      // owner who is a space member, or one who never named this face (the identity is then only what
+      // a space attach gave it). A non-member's own tag keeps its identity (§3).
+      const unlinkIdentity = !!person.identityId && (!!ownerLink?.ownerIsSpaceMember || !ownerLink?.personGroupId);
+
+      // With the link gone, the verdict is the only record that the face is not this human, so it
+      // carries the identity for identity-keyed readers too.
+      await this.facePersonVerdictRepository.markRejectedForSpacePerson(
+        person.id,
+        assetFaceId,
+        { identityId: unlinkIdentity ? person.identityId : undefined, source: 'suggestion', actorId: auth.user.id },
+        trx,
+      );
+      await this.sharedSpaceRepository.removePersonFace(person.id, assetFaceId, trx);
+      if (unlinkIdentity) {
+        // Conditional on the link still naming this person: a face whose identity is some other human
+        // was never a statement about the person being detached.
+        await this.faceIdentityRepository.unlinkFaceFromIdentity({ assetFaceId, identityId: person.identityId! }, trx);
+      }
+
+      // §6.3.1 (revised): propagate the detach into the OWNER's layer, so a face unassigned in the
+      // space also stops being tagged on the owner's own copy of the photo. Without this the space
+      // projection and `asset_face.personGroupId` disagree, and the asset-detail People row -- which
+      // is seeded from `asset_face.personGroupId` -- keeps showing the person the editor just removed.
+      //
+      // The identity comparison is the guard: it clears the tag ONLY when the owner's person is the
+      // same human as the space person being detached. An editor detaching "Uncle Tom" must never
+      // null out the owner's unrelated "Dad" tag on that face, so a mismatch is left alone.
+      // §3: and never for an owner outside the space -- their tag is theirs, not the space's.
+      if (
+        ownerLink?.ownerIsSpaceMember &&
+        ownerLink.personGroupId &&
+        person.identityId &&
+        ownerLink.identityId === person.identityId
+      ) {
+        await this.galleryPersonRepository.setFaceOwnerPerson(
+          { assetFaceId, personGroupId: null, expectedPersonGroupId: ownerLink.personGroupId },
+          trx,
+        );
+      }
+
+      // §6.7 (F-25/F-26): the detach twin of attachFaceToSpacePerson's attribution above --
+      // same owner-self exemption, same in-transaction write.
+      if (ownerLink?.assetOwnerId !== auth.user.id) {
+        await this.sharedSpaceRepository.logActivity(
+          {
+            spaceId,
+            userId: auth.user.id,
+            type: SharedSpaceActivityType.PersonFaceDetach,
+            data: { personId: person.id, personName: person.name, count: 1 },
+          },
+          trx,
+        );
+      }
+
+      return true;
+    });
+  }
+
+  /**
+  Spec §6.2 (Slice 4): create a space person, optionally attaching a seed face ("add a name").
+  
+  When `assetFaceId` is present this is create-and-attach, and it runs as ONE transaction
+  (F-15) — a crash between the create and the attach would leave a nameless orphan person in
+  the space's people list, the same failure mode `confirmSpacePersonFaceSuggestion` guards
+  against for the suggestion path.
+  
+  F-33: the `(spaceId, identityId)` unique index is the trap. A face whose identity a detach
+  left in place (a non-member owner's own tag, §3), or one linked by ML backfill, may already
+  resolve to an identity that some OTHER space person here already holds.
+  `createOrGetPersonForIdentity` is used whenever the seed face already carries an identity, so
+  that case returns the existing person instead of racing a plain insert into a duplicate key.
+  */
+  async createSpacePerson(
+    auth: AuthDto,
+    spaceId: string,
+    dto: { name?: string; assetFaceId?: string },
+  ): Promise<SharedSpacePersonResponseDto> {
+    await this.requireRole(auth, spaceId, SharedSpaceRole.Editor);
+
+    if (!dto.assetFaceId) {
+      const created = await this.sharedSpaceRepository.createPerson({ spaceId, name: dto.name ?? '' });
+      return this.mapSpacePerson(created, null);
+    }
+
+    const assetFaceId = dto.assetFaceId;
+    if (!(await this.facePersonVerdictRepository.isFaceAssignableInSpace(spaceId, assetFaceId))) {
+      throw new BadRequestException('Face not found');
+    }
+
+    // #864-shaped: SharedSpacePersonDedup (queued on every real asset-add, see the class doc)
+    // touches this same space's `shared_space_person` rows concurrently with an interactive
+    // create — `lockFaceForAssignment` below and the dedup pass's own recount can take their
+    // locks in different orders, so Postgres occasionally picks this transaction as the deadlock
+    // victim (`deadlock detected`, seen under real concurrent load; a bare medium test with jobs
+    // mocked out never exercises it). Re-drive the whole transaction rather than surface a 500 or
+    // silently drop the create.
+    const person = await retryOnDeadlock(() =>
+      this.databaseRepository.transaction(async (trx) => {
+        // Mirrors attachFaceToSpacePerson's F-37 lock: two concurrent creates seeded from the SAME
+        // face must not both succeed with two different new people each holding a projection row.
+        await this.facePersonVerdictRepository.lockFaceForAssignment(assetFaceId, trx);
+
+        const existingIdentityId = await this.faceIdentityRepository.getIdentityIdForFace(assetFaceId, trx);
+        let created = existingIdentityId
+          ? await this.sharedSpaceRepository.createOrGetPersonForIdentity(
+              { spaceId, identityId: existingIdentityId, name: dto.name ?? '' },
+              trx,
+            )
+          : await this.sharedSpaceRepository.createPerson({ spaceId, name: dto.name ?? '' }, trx);
+
+        // The identity's space person can already exist, unnamed: SharedSpaceFaceMatch creates one
+        // whenever it reaches this face first. The caller asked for a person with this name, so name
+        // that row rather than hand back a blank one. A person someone already named keeps its name.
+        if (dto.name?.trim() && !created.name.trim()) {
+          created = await this.sharedSpaceRepository.updatePerson(created.id, { name: dto.name }, trx);
+        }
+
+        await this.linkFaceToSpacePerson(trx, created, assetFaceId, { writeIdentity: true });
+        return created;
+      }),
+    );
+
+    const alias = await this.sharedSpaceRepository.getAlias(person.id, auth.user.id);
+    return this.mapSpacePerson(person, alias?.alias ?? null);
+  }
+
+  /**
+  Spec §6.1 (Slice 3): the face boxes on one asset, space-scoped. Editor-only — the response
+  exposes faces nobody has named yet, which a Viewer has no business seeing.
+  
+  The hidden-person exclusion lives in the repository read (`getAssetFacesForSpace`) so it
+  cannot drift from `isFaceAssignableInSpace`'s write-side exclusion — an editor must never be
+  able to attach a face this list would not show them (F-8/F-9).
+  
+  Boxes are STORED against the original bytes, and the client renders the edited preview and
+  crops each face out of it, so they are projected on the way out — the same transform the
+  owner's twin read applies (`PersonService.getFacesById` → `mapFaces`), and the exact inverse of
+  the one `createSpaceAssetFace` applies on the way in. Returning them raw put this endpoint on
+  the opposite convention from its own write, so every crop in the editor's panel was cut from
+  the wrong region of an edited asset — and #992 is what makes editing a MEMBER's asset possible,
+  so an edited member asset is an ordinary case here, not an exotic one.
+  */
+  async getSpaceAssetFaces(auth: AuthDto, spaceId: string, assetId: string): Promise<SpaceAssetFaceResponseDto[]> {
+    await this.requireRole(auth, spaceId, SharedSpaceRole.Editor);
+
+    if (!(await this.sharedSpaceRepository.isAssetInSpace(spaceId, assetId))) {
+      // Deliberate non-disclosure, matching attachFaceToSpacePerson's 'Face not found' — an editor
+      // probing ids learns nothing about whether the asset exists at all.
+      throw new BadRequestException('Asset not found');
+    }
+
+    const faces = await this.sharedSpaceRepository.getAssetFacesForSpace(spaceId, assetId);
+    if (faces.length === 0) {
+      return [];
+    }
+
+    const asset = await this.assetRepository.getById(assetId, { edits: true, exifInfo: true });
+    const edits = asset?.edits ?? [];
+    const dimensions = asset?.exifInfo ? getDimensions(asset.exifInfo) : { width: 0, height: 0 };
+    // `transformFaceBoundingBox` is already a no-op without edits; the dimension check is the one
+    // extra guard, because an edited asset with no exif dimensions would otherwise scale every box
+    // by zero and collapse it to a point. A stored box is wrong-but-recognisable there, a collapsed
+    // one is not. The write twin refuses outright instead (F-17) — a read still has to render.
+    const canProject = dimensions.width > 0 && dimensions.height > 0;
+
+    return faces.map((face) => {
+      const box = {
+        boundingBoxX1: face.boundingBoxX1,
+        boundingBoxY1: face.boundingBoxY1,
+        boundingBoxX2: face.boundingBoxX2,
+        boundingBoxY2: face.boundingBoxY2,
+        imageWidth: face.imageWidth,
+        imageHeight: face.imageHeight,
+      };
+
+      return {
+        id: face.id,
+        ...(canProject ? transformFaceBoundingBox(box, edits, dimensions) : box),
+        spacePersonId: face.spacePersonId,
+        spacePersonName: face.spacePersonName,
+        isEditorDrawn: face.isEditorDrawn,
+      };
+    });
+  }
+
+  /**
+  Spec §6.5 (Slice 6, Task 2): draw a face box on a member's asset.
+  
+  Coordinates arrive in the (possibly edited) PREVIEW image's space — #992 lets an editor
+  rotate a member's asset, so a rotated preview is a likely path, not an exotic one (F-16).
+  `convertFaceBoxToOriginalImageSpace` is the SAME transform `PersonService.createFace` uses
+  for the owner path, so the two can never drift on this geometry (a drift here silently
+  misplaces boxes).
+  
+  The created face gets `personId = NULL` (never the owner's), `sourceType = Manual`, and
+  an `asset_face_creator` row for `auth.user.id` — the record §6.6 uses to decide whether the
+  editor may later delete it, never `sourceType` (see that section's doc comment for why). It is then attached
+  to the target space person through `linkFaceToSpacePerson`, always with `writeIdentity:
+  true`: a face this call just created cannot already belong to one of the owner's own people
+  (§6.3.1), so the identity-skip override case never applies here.
+  */
+  async createSpaceAssetFace(
+    auth: AuthDto,
+    spaceId: string,
+    assetId: string,
+    dto: {
+      x: number;
+      y: number;
+      width: number;
+      height: number;
+      imageWidth: number;
+      imageHeight: number;
+      spacePersonId: string;
+    },
+  ): Promise<SpaceAssetFaceResponseDto> {
+    await this.requireRole(auth, spaceId, SharedSpaceRole.Editor);
+
+    if (!(await this.sharedSpaceRepository.isAssetInSpace(spaceId, assetId))) {
+      // Deliberate non-disclosure, matching getSpaceAssetFaces/attachFaceToSpacePerson's
+      // 'Asset not found' / 'Face not found' — an editor probing ids learns nothing about
+      // whether the asset exists at all.
+      throw new BadRequestException('Asset not found');
+    }
+    const person = await this.requireSpacePersonInSpace(spaceId, dto.spacePersonId);
+
+    const asset = await this.assetRepository.getById(assetId, { edits: true, exifInfo: true });
+    if (!asset) {
+      throw new NotFoundException('Asset not found');
+    }
+
+    // §3: a drawn box is a new `asset_face` row on the OWNER's asset, which shows up in their own
+    // face data. That is a write to the owner's library, so it needs the #992 rule: the owner must
+    // be a member of this space. Naming an existing face on a non-member's asset stays allowed
+    // (F-6) because that write stays in the space's projection.
+    if (asset.ownerId !== auth.user.id && !(await this.sharedSpaceRepository.getMember(spaceId, asset.ownerId))) {
+      throw new ForbiddenException('Faces can only be drawn on photos from members of this space');
+    }
+
+    const { topLeft, bottomRight, imageWidth, imageHeight } = convertFaceBoxToOriginalImageSpace(dto, asset);
+    const boundingBoxX1 = Math.round(topLeft.x);
+    const boundingBoxY1 = Math.round(topLeft.y);
+    const boundingBoxX2 = Math.round(bottomRight.x);
+    const boundingBoxY2 = Math.round(bottomRight.y);
+
+    const faceId = await this.databaseRepository.transaction(async (trx) => {
+      const faceId = await this.personRepository.createAssetFace(
+        {
+          assetId,
+          personGroupId: null,
+          imageHeight,
+          imageWidth,
+          boundingBoxX1,
+          boundingBoxX2,
+          boundingBoxY1,
+          boundingBoxY2,
+          sourceType: SourceType.Manual,
+        },
+        trx,
+      );
+      await this.facePersonVerdictRepository.addFaceCreator(faceId, auth.user.id, trx);
+
+      await this.linkFaceToSpacePerson(trx, person, faceId, { writeIdentity: true });
+      return faceId;
+    });
+
+    return {
+      id: faceId,
+      boundingBoxX1,
+      boundingBoxY1,
+      boundingBoxX2,
+      boundingBoxY2,
+      imageWidth,
+      imageHeight,
+      spacePersonId: person.id,
+      spacePersonName: person.name,
+      // This call is the only writer of an asset_face_creator row (§6.5) — always
+      // editor-drawn, never a detection.
+      isEditorDrawn: true,
+    };
+  }
+
+  /**
+  Spec §6.6 (Slice 6, Task 3): delete a face box an EDITOR of this space drew (§6.5).
+  
+  Deletable iff the face has an `asset_face_creator` row AND the face is reachable in a space where
+  the actor is Owner/Editor — NEVER `sourceType`. `PersonService.createFace` already writes
+  `SourceType.Manual` for an OWNER-drawn box too, so gating on `sourceType === Manual` would let
+  a space editor delete boxes the owner drew by hand — the exact regression this whole design
+  exists to avoid. A detected face (no creator row) is refused: `FaceDelete` stays
+  owner-only for those.
+  
+  Hard-deletes the row. `shared_space_person_face` and `face_identity_face` both cascade away
+  (`ON DELETE CASCADE`) in EVERY space holding this face, not just this one — the box itself is
+  being destroyed, not merely detached here — but the cascade does not recount, so every
+  affected space person is snapshotted first and recounted afterward (mirrors §6.4's detach).
+  */
+  async deleteSpaceAssetFace(auth: AuthDto, spaceId: string, assetFaceId: string): Promise<void> {
+    await this.requireRole(auth, spaceId, SharedSpaceRole.Editor);
+
+    if (!(await this.facePersonVerdictRepository.isFaceReachableInSpace(spaceId, assetFaceId))) {
+      // Deliberate non-disclosure, matching the sibling attach/detach/draw routes.
+      throw new BadRequestException('Face not found');
+    }
+
+    const createdBy = await this.facePersonVerdictRepository.getFaceCreatedBy(assetFaceId);
+    if (!createdBy) {
+      // Not editor-drawn (a detection, or an existing pre-Slice-6 row) — refused, same message as
+      // above so an editor cannot distinguish "wrong space" from "not deletable" by probing ids.
+      throw new BadRequestException('Face not found');
+    }
+
+    await this.databaseRepository.transaction(async (trx) => {
+      const personIds = await this.sharedSpaceRepository.getPersonIdsHoldingFace(assetFaceId, trx);
+      await this.personRepository.deleteAssetFace(assetFaceId, trx);
+      if (personIds.length > 0) {
+        await this.sharedSpaceRepository.recountPersons(personIds, trx);
+      }
+    });
   }
 
   // D9/D2: reachability (RBAC — is this face's asset in the space at all), not pendingness, gates a space
@@ -2184,12 +2722,12 @@ export class SharedSpaceService extends BaseService {
         throw new NotFoundException();
       }
 
-      const sourcePath = await this.getFaceThumbnailSource(face.assetId);
+      const sourcePath = await this.backendMedia.getFaceThumbnailSource(face);
       if (!sourcePath) {
         throw new NotFoundException();
       }
 
-      return this.generateFaceThumbnailResponse(face, sourcePath);
+      return this.backendMedia.generateFaceThumbnailResponse(face, sourcePath);
     }
 
     if (person.identityId) {
@@ -2200,7 +2738,7 @@ export class SharedSpaceService extends BaseService {
       });
 
       if (personalThumbnail) {
-        return this.serveFromBackend(
+        return this.backendMedia.serveFromBackend(
           personalThumbnail.thumbnailPath,
           mimeTypes.lookup(personalThumbnail.thumbnailPath),
           CacheControl.PrivateWithoutCache,
@@ -2227,12 +2765,12 @@ export class SharedSpaceService extends BaseService {
       throw new NotFoundException();
     }
 
-    const sourcePath = await this.getFaceThumbnailSource(face.assetId);
+    const sourcePath = await this.backendMedia.getFaceThumbnailSource(face);
     if (!sourcePath) {
       throw new NotFoundException();
     }
 
-    return this.generateFaceThumbnailResponse(face, sourcePath);
+    return this.backendMedia.generateFaceThumbnailResponse(face, sourcePath);
   }
 
   async getSpacePersonFaceThumbnail(
@@ -2251,12 +2789,12 @@ export class SharedSpaceService extends BaseService {
       throw new NotFoundException();
     }
 
-    const sourcePath = await this.getFaceThumbnailSource(face.assetId);
+    const sourcePath = await this.backendMedia.getFaceThumbnailSource(face);
     if (!sourcePath) {
       throw new NotFoundException();
     }
 
-    return this.generateFaceThumbnailResponse(face, sourcePath);
+    return this.backendMedia.generateFaceThumbnailResponse(face, sourcePath);
   }
 
   async updateSpacePerson(
@@ -2318,7 +2856,7 @@ export class SharedSpaceService extends BaseService {
         isHidden: dto.isHidden ?? person.isHidden,
         type: person.type,
       };
-      if (this.isNamedVisibleSpacePerson(candidate) && dto.name.trim() !== person.name.trim()) {
+      if (isSuggestionScanTarget(candidate) && dto.name.trim() !== person.name.trim()) {
         const suggestionsEnabled = await this.areSpacePersonSuggestionsEnabled({ withCache: false });
         if (suggestionsEnabled && (await this.isSpaceFaceRecognitionEnabled(spaceId))) {
           await this.jobRepository.queue({ name: JobName.SpacePersonSuggestionScan, data: { id: personId } });
@@ -2470,8 +3008,8 @@ export class SharedSpaceService extends BaseService {
 
     const prefixes = ['shared-space-face-match', 'space-identity-reconcile-'];
     const removed =
-      (await this.jobRepository.removeFailedJobsByJobIdPrefix(QueueName.PeopleBackfill, prefixes)) +
-      (await this.jobRepository.removeFailedJobsByJobIdPrefix(QueueName.FacialRecognition, prefixes));
+      (await this.queueMaintenanceRepository.removeFailedJobsByJobIdPrefix(QueueName.PeopleBackfill, prefixes)) +
+      (await this.queueMaintenanceRepository.removeFailedJobsByJobIdPrefix(QueueName.FacialRecognition, prefixes));
 
     if (removed > 0) {
       this.logger.log(
@@ -2499,7 +3037,10 @@ export class SharedSpaceService extends BaseService {
     }
 
     const prefixes = ['person-suggestion-scan/', 'space-person-suggestion-scan/'];
-    const removed = await this.jobRepository.removeFailedJobsByJobIdPrefix(QueueName.PeopleBackfill, prefixes);
+    const removed = await this.queueMaintenanceRepository.removeFailedJobsByJobIdPrefix(
+      QueueName.PeopleBackfill,
+      prefixes,
+    );
 
     if (removed > 0) {
       this.logger.log(`Removed ${removed} failed person-suggestion-scan job(s) that were blocking their dedup jobIds`);
@@ -2538,14 +3079,14 @@ export class SharedSpaceService extends BaseService {
   }
 
   /**
-   * L7: delete the membership row and unlink the departing user's OWNED albums (albums-6)
-   * in ONE transaction, so a failure between the two can never leave the ex-member's own
-   * album linked with no membership row backing it (or vice versa). Fork rule: never run
-   * `this.db` queries inside a Kysely transaction() callback — both repo calls thread the
-   * `trx` handle instead (mirrors recountPersons). Returns the unlinked album ids so the
-   * caller can run face cleanup (outside the transaction — see cleanupDepartingMemberFaces)
-   * and enqueue grant reconciliation.
-   */
+  L7: delete the membership row and unlink the departing user's OWNED albums (albums-6)
+  in ONE transaction, so a failure between the two can never leave the ex-member's own
+  album linked with no membership row backing it (or vice versa). Fork rule: never run
+  `this.db` queries inside a Kysely transaction() callback — both repo calls thread the
+  `trx` handle instead (mirrors recountPersons). Returns the unlinked album ids so the
+  caller can run face cleanup (outside the transaction — see cleanupDepartingMemberFaces)
+  and enqueue grant reconciliation.
+  */
   private async removeMemberAndOwnedAlbumsAtomically(spaceId: string, userId: string): Promise<string[]> {
     return this.databaseRepository.transaction(async (trx) => {
       await this.sharedSpaceRepository.removeMember(spaceId, userId, trx);
@@ -2554,13 +3095,13 @@ export class SharedSpaceService extends BaseService {
   }
 
   /**
-   * albums-6 / L6: clean up any now-orphaned space person faces for the departing member's
-   * just-unlinked albums (mirrors unlinkAlbum's cleanup). Deliberately OUTSIDE the membership
-   * transaction (no `this.db` inside a Kysely transaction()) and re-drivable: a failure here
-   * doesn't roll back the already-committed membership/album-link removal — it falls back to
-   * the durable per-space reconcile (enqueueSpaceFaceProjectionReconcile / L6's stale-face
-   * sweep) instead of silently leaving stale face rows.
-   */
+  albums-6 / L6: clean up any now-orphaned space person faces for the departing member's
+  just-unlinked albums (mirrors unlinkAlbum's cleanup). Deliberately OUTSIDE the membership
+  transaction (no `this.db` inside a Kysely transaction()) and re-drivable: a failure here
+  doesn't roll back the already-committed membership/album-link removal — it falls back to
+  the durable per-space reconcile (enqueueSpaceFaceProjectionReconcile / L6's stale-face
+  sweep) instead of silently leaving stale face rows.
+  */
   private async cleanupDepartingMemberFaces(
     spaceId: string,
     unlinkedAlbumIds: string[],
@@ -2595,12 +3136,6 @@ export class SharedSpaceService extends BaseService {
       name: JobName.SharedSpaceIdentityReconciliation,
       data: input,
     });
-  }
-
-  private async resolveMovedSpacePersonFaces(faceIds: Array<{ assetFaceId: string }>): Promise<void> {
-    for (const { assetFaceId } of faceIds) {
-      await this.facePersonVerdictRepository.resolveAssignedFace(assetFaceId);
-    }
   }
 
   async mergeSpacePeople(
@@ -2656,7 +3191,7 @@ export class SharedSpaceService extends BaseService {
       createCrossOwnerMergeAuthorizer(() => Promise.resolve(server), dto),
     );
 
-    await this.resolveMovedSpacePersonFaces(movedFaceIds);
+    await this.facePersonVerdictRepository.drainPendingForFaces(movedFaceIds.map(({ assetFaceId }) => assetFaceId));
     await this.sharedSpaceRepository.logActivity({
       spaceId,
       userId: auth.user.id,
@@ -2770,7 +3305,7 @@ export class SharedSpaceService extends BaseService {
       return;
     }
 
-    const matches = await this.searchRepository.searchFaces({
+    const matches = await this.faceSearchRepository.searchFaces({
       userIds: [input.memberUserId],
       embedding: input.spacePerson.embedding,
       maxDistance: input.maxDistance,
@@ -2870,13 +3405,13 @@ export class SharedSpaceService extends BaseService {
   }
 
   /**
-   * Collapses every same-space `shared_space_person` pair that would block the identity merge.
-   * For each pair the survivor is chosen by nameSource precedence (manual > inherited > auto >
-   * none), tie-broken by face count then id; the loser's faces and aliases move to the survivor and
-   * the loser row is deleted. The survivor's winning name is preserved by construction (it always
-   * has at least the loser's nameSource precedence). The subsequent mergeIdentities then sets the
-   * survivor onto the canonical target identity without colliding.
-   */
+  Collapses every same-space `shared_space_person` pair that would block the identity merge.
+  For each pair the survivor is chosen by nameSource precedence (manual > inherited > auto >
+  none), tie-broken by face count then id; the loser's faces and aliases move to the survivor and
+  the loser row is deleted. The survivor's winning name is preserved by construction (it always
+  has at least the loser's nameSource precedence). The subsequent mergeIdentities then sets the
+  survivor onto the canonical target identity without colliding.
+  */
   private async collapseSameSpaceReconciliationConflicts(claim: SharedSpaceIdentityReconciliationClaim): Promise<void> {
     const pairs = await this.faceIdentityRepository.getSpaceMergeConflictPairs({
       targetIdentityId: claim.targetIdentityId,
@@ -3003,7 +3538,7 @@ export class SharedSpaceService extends BaseService {
         break;
       }
 
-      const assets = await this.assetRepository.getByLibraryIdWithFaces(job.libraryId, batchSize, offset);
+      const assets = await this.galleryAssetRepository.getByLibraryIdWithFaces(job.libraryId, batchSize, offset);
       if (assets.length === 0) {
         break;
       }
@@ -3053,7 +3588,12 @@ export class SharedSpaceService extends BaseService {
         break;
       }
 
-      const assets = await this.assetRepository.getByAlbumIdWithFaces(job.albumId, job.spaceId, batchSize, offset);
+      const assets = await this.galleryAssetRepository.getByAlbumIdWithFaces(
+        job.albumId,
+        job.spaceId,
+        batchSize,
+        offset,
+      );
       if (assets.length === 0) {
         break;
       }
@@ -3211,7 +3751,7 @@ export class SharedSpaceService extends BaseService {
     // face-assign run) starts a parallel chain — doubling the work and reviving the
     // removeOnComplete/stalled-recovery orphan race on the shared pass-scoped jobIds.
     const pass = job.pass ?? 1;
-    if (pass === 1 && (await this.jobRepository.hasInFlightDedupChain(job.spaceId))) {
+    if (pass === 1 && (await this.queueMaintenanceRepository.hasInFlightDedupChain(job.spaceId))) {
       this.logger.debug(`Dedup skipped for space ${job.spaceId}: a dedup chain is already running`);
       return JobStatus.Skipped;
     }
@@ -3299,7 +3839,7 @@ export class SharedSpaceService extends BaseService {
       // Reassign faces and migrate aliases
       const movedFaceIds = await this.sharedSpaceRepository.getFaceIdsForPerson(source.id);
       await this.sharedSpaceRepository.reassignPersonFacesSafe(source.id, target.id);
-      await this.resolveMovedSpacePersonFaces(movedFaceIds);
+      await this.facePersonVerdictRepository.drainPendingForFaces(movedFaceIds.map(({ assetFaceId }) => assetFaceId));
       await this.sharedSpaceRepository.migrateAliases(source.id, target.id);
 
       const candidateIdentityIds = [target.identityId, source.identityId].filter(
@@ -3371,7 +3911,7 @@ export class SharedSpaceService extends BaseService {
     this.logger.log(`Dedup pass ${pass} for space ${job.spaceId} complete: ${passMerges} merges`);
 
     // Re-queue a fresh, short follow-up pass while merges are still happening, capped to avoid a
-    // runaway chain. The follow-up uses a pass-scoped jobId (see job.repository getJobOptions) so it
+    // runaway chain. The follow-up uses a pass-scoped jobId (see QueueMaintenanceRepository.getJobOptions) so it
     // enqueues even though this job is still "active".
     if (mergedAny) {
       if (pass < SHARED_SPACE_DEDUP_MAX_PASSES) {
@@ -3938,16 +4478,12 @@ export class SharedSpaceService extends BaseService {
       return {
         didInherit: true,
         ...(nameChanged &&
-          this.isNamedVisibleSpacePerson({ ...person, name: nextName }) && {
+          isSuggestionScanTarget({ ...person, name: nextName }) && {
             suggestionScanCandidate: { ...person, name: nextName },
           }),
       };
     }
     return { didInherit: false };
-  }
-
-  private isNamedVisibleSpacePerson(person: Pick<SharedSpacePerson, 'name' | 'isHidden' | 'type'>): boolean {
-    return person.name.trim().length > 0 && !person.isHidden && person.type === 'person';
   }
 
   private async areSpacePersonSuggestionsEnabled({ withCache }: { withCache: boolean }): Promise<boolean> {
@@ -3981,7 +4517,7 @@ export class SharedSpaceService extends BaseService {
     const spaceEnabledCache = new Map<string, boolean>();
     const jobs: Array<{ name: JobName.SpacePersonSuggestionScan; data: { id: string } }> = [];
     for (const candidate of candidates) {
-      if (queuedIds.has(candidate.id) || !this.isNamedVisibleSpacePerson(candidate)) {
+      if (queuedIds.has(candidate.id) || !isSuggestionScanTarget(candidate)) {
         continue;
       }
 
@@ -4082,6 +4618,25 @@ export class SharedSpaceService extends BaseService {
       maxDistance: machineLearning.facialRecognition.maxDistance,
       suggestionMaxDistance: machineLearning.facialRecognition.suggestions.maxDistance,
     };
+  }
+
+  private async memberManagementFor(
+    role: SharedSpaceRole | undefined,
+    space: SpaceMemberPermissionSettings,
+    server?: ServerMemberPermissionSettings,
+  ) {
+    if (!server) {
+      ({ server } = await this.getConfig({ withCache: false }));
+    }
+    return resolveSpaceMemberManagement(role, space, server);
+  }
+
+  private async memberManagementForSpace(role: SharedSpaceRole, spaceId: string) {
+    const space = await this.sharedSpaceRepository.getById(spaceId);
+    if (!space) {
+      throw new NotFoundException('Space not found');
+    }
+    return this.memberManagementFor(role, space);
   }
 
   private mapMember(member: {
@@ -4300,6 +4855,26 @@ export class SharedSpaceService extends BaseService {
     } catch (error) {
       this.logger.error(`Failed to sync space people after removing assets from album ${albumId}: ${error}`);
       await this.enqueueSpaceFaceProjectionReconcile(faceEnabledSpaceIds);
+    }
+  }
+
+  // LibraryService.handleSyncFiles: queue face match for spaces linked to the library. Errors propagate, so a failure
+  // fails the sync job as it did when this ran inline.
+  @OnEvent({ name: 'LibraryAssetsCreate' })
+  async onLibraryAssetsCreate({ libraryId, assetIds }: ArgOf<'LibraryAssetsCreate'>): Promise<void> {
+    if (assetIds.length === 0) {
+      return;
+    }
+    const linkedSpaces = await this.sharedSpaceRepository.getSpacesLinkedToLibrary(libraryId);
+    for (const link of linkedSpaces) {
+      if (link.faceRecognitionEnabled) {
+        for (const assetId of assetIds) {
+          await this.jobRepository.queue({
+            name: JobName.SharedSpaceFaceMatch,
+            data: { spaceId: link.spaceId, assetId },
+          });
+        }
+      }
     }
   }
 }

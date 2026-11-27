@@ -18,14 +18,14 @@ export class LibraryManifestService extends BaseService {
       throw new NotFoundException('User not found');
     }
 
-    const rows = await this.assetRepository.getOwnedManifestAssets(id, pageSize + 1, cursor);
+    const rows = await this.galleryAssetRepository.getOwnedManifestAssets(id, pageSize + 1, cursor);
     const hasMore = rows.length > pageSize;
     const pageRows = hasMore ? rows.slice(0, pageSize) : rows;
 
     const assetIds = pageRows.map((row) => row.id);
     const [ownedAlbums, albumMemberships] = await Promise.all([
-      this.albumRepository.getOwnedNames(id),
-      this.albumRepository.getOwnedAlbumIdsForAssets(id, assetIds),
+      this.spaceAlbumRepository.getOwnedNames(id),
+      this.spaceAlbumRepository.getOwnedAlbumIdsForAssets(id, assetIds),
     ]);
     const albumIdsByAsset = new Map(albumMemberships.map((m) => [m.assetId, m.albumIds]));
 

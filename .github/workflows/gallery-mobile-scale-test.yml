@@ -12,7 +12,7 @@ name: Gallery Mobile Scale Test
 
 on:
   workflow_dispatch:
-    # Disabled for personal-use CI; keep the file for easy re-enable.
+    # Automatic runs disabled for this standalone private fork.
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -20,6 +20,7 @@ concurrency:
 
 jobs:
   scale-test:
+    if: ${{ github.repository == 'open-noodle/gallery' }}
     name: 100k-asset library backfill (scale)
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -40,7 +41,7 @@ jobs:
           cache: true
 
       - name: Setup Mise
-        uses: immich-app/devtools/actions/use-mise@3bca63ca3c15020293b36b51737a3ee2c773340b # use-mise-action-v3.1.0
+        uses: immich-app/devtools/actions/use-mise@caac7f7e4298458a14238959504f411fc6cc7f06 # use-mise-action-v3.2.3
         with:
           github_token: ${{ github.token }}
           working_directory: ./mobile

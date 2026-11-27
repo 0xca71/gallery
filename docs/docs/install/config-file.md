@@ -25,7 +25,10 @@ The default configuration looks like this:
     "database": {
       "cronExpression": "0 02 * * *",
       "enabled": true,
-      "keepLastAmount": 14
+      "keepLastAmount": 14,
+      "s3": {
+        "enabled": false
+      }
     }
   },
   "classification": {
@@ -41,6 +44,12 @@ The default configuration looks like this:
     "bframes": -1,
     "cqMode": "auto",
     "crf": 23,
+    "dataSaver": {
+      "enabled": false,
+      "maxBitrate": "1500k",
+      "targetResolution": "720",
+      "targetVideoCodec": "hevc"
+    },
     "gopSize": 0,
     "maxBitrate": "0",
     "preferredHwDevice": "auto",
@@ -165,13 +174,31 @@ The default configuration looks like this:
     "petDetection": {
       "enabled": false,
       "minScore": 0.3,
-      "modelName": "rfdetr-nano"
+      "modelName": "rfdetr-nano",
+      "video": {
+        "enabled": false,
+        "maxDistance": 0.55,
+        "maxFrames": 900,
+        "minSightings": 2,
+        "sampleInterval": 2,
+        "sceneDetection": true
+      }
     },
     "petRecognition": {
       "enabled": false,
       "maxDistance": 0.55,
       "minFaces": 1,
       "modelName": "pet-recognition-base"
+    },
+    "spatialScene": {
+      "enabled": false,
+      "maxForegroundRatio": 0.75,
+      "minBoundarySharpness": 0.03,
+      "minEdgeDensity": 0.02,
+      "minFaceHeight": 0.03,
+      "minForegroundRatio": 0.01,
+      "modelName": "depth-anything-v2-small",
+      "offer": "suitable"
     },
     "urls": ["http://immich-machine-learning:3003"]
   },
@@ -239,6 +266,11 @@ The default configuration looks like this:
     "storageQuotaClaim": "immich_quota",
     "timeout": 30000,
     "tokenEndpointAuthMethod": "client_secret_post"
+  },
+  "passkey": {
+    "enabled": true,
+    "domain": null,
+    "additionalDomains": []
   },
   "passwordLogin": {
     "enabled": true
@@ -336,6 +368,10 @@ See the [Auto-Classification docs](/features/auto-classification) for the full f
 If pet detection is disabled at that moment, nothing is rebuilt: the reprocess is deferred until detection is enabled again. See [Pet Recognition](/features/pet-recognition).
 :::
 
+:::note Spatial Scene
+`machineLearning.spatialScene.offer` is `suitable` (offer the **Spatial** button only on photos with a clear subject) or `all`. The threshold fields decide what counts as suitable and are applied each time a photo is opened, so changing them needs no reprocessing. Changing `modelName` recomputes every depth map. See [Spatial Scene](/features/spatial-scene).
+:::
+
 :::note Legacy `petDetection.modelName` values
 Pet detection moved from YOLO to RF-DETR, and only cats and dogs are recorded. A legacy `yolo*` value in `machineLearning.petDetection.modelName` is silently rewritten to `rfdetr-nano` on read, so the value the server uses will not match what you wrote here. Set `rfdetr-nano` explicitly to keep the file honest. See [Pet Detection](/features/pet-detection).
 :::
@@ -353,7 +389,6 @@ The `memories` section configures generated memory retention and which memory ty
 - `retentionDays` is the number of days to keep unsaved generated memory records. Set it to `0` to keep memory records forever. Saved memories are not removed by retention cleanup.
 - `types` is a per-type global availability map. Each key is a memory-type key; the value enables (`true`) or disables (`false`) that type for everyone. Omitted keys default to on. Valid keys are:
   - `on_this_day`: "N years ago" memories
-  - `birthday`: birthday memories for named people
   - `recent_trip`: recent trip memories
   - `month_recap`: a past year's photos from this calendar month
   - `favorites_throwback`: your favorite photos from this calendar month in a past year
@@ -385,7 +420,7 @@ The config file only controls **global availability**. Within each available typ
 
 The per-type switches do not control whether the nightly task runs. To disable all generated memories, set `nightlyTasks.generateMemories` to `false`.
 
-The older `memories.birthday` and `memories.recentTrips` booleans are deprecated but still honored as aliases for `types["birthday"]` and `types["recent_trip"]`. An explicit `types` entry takes precedence over the matching legacy field.
+The older `memories.recentTrips` boolean is deprecated but still honored as an alias for `types["recent_trip"]`; an explicit `types` entry takes precedence over it. The older `memories.birthday` boolean is accepted and ignored: birthday memories are Immich's and have no switch.
 
 See the [Memories docs](/features/memories) for details about how retention and generated-memory types work.
 :::

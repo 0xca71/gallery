@@ -1,6 +1,7 @@
 import 'package:auto_route/auto_route.dart';
 import 'package:flutter/widgets.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:immich_mobile/gallery/search/search_scope.dart';
 import 'package:immich_mobile/generated/translations.g.dart';
 import 'package:immich_mobile/presentation/widgets/timeline/timeline.widget.dart';
 import 'package:immich_mobile/presentation/widgets/timeline/timeline_route_scope.dart';
@@ -11,8 +12,6 @@ import 'package:immich_mobile/widgets/common/mesmerizing_sliver_app_bar.dart';
 @RoutePage()
 class VideoPage extends StatelessWidget {
   const VideoPage({super.key});
-
-  static const timelineOverviewControlsEnabled = true;
 
   @override
   Widget build(BuildContext context) {
@@ -26,6 +25,7 @@ class VideoPage extends StatelessWidget {
 
         return ref.watch(timelineFactoryProvider).video(users, user.id, groupBy: groupBy, temporalScope: scope);
       },
+      search: const VideosSearchScope(),
       child: Timeline(withGroupingPill: true, appBar: MesmerizingSliverAppBar(title: context.t.videos)),
     );
   }

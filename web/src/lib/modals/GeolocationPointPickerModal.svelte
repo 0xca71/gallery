@@ -1,16 +1,16 @@
 <script lang="ts">
-  import { lazyComponent } from '$lib/utils/lazy-component.svelte';
-  import { isDefined } from '$lib';
-  import { clickOutside } from '$lib/actions/click-outside';
-  import { listNavigation } from '$lib/actions/list-navigation';
-  import CoordinatesInput from '$lib/components/shared-components/CoordinatesInput.svelte';
-  import type Map from '$lib/components/shared-components/map/Map.svelte';
-  import { timeDebounceOnSearch, timeToLoadTheMap } from '$lib/constants';
-  import SearchBar from '$lib/elements/SearchBar.svelte';
-  import { geolocationManager } from '$lib/managers/geolocation.manager.svelte';
-  import type { LatLng } from '$lib/types';
-  import { delay } from '$lib/utils/asset-utils';
-  import { handleError } from '$lib/utils/handle-error';
+  import { isDefined } from '#lib';
+  import { clickOutside } from '#lib/actions/click-outside.ts';
+  import { listNavigation } from '#lib/actions/list-navigation.ts';
+  import CoordinatesInput from '#lib/components/shared-components/CoordinatesInput.svelte';
+  import type Map from '#lib/components/shared-components/map/Map.svelte';
+  import { timeDebounceOnSearch, timeToLoadTheMap } from '#lib/constants.ts';
+  import SearchBar from '#lib/elements/SearchBar.svelte';
+  import { geolocationManager } from '#lib/managers/geolocation.manager.svelte.ts';
+  import type { LatLng } from '#lib/types.ts';
+  import { delay } from '#lib/utils/asset-utils.ts';
+  import { handleError } from '#lib/utils/handle-error.ts';
+  import { lazyComponent } from '#lib/utils/lazy-component.svelte.ts';
   import { searchPlaces, type AssetResponseDto, type PlacesResponseDto } from '@immich/sdk';
   import { ConfirmModal, LoadingSpinner } from '@immich/ui';
   import { mdiMapMarkerMultipleOutline } from '@mdi/js';
@@ -141,7 +141,7 @@
 
   // Mounting the map through `{#await}` can leave the surrounding subtree unreactive.
   // See lazyComponent().
-  const LazyMap = lazyComponent(() => import('$lib/components/shared-components/map/Map.svelte'));
+  const LazyMap = lazyComponent(() => import('#lib/components/shared-components/map/Map.svelte'));
 </script>
 
 <ConfirmModal
@@ -193,7 +193,7 @@
       <span>{$t('pick_a_location')}</span>
       <div class="z-0 h-125 min-h-75 w-full">
         {#if LazyMap.current}
-          {@const Map = LazyMap.current}
+          {const Map = $derived(LazyMap.current)}
           <Map
             bind:this={mapElement}
             mapMarkers={asset && assetPoint

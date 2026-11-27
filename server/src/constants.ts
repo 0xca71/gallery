@@ -61,8 +61,10 @@ export const IWorker = 'IWorker';
 
 const basePath = dirname(import.meta.filename);
 const packageFile = join(basePath, '..', 'package.json');
-const { version } = JSON.parse(readFileSync(packageFile, 'utf8'));
+// apply-branding stamps the Gallery version into `version` and keeps the upstream base as `immichVersion`.
+const { version, immichVersion: baseVersion = version } = JSON.parse(readFileSync(packageFile, 'utf8'));
 export const serverVersion = new SemVer(version);
+export const immichVersion = new SemVer(baseVersion);
 
 export const citiesFile = 'cities500.txt';
 export const reverseGeocodeMaxDistance = 25_000;
@@ -80,9 +82,12 @@ export const MOBILE_CALLBACK_URI = /^(?!https?:)[a-z][a-z0-9+.-]*:\/{1,3}oauth-c
 
 export const LOGIN_URL = '/auth/login?autoLaunch=0';
 
-export const excludePaths = ['/.well-known/immich', '/custom.css', '/favicon.ico'];
+export const excludePaths = ['/.well-known/immich', '/.well-known/webauthn', '/custom.css', '/favicon.ico'];
 
 export const FACE_THUMBNAIL_SIZE = 250;
+
+// The fastest JPEG XL tier skips smoothing filters, which also keeps small thumbnails sharper
+export const THUMBNAIL_DECODING_TIER = 4;
 
 type ModelInfo = { dimSize: number };
 export const CLIP_MODEL_INFO: Record<string, ModelInfo> = {
@@ -195,6 +200,7 @@ export const endpointTags: Record<ApiTag, string> = {
     'A notification is a specialized message sent to users to inform them of important events. Currently, these notifications are only shown in the Immich web application.',
   [ApiTag.NotificationsAdmin]: 'Notification administrative endpoints.',
   [ApiTag.Partners]: 'A partner is a link with another user that allows sharing of assets between two users.',
+  [ApiTag.Passkeys]: 'A passkey is a WebAuthn credential that can be used to login without a password.',
   [ApiTag.People]:
     'A person is a collection of faces, which can be favorited and named. A person can also be merged into another person. People are automatically created via the face recognition job.',
   [ApiTag.Plugins]:
@@ -236,6 +242,7 @@ export const endpointTags: Record<ApiTag, string> = {
     'A workflow is a set of actions that run whenever a triggering event occurs. Workflows also can include filters to further limit execution.',
   [ApiTag.Classification]:
     'Endpoints for managing auto-classification categories that automatically tag and archive photos based on CLIP similarity.',
+  [ApiTag.Cleanup]: 'Endpoints for reviewing and clearing out space hogs, bursts, screenshots, and blurry photos.',
 };
 
 export const AUDIO_ENCODER: Record<AudioCodec, string> = {

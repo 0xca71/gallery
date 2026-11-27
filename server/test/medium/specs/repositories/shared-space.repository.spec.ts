@@ -1,15 +1,17 @@
 import { Kysely } from 'kysely';
-import { AssetVisibility, SharedSpaceActivityType, SharedSpaceRole, SourceType } from 'src/enum.js';
+import { AssetType, AssetVisibility, SharedSpaceActivityType, SharedSpaceRole, SourceType } from 'src/enum.js';
+import { personSidecarColumns } from 'src/gallery/utils/person-sidecar.js';
 import { LoggingRepository } from 'src/repositories/logging.repository.js';
 import { SharedSpaceRepository } from 'src/repositories/shared-space.repository.js';
 import { DB } from 'src/schema/index.js';
 import { BaseService } from 'src/services/base.service.js';
-import { newMediumService } from 'test/medium.factory.js';
-import { newEmbedding } from 'test/small.factory.js';
+import { newMediumService, updatePersonForTest } from 'test/medium.factory.js';
+import { newEmbedding, newUuid } from 'test/small.factory.js';
 import { getKyselyDB } from 'test/utils.js';
 
 let defaultDatabase: Kysely<DB>;
 
+// eslint-disable-next-line unicorn/no-unnecessary-parameters
 const setup = (db?: Kysely<DB>) => {
   const { ctx } = newMediumService(BaseService, {
     database: db || defaultDatabase,
@@ -22,6 +24,19 @@ const setup = (db?: Kysely<DB>) => {
 beforeAll(async () => {
   defaultDatabase = await getKyselyDB();
 });
+
+/**
+Anna views; Bob owns both the space and the asset. Anna is only ever a member -- used by the
+`findSpaceForAssetAndUser` block, where the point is which reach paths resolve for a member.
+*/
+const newSpaceWithViewer = async (ctx: ReturnType<typeof setup>['ctx']) => {
+  const { user: anna } = await ctx.newUser();
+  const { user: bob } = await ctx.newUser();
+  const { space } = await ctx.newSharedSpace({ createdById: bob.id });
+  await ctx.newSharedSpaceMember({ spaceId: space.id, userId: bob.id, role: 'owner' });
+  await ctx.newSharedSpaceMember({ spaceId: space.id, userId: anna.id, role: 'editor' });
+  return { anna, bob, space };
+};
 
 const expectStats = (
   result: {
@@ -64,6 +79,7 @@ const createIdentityBackedFace = async (
         result: await ctx.database
           .selectFrom('person')
           .selectAll()
+          .select(personSidecarColumns())
           .where('personGroupId', '=', input.personId)
           .executeTakeFirstOrThrow(),
       }
@@ -79,11 +95,7 @@ const createIdentityBackedFace = async (
   }
 
   if (!person.identityId) {
-    await ctx.database
-      .updateTable('person')
-      .set({ identityId })
-      .where('personGroupId', '=', person.personGroupId)
-      .execute();
+    await updatePersonForTest(ctx.database, person.personGroupId, { identityId });
   }
 
   const { asset } = await ctx.newAsset({
@@ -136,7 +148,7 @@ const createSpaceIdentityPerson = async (
 const seedAlbumPerson = async (
   ctx: ReturnType<typeof setup>['ctx'],
   sut: SharedSpaceRepository,
-  opts: { fileCreatedAt?: Date; representative?: boolean } = {},
+  opts: { localDateTime?: Date; representative?: boolean } = {},
 ) => {
   const { user } = await ctx.newUser();
   const { space } = await ctx.newSharedSpace({ createdById: user.id, faceRecognitionEnabled: true });
@@ -145,7 +157,7 @@ const seedAlbumPerson = async (
   const { asset } = await ctx.newAsset({
     ownerId: user.id,
     visibility: AssetVisibility.Timeline,
-    ...(opts.fileCreatedAt && { fileCreatedAt: opts.fileCreatedAt }),
+    ...(opts.localDateTime && { localDateTime: opts.localDateTime }),
   });
   await ctx.newAlbumAsset({ albumId: album.id, assetId: asset.id });
   await sut.addAlbum({ spaceId: space.id, albumId: album.id, addedById: user.id });
@@ -1170,7 +1182,77 @@ describe(SharedSpaceRepository.name, () => {
     });
   });
 
-  describe('getRecentAssets', () => {
+  describe('getAssetSummary', () => {
+    it('counts every path once and takes the covers from the newest images', async () => {
+      const { ctx, sut } = setup();
+      const { user } = await ctx.newUser();
+      const { user: partner } = await ctx.newUser();
+      const { space } = await ctx.newSharedSpace({ createdById: user.id });
+      const { space: otherSpace } = await ctx.newSharedSpace({ createdById: user.id });
+      const { library } = await ctx.newLibrary({ ownerId: user.id });
+      const { result: album } = await ctx.newAlbum({ ownerId: user.id, albumName: 'SummaryAlbum' });
+      await sut.addAlbum({ spaceId: space.id, albumId: album.id, addedById: user.id, showInTimeline: true });
+      await ctx.newSharedSpaceLibrary({ spaceId: space.id, libraryId: library.id });
+      const image = (day: number, extra: object = {}) =>
+        ctx.newAsset({
+          ownerId: user.id,
+          thumbhash: Buffer.from(`t${day}`),
+          fileCreatedAt: new Date(Date.UTC(2026, 0, day)),
+          ...extra,
+        });
+
+      // Direct and in the linked album: one asset, counted once.
+      const { asset: both } = await image(1);
+      await ctx.newSharedSpaceAsset({ spaceId: space.id, assetId: both.id });
+      await ctx.newAlbumAsset({ albumId: album.id, assetId: both.id });
+      const { asset: fromLibrary } = await image(2, { libraryId: library.id });
+      const { asset: fromAlbum } = await image(3);
+      await ctx.newAlbumAsset({ albumId: album.id, assetId: fromAlbum.id });
+      const { asset: contributed } = await ctx.newAsset({
+        ownerId: partner.id,
+        thumbhash: Buffer.from('t4'),
+        fileCreatedAt: new Date(Date.UTC(2026, 0, 4)),
+      });
+      await defaultDatabase
+        .insertInto('album_space_asset')
+        .values({ albumId: album.id, assetId: contributed.id, spaceId: space.id, addedById: partner.id })
+        .execute();
+      // The newest asset is a video: counted, never a cover.
+      const { asset: video } = await image(5, { type: AssetType.Video });
+      await ctx.newSharedSpaceAsset({ spaceId: space.id, assetId: video.id });
+      // Another space's asset and a trashed one stay out.
+      const { asset: elsewhere } = await image(6);
+      await ctx.newSharedSpaceAsset({ spaceId: otherSpace.id, assetId: elsewhere.id });
+      const { asset: trashed } = await image(7);
+      await ctx.newSharedSpaceAsset({ spaceId: space.id, assetId: trashed.id });
+      await ctx.softDeleteAsset(trashed.id);
+
+      const summary = await sut.getAssetSummary(space.id, 3);
+
+      expect(summary.count).toBe(5);
+      expect(summary.count).toBe(await sut.getAssetCount(space.id));
+      expect(summary.recentAssets.map((asset) => asset.id)).toEqual([contributed.id, fromAlbum.id, fromLibrary.id]);
+      expect(summary.recentAssets[0].thumbhash).toEqual(Buffer.from('t4'));
+    });
+
+    it('returns the count when no asset can be a cover', async () => {
+      const { ctx, sut } = setup();
+      const { user } = await ctx.newUser();
+      const { space } = await ctx.newSharedSpace({ createdById: user.id });
+      const { asset } = await ctx.newAsset({ ownerId: user.id, thumbhash: null });
+      await ctx.newSharedSpaceAsset({ spaceId: space.id, assetId: asset.id });
+
+      await expect(sut.getAssetSummary(space.id)).resolves.toEqual({ count: 1, recentAssets: [] });
+    });
+
+    it('returns nothing for an empty space', async () => {
+      const { ctx, sut } = setup();
+      const { user } = await ctx.newUser();
+      const { space } = await ctx.newSharedSpace({ createdById: user.id });
+
+      await expect(sut.getAssetSummary(space.id)).resolves.toEqual({ count: 0, recentAssets: [] });
+    });
+
     it('should return recent assets ordered by addedAt desc', async () => {
       const { ctx, sut } = setup();
       const { user } = await ctx.newUser();
@@ -1195,7 +1277,7 @@ describe(SharedSpaceRepository.name, () => {
       await ctx.newSharedSpaceAsset({ spaceId: space.id, assetId: asset2.id });
       await ctx.newSharedSpaceAsset({ spaceId: space.id, assetId: asset3.id });
 
-      const result = await sut.getRecentAssets(space.id, 2);
+      const { recentAssets: result } = await sut.getAssetSummary(space.id, 2);
 
       expect(result).toHaveLength(2);
       // Most recent first (asset3 added last)
@@ -1214,7 +1296,7 @@ describe(SharedSpaceRepository.name, () => {
       await ctx.newSharedSpaceAsset({ spaceId: space.id, assetId: withoutThumb.id });
       await ctx.newSharedSpaceAsset({ spaceId: space.id, assetId: withThumb.id });
 
-      const result = await sut.getRecentAssets(space.id, 4);
+      const { recentAssets: result } = await sut.getAssetSummary(space.id, 4);
 
       expect(result).toHaveLength(1);
       expect(result[0].id).toBe(withThumb.id);
@@ -1229,7 +1311,7 @@ describe(SharedSpaceRepository.name, () => {
       await ctx.newAlbumAsset({ albumId: album.id, assetId: asset.id });
       await sut.addAlbum({ spaceId: space.id, albumId: album.id, addedById: user.id, showInTimeline: false });
 
-      const result = await sut.getRecentAssets(space.id, 4);
+      const { recentAssets: result } = await sut.getAssetSummary(space.id, 4);
 
       expect(result).toEqual([]);
     });
@@ -1408,6 +1490,53 @@ describe(SharedSpaceRepository.name, () => {
       });
     });
 
+    it('should resolve the inviter name for member_join rows', async () => {
+      const { ctx, sut } = setup();
+      const { user } = await ctx.newUser({ name: 'Joiner' });
+      const { user: inviter } = await ctx.newUser({ name: 'Anna Inviter' });
+      const { space } = await ctx.newSharedSpace({ createdById: inviter.id });
+      await ctx.newSharedSpaceMember({ spaceId: space.id, userId: inviter.id, role: 'editor' });
+
+      await sut.logActivity({
+        spaceId: space.id,
+        userId: user.id,
+        type: 'member_join',
+        data: { role: 'viewer', invitedById: inviter.id },
+      });
+
+      const [activity] = await sut.getActivities(space.id);
+
+      expect(activity.invitedByName).toBe('Anna Inviter');
+    });
+
+    it('should return a null inviter name without invitedById or for an unknown id', async () => {
+      const { ctx, sut } = setup();
+      const { user } = await ctx.newUser();
+      const { space } = await ctx.newSharedSpace({ createdById: user.id });
+      await ctx.newSharedSpaceMember({ spaceId: space.id, userId: user.id, role: 'editor' });
+
+      await sut.logActivity({ spaceId: space.id, userId: user.id, type: 'member_join', data: { role: 'viewer' } });
+      await sut.logActivity({
+        spaceId: space.id,
+        userId: user.id,
+        type: 'member_join',
+        data: { role: 'viewer', invitedById: 'not-a-uuid' },
+      });
+      await sut.logActivity({
+        spaceId: space.id,
+        userId: user.id,
+        type: 'member_join',
+        data: { role: 'viewer', invitedById: '00000000-0000-4000-8000-000000000000' },
+      });
+
+      const activities = await sut.getActivities(space.id);
+
+      expect(activities).toHaveLength(3);
+      for (const activity of activities) {
+        expect(activity.invitedByName).toBeNull();
+      }
+    });
+
     it('should paginate with limit and offset', async () => {
       const { ctx, sut } = setup();
       const { user } = await ctx.newUser();
@@ -1426,6 +1555,35 @@ describe(SharedSpaceRepository.name, () => {
       expect(activities).toHaveLength(2);
       expect(activities[0].type).toBe('type_4');
       expect(activities[1].type).toBe('type_3');
+    });
+
+    // `createdAt` alone is not a total order: rows written inside ONE transaction all take that
+    // transaction's `now()`, so they tie. Without a tiebreaker Postgres may return a tie in any
+    // order, and it need not be the SAME order for the next page's query -- so OFFSET paging can
+    // hand the client a row it already has (the feed's keyed list then throws each_key_duplicate)
+    // or skip one entirely. Asserted as a defined order, not merely "no duplicates", because a
+    // duplicate-free result proves nothing about a plan that happened to be stable this run.
+    it('orders activities sharing a createdAt by id, so paging cannot repeat or skip one', async () => {
+      const { ctx, sut } = setup();
+      const { user } = await ctx.newUser();
+      const { space } = await ctx.newSharedSpace({ createdById: user.id });
+      await ctx.newSharedSpaceMember({ spaceId: space.id, userId: user.id, role: 'editor' });
+
+      const createdAt = new Date('2026-08-26T10:00:00.000Z');
+      for (const type of ['tied_1', 'tied_2', 'tied_3']) {
+        await ctx.database
+          .insertInto('shared_space_activity')
+          .values({ spaceId: space.id, userId: user.id, type, data: {}, createdAt })
+          .execute();
+      }
+
+      const activities = await sut.getActivities(space.id);
+      const expectedOrder = [...activities].map((activity) => activity.id).sort((a, b) => b.localeCompare(a));
+      expect(activities.map((activity) => activity.id)).toEqual(expectedOrder);
+
+      const firstPage = await sut.getActivities(space.id, 2, 0);
+      const secondPage = await sut.getActivities(space.id, 2, 2);
+      expect([...firstPage, ...secondPage].map((activity) => activity.id)).toEqual(expectedOrder);
     });
 
     it('should handle activities from deleted users', async () => {
@@ -1576,11 +1734,7 @@ describe(SharedSpaceRepository.name, () => {
         .returningAll()
         .execute();
       const { person } = await ctx.newPerson({ ownerId: user.id });
-      await ctx.database
-        .updateTable('person')
-        .set({ identityId: staleIdentity.id })
-        .where('personGroupId', '=', person.personGroupId)
-        .execute();
+      await updatePersonForTest(ctx.database, person.personGroupId, { identityId: staleIdentity.id });
       const { asset } = await ctx.newAsset({ ownerId: user.id });
       const { assetFace } = await ctx.newAssetFace({
         assetId: asset.id,
@@ -1810,11 +1964,10 @@ describe(SharedSpaceRepository.name, () => {
           .executeTakeFirstOrThrow();
         const { result: person } = await ctx.newPerson({ ownerId: owner.id, thumbnailPath: '/owner-thumb.jpg' });
         const { assetFace } = await ctx.newAssetFace({ assetId: asset.id, personGroupId: person.personGroupId });
-        await ctx.database
-          .updateTable('person')
-          .set({ identityId: identity.id, faceAssetId: assetFace.id })
-          .where('personGroupId', '=', person.personGroupId)
-          .execute();
+        await updatePersonForTest(ctx.database, person.personGroupId, {
+          identityId: identity.id,
+          faceAssetId: assetFace.id,
+        });
 
         const result = await sut.getPersonalThumbnailForSpacePerson({
           userId: viewer.id,
@@ -1839,11 +1992,10 @@ describe(SharedSpaceRepository.name, () => {
           .executeTakeFirstOrThrow();
         const { result: person } = await ctx.newPerson({ ownerId: owner.id, thumbnailPath: '/private-thumb.jpg' });
         const { assetFace } = await ctx.newAssetFace({ assetId: asset.id, personGroupId: person.personGroupId });
-        await ctx.database
-          .updateTable('person')
-          .set({ identityId: identity.id, faceAssetId: assetFace.id })
-          .where('personGroupId', '=', person.personGroupId)
-          .execute();
+        await updatePersonForTest(ctx.database, person.personGroupId, {
+          identityId: identity.id,
+          faceAssetId: assetFace.id,
+        });
 
         const result = await sut.getPersonalThumbnailForSpacePerson({
           userId: viewer.id,
@@ -1876,11 +2028,10 @@ describe(SharedSpaceRepository.name, () => {
           assetId: ownerAsset.id,
           personGroupId: ownerPerson.personGroupId,
         });
-        await ctx.database
-          .updateTable('person')
-          .set({ identityId: identity.id, faceAssetId: ownerFace.id })
-          .where('personGroupId', '=', ownerPerson.personGroupId)
-          .execute();
+        await updatePersonForTest(ctx.database, ownerPerson.personGroupId, {
+          identityId: identity.id,
+          faceAssetId: ownerFace.id,
+        });
 
         const { asset: viewerAsset } = await ctx.newAsset({
           ownerId: viewer.id,
@@ -1894,11 +2045,10 @@ describe(SharedSpaceRepository.name, () => {
           assetId: viewerAsset.id,
           personGroupId: viewerPerson.personGroupId,
         });
-        await ctx.database
-          .updateTable('person')
-          .set({ identityId: identity.id, faceAssetId: viewerFace.id })
-          .where('personGroupId', '=', viewerPerson.personGroupId)
-          .execute();
+        await updatePersonForTest(ctx.database, viewerPerson.personGroupId, {
+          identityId: identity.id,
+          faceAssetId: viewerFace.id,
+        });
 
         const result = await sut.getPersonalThumbnailForSpacePerson({
           userId: viewer.id,
@@ -2208,12 +2358,12 @@ describe(SharedSpaceRepository.name, () => {
       const { asset: targetAsset } = await ctx.newAsset({
         ownerId: user.id,
         visibility: AssetVisibility.Timeline,
-        fileCreatedAt: new Date('2024-02-15T00:00:00.000Z'),
+        localDateTime: new Date('2024-02-15T00:00:00.000Z'),
       });
       const { asset: otherSpaceAsset } = await ctx.newAsset({
         ownerId: user.id,
         visibility: AssetVisibility.Timeline,
-        fileCreatedAt: new Date('2024-03-15T00:00:00.000Z'),
+        localDateTime: new Date('2024-03-15T00:00:00.000Z'),
       });
       await ctx.newSharedSpaceAsset({ spaceId: targetSpace.id, assetId: targetAsset.id });
       await ctx.newSharedSpaceAsset({ spaceId: otherSpace.id, assetId: otherSpaceAsset.id });
@@ -2406,6 +2556,37 @@ describe(SharedSpaceRepository.name, () => {
         const result = await sut.getPersonsBySpaceId(space.id, { petsEnabled: true });
 
         expect(result.map((p) => p.id)).toContain(bucket.id);
+      });
+
+      it('keeps a pet whose faces carry a face embedding in the pets view and its count', async () => {
+        // a human cluster reclassified as a pet: face_search rows, no pet_search row
+        const { ctx, sut } = setup();
+        const { user } = await ctx.newUser();
+        const { space } = await ctx.newSharedSpace({ createdById: user.id });
+        const { asset } = await ctx.newAsset({ ownerId: user.id, visibility: AssetVisibility.Timeline });
+        await ctx.newSharedSpaceAsset({ spaceId: space.id, assetId: asset.id });
+
+        const reclassified = await seedSpacePerson(ctx, sut, {
+          spaceId: space.id,
+          assetIds: [asset.id],
+          type: 'pet',
+          name: 'Rex',
+        });
+        const faces = await ctx.database
+          .selectFrom('shared_space_person_face')
+          .select('assetFaceId')
+          .where('personId', '=', reclassified.id)
+          .execute();
+        await ctx.database
+          .insertInto('face_search')
+          .values(faces.map(({ assetFaceId }) => ({ faceId: assetFaceId, embedding: newEmbedding() })))
+          .execute();
+
+        const list = await sut.getPersonsBySpaceId(space.id, { petsEnabled: true, type: 'pet' });
+        const counts = await sut.countPersonsBySpaceId(space.id, { petsEnabled: true, type: 'pet' });
+
+        expect(list.map((p) => p.id)).toEqual([reclassified.id]);
+        expect(counts.total).toBe(1);
       });
 
       it('returns an unnamed single-face pet under the pets view despite minimumFaceCount (S6)', async () => {
@@ -2694,11 +2875,11 @@ describe(SharedSpaceRepository.name, () => {
         const { space } = await ctx.newSharedSpace({ createdById: user.id });
         const { asset: inRangeAsset } = await ctx.newAsset({
           ownerId: user.id,
-          fileCreatedAt: new Date('2024-02-15T00:00:00.000Z'),
+          localDateTime: new Date('2024-02-15T00:00:00.000Z'),
         });
         const { asset: outOfRangeAsset } = await ctx.newAsset({
           ownerId: user.id,
-          fileCreatedAt: new Date('2024-05-15T00:00:00.000Z'),
+          localDateTime: new Date('2024-05-15T00:00:00.000Z'),
         });
         await ctx.newSharedSpaceAsset({ spaceId: space.id, assetId: inRangeAsset.id });
         await ctx.newSharedSpaceAsset({ spaceId: space.id, assetId: outOfRangeAsset.id });
@@ -4274,12 +4455,12 @@ describe(SharedSpaceRepository.name, () => {
       const { asset } = await ctx.newAsset({
         ownerId: user.id,
         visibility: AssetVisibility.Timeline,
-        fileCreatedAt: new Date('2024-02-15T00:00:00.000Z'),
+        localDateTime: new Date('2024-02-15T00:00:00.000Z'),
       });
       const { asset: otherAsset } = await ctx.newAsset({
         ownerId: user.id,
         visibility: AssetVisibility.Timeline,
-        fileCreatedAt: new Date('2024-03-15T00:00:00.000Z'),
+        localDateTime: new Date('2024-03-15T00:00:00.000Z'),
       });
       await ctx.newSharedSpaceAsset({ spaceId: space.id, assetId: asset.id });
       await ctx.newSharedSpaceAsset({ spaceId: otherSpace.id, assetId: otherAsset.id });
@@ -4921,14 +5102,14 @@ describe(SharedSpaceRepository.name, () => {
       const { asset } = await ctx.newAsset({ ownerId: owner.id, visibility: AssetVisibility.Timeline });
       await ctx.database
         .insertInto('asset_exif')
-        .values({ assetId: asset.id, latitude: 11, longitude: 11, rating: 5 })
+        .values({ assetId: asset.id, latitude: 11, longitude: 11, rating: 3 })
         .execute();
       await ctx.newSharedSpaceAsset({ spaceId: space.id, assetId: asset.id });
 
       const matching = await sut.getFilteredMapMarkers({
         userIds: [member.id],
         timelineSpaceIds: [space.id],
-        rating: 5,
+        rating: 3,
         visibility: AssetVisibility.Timeline,
       });
       expect(matching.find((r) => r.id === asset.id)).toBeDefined();
@@ -4936,7 +5117,7 @@ describe(SharedSpaceRepository.name, () => {
       const nonMatching = await sut.getFilteredMapMarkers({
         userIds: [member.id],
         timelineSpaceIds: [space.id],
-        rating: 1,
+        rating: 4,
         visibility: AssetVisibility.Timeline,
       });
       expect(nonMatching.find((r) => r.id === asset.id)).toBeUndefined();
@@ -4951,7 +5132,15 @@ describe(SharedSpaceRepository.name, () => {
       const { space } = await ctx.newSharedSpace({ createdById: owner.id });
       await ctx.newSharedSpaceMember({ spaceId: space.id, userId: member.id });
       const { asset } = await ctx.newAsset({ ownerId: owner.id, visibility: AssetVisibility.Timeline });
-      await ctx.database.insertInto('asset_exif').values({ assetId: asset.id, latitude: 20, longitude: 20 }).execute();
+      await ctx.database
+        .insertInto('asset_exif')
+        .values({
+          assetId: asset.id,
+          latitude: 20,
+          longitude: 20,
+          formattedAddress: 'saved detailed address',
+        })
+        .execute();
       await ctx.newSharedSpaceAsset({ spaceId: space.id, assetId: asset.id });
 
       const results = await sut.getFilteredMapMarkers({
@@ -4960,7 +5149,9 @@ describe(SharedSpaceRepository.name, () => {
         visibility: AssetVisibility.Timeline,
       });
 
-      expect(results.find((r) => r.id === asset.id)).toBeDefined();
+      expect(results.find((r) => r.id === asset.id)?.formattedAddress).toBe('saved detailed address');
+      const mapMarkers = await sut.getMapMarkers(space.id);
+      expect(mapMarkers.find((r) => r.id === asset.id)?.formattedAddress).toBe('saved detailed address');
     });
 
     it('should include a library-linked asset via timelineSpaceIds (row 4)', async () => {
@@ -5070,6 +5261,90 @@ describe(SharedSpaceRepository.name, () => {
       await expect(sut.getAssetIdsWithoutOtherSpacePath('00000000-0000-0000-0000-000000000000', [])).resolves.toEqual(
         [],
       );
+    });
+  });
+
+  // Two things resolve "which space am I seeing this asset through" from here: `resolvedSpaceId` on
+  // a single-asset read (which gates the space face affordances) and the cross-owner edit
+  // attribution that writes the owner's `asset_edit` activity row. The PERMISSION to make that edit
+  // is resolved elsewhere, by `checkSpaceEditAccess`, which #992 gave a linked-album arm. This had
+  // no such arm, so an album-reached member asset was editable while resolving to no space at all:
+  // the metadata affordances appeared, the face affordances silently did not, and the edit that
+  // followed was never attributed in the owner's feed. Every path that grants the edit must resolve
+  // here too, so the matrix below is the reach-path set, not a single case.
+  describe('findSpaceForAssetAndUser', () => {
+    it('resolves an asset added directly to the space', async () => {
+      const { ctx, sut } = setup();
+      const { anna, bob, space } = await newSpaceWithViewer(ctx);
+      const { asset } = await ctx.newAsset({ ownerId: bob.id, visibility: AssetVisibility.Timeline });
+      await ctx.newSharedSpaceAsset({ spaceId: space.id, assetId: asset.id });
+
+      await expect(sut.findSpaceForAssetAndUser(asset.id, anna.id)).resolves.toEqual({ spaceId: space.id });
+    });
+
+    it('resolves an asset reachable through a linked library', async () => {
+      const { ctx, sut } = setup();
+      const { anna, bob, space } = await newSpaceWithViewer(ctx);
+      const { library } = await ctx.newLibrary({ ownerId: bob.id });
+      const { asset } = await ctx.newAsset({
+        ownerId: bob.id,
+        libraryId: library.id,
+        visibility: AssetVisibility.Timeline,
+      });
+      await ctx.newSharedSpaceLibrary({ spaceId: space.id, libraryId: library.id });
+
+      await expect(sut.findSpaceForAssetAndUser(asset.id, anna.id)).resolves.toEqual({ spaceId: space.id });
+    });
+
+    it('resolves an asset reachable through a linked album', async () => {
+      const { ctx, sut } = setup();
+      const { anna, bob, space } = await newSpaceWithViewer(ctx);
+      const { result: album } = await ctx.newAlbum({ ownerId: bob.id, albumName: 'Linked' });
+      const { asset } = await ctx.newAsset({ ownerId: bob.id, visibility: AssetVisibility.Timeline });
+      await ctx.newAlbumAsset({ albumId: album.id, assetId: asset.id });
+      await ctx.newSharedSpaceAlbum({ spaceId: space.id, albumId: album.id });
+
+      await expect(sut.findSpaceForAssetAndUser(asset.id, anna.id)).resolves.toEqual({ spaceId: space.id });
+    });
+
+    it('resolves a cross-owner contribution to a linked album', async () => {
+      const { ctx, sut } = setup();
+      const { anna, bob, space } = await newSpaceWithViewer(ctx);
+      const { user: carol } = await ctx.newUser();
+      const { result: album } = await ctx.newAlbum({ ownerId: bob.id, albumName: 'Linked' });
+      const { asset } = await ctx.newAsset({ ownerId: carol.id, visibility: AssetVisibility.Timeline });
+      await ctx.newSharedSpaceAlbum({ spaceId: space.id, albumId: album.id });
+      await ctx.newAlbumSpaceAsset({ albumId: album.id, assetId: asset.id, spaceId: space.id });
+
+      await expect(sut.findSpaceForAssetAndUser(asset.id, anna.id)).resolves.toEqual({ spaceId: space.id });
+    });
+
+    // Non-vacuity for the whole block: the album fixture above resolves only because Anna is a
+    // member. A stranger gets nothing from the identical fixture.
+    it('resolves nothing for a user who is not a member of the space', async () => {
+      const { ctx, sut } = setup();
+      const { bob, space } = await newSpaceWithViewer(ctx);
+      const { user: stranger } = await ctx.newUser();
+      const { result: album } = await ctx.newAlbum({ ownerId: bob.id, albumName: 'Linked' });
+      const { asset } = await ctx.newAsset({ ownerId: bob.id, visibility: AssetVisibility.Timeline });
+      await ctx.newAlbumAsset({ albumId: album.id, assetId: asset.id });
+      await ctx.newSharedSpaceAlbum({ spaceId: space.id, albumId: album.id });
+
+      await expect(sut.findSpaceForAssetAndUser(asset.id, stranger.id)).resolves.toBeUndefined();
+    });
+
+    it('resolves nothing for a soft-deleted asset', async () => {
+      const { ctx, sut } = setup();
+      const { anna, bob, space } = await newSpaceWithViewer(ctx);
+      const { result: album } = await ctx.newAlbum({ ownerId: bob.id, albumName: 'Linked' });
+      const { asset } = await ctx.newAsset({ ownerId: bob.id, visibility: AssetVisibility.Timeline });
+      await ctx.newAlbumAsset({ albumId: album.id, assetId: asset.id });
+      await ctx.newSharedSpaceAlbum({ spaceId: space.id, albumId: album.id });
+
+      await expect(sut.findSpaceForAssetAndUser(asset.id, anna.id)).resolves.toEqual({ spaceId: space.id });
+
+      await defaultDatabase.updateTable('asset').set({ deletedAt: new Date() }).where('id', '=', asset.id).execute();
+      await expect(sut.findSpaceForAssetAndUser(asset.id, anna.id)).resolves.toBeUndefined();
     });
   });
 
@@ -5193,7 +5468,7 @@ describe(SharedSpaceRepository.name, () => {
   // query. Pin it so a future album-arm rewrite can't silently start over/under-surfacing trashed
   // album assets.
   describe('C5 album-arm trash parity', () => {
-    it('a soft-deleted album asset drops out of getAssetCount / getRecentAssets / isAssetInSpace', async () => {
+    it('a soft-deleted album asset drops out of getAssetCount / getAssetSummary / isAssetInSpace', async () => {
       const { ctx, sut } = setup();
       const { user } = await ctx.newUser();
       const { space } = await ctx.newSharedSpace({ createdById: user.id });
@@ -5209,7 +5484,7 @@ describe(SharedSpaceRepository.name, () => {
 
       await expect(sut.getAssetCount(space.id)).resolves.toBe(0);
       await expect(sut.isAssetInSpace(space.id, asset.id)).resolves.toBe(false);
-      await expect(sut.getRecentAssets(space.id, 4)).resolves.toEqual([]);
+      await expect(sut.getAssetSummary(space.id, 4)).resolves.toEqual({ count: 0, recentAssets: [] });
     });
   });
 
@@ -5238,7 +5513,7 @@ describe(SharedSpaceRepository.name, () => {
     it('countPersonsBySpaceId includes album faces in detectedFaceCount and date-filtered totals', async () => {
       const { ctx, sut } = setup();
       const takenAt = new Date('2024-06-15T12:00:00.000Z');
-      const { space, person } = await seedAlbumPerson(ctx, sut, { fileCreatedAt: takenAt });
+      const { space, person } = await seedAlbumPerson(ctx, sut, { localDateTime: takenAt });
 
       const base = await sut.countPersonsBySpaceId(space.id, {});
       expect(base.total).toBeGreaterThanOrEqual(1);
@@ -5270,7 +5545,7 @@ describe(SharedSpaceRepository.name, () => {
     it('getPersonsBySpaceId lists an album-only person, honoring date filters', async () => {
       const { ctx, sut } = setup();
       const takenAt = new Date('2024-06-15T12:00:00.000Z');
-      const { space, person } = await seedAlbumPerson(ctx, sut, { fileCreatedAt: takenAt });
+      const { space, person } = await seedAlbumPerson(ctx, sut, { localDateTime: takenAt });
 
       const all = await sut.getPersonsBySpaceId(space.id, {});
       expect(all.map((p) => p.id)).toContain(person.id);
@@ -5351,7 +5626,7 @@ describe(SharedSpaceRepository.name, () => {
     it('hides an album-only person when the linked album is soft-deleted', async () => {
       const { ctx, sut } = setup();
       const takenAt = new Date('2024-06-15T12:00:00.000Z');
-      const { space, person, album } = await seedAlbumPerson(ctx, sut, { fileCreatedAt: takenAt });
+      const { space, person, album } = await seedAlbumPerson(ctx, sut, { localDateTime: takenAt });
 
       await ctx.softDeleteAlbum(album.id);
 
@@ -5865,6 +6140,219 @@ describe('getPersonAssetIds — visibility scoping', () => {
         expect(ids).toContain(underscore.id);
         expect(ids).not.toContain(dash.id);
       });
+    });
+  });
+
+  // #1115: AssetService.get resolves an asset with no space context through this lookup, and the Info
+  // panel's person chip then filters /photos by the resolved space's `space-person:` token. /photos
+  // only honours tokens from spaces the viewer shows on their timeline, so the pick must prefer those.
+  // A space reaches an asset through three arms here (a direct shared_space_asset row, a linked
+  // library, or a linked album); every case runs through the first two, and the album arm has its own.
+  describe('findSpaceForAssetAndUser', () => {
+    type Arm = 'direct' | 'library' | 'album';
+
+    // Ascending ids, so a case can decide which space sorts first independently of insertion order.
+    const sortedIds = (count: number) => Array.from({ length: count }, () => newUuid()).sort();
+
+    const setupAsset = async (assetOverrides: { isOffline?: boolean } = {}) => {
+      const { ctx, sut } = setup();
+      const { user: owner } = await ctx.newUser();
+      const { user: viewer } = await ctx.newUser();
+      const { library } = await ctx.newLibrary({ ownerId: owner.id });
+      const { asset } = await ctx.newAsset({ ownerId: owner.id, libraryId: library.id, ...assetOverrides });
+
+      const addSpace = async (input: {
+        id: string;
+        arms: Arm[];
+        viewerTimeline?: boolean;
+        ownerTimeline?: boolean;
+        viewerIsMember?: boolean;
+      }) => {
+        const { space } = await ctx.newSharedSpace({ id: input.id, createdById: owner.id });
+        await ctx.newSharedSpaceMember({
+          spaceId: space.id,
+          userId: owner.id,
+          role: SharedSpaceRole.Owner,
+          showInTimeline: input.ownerTimeline ?? true,
+        });
+        if (input.viewerIsMember ?? true) {
+          await ctx.newSharedSpaceMember({
+            spaceId: space.id,
+            userId: viewer.id,
+            role: SharedSpaceRole.Viewer,
+            showInTimeline: input.viewerTimeline ?? true,
+          });
+        }
+        if (input.arms.includes('direct')) {
+          await ctx.newSharedSpaceAsset({ spaceId: space.id, assetId: asset.id, addedById: owner.id });
+        }
+        if (input.arms.includes('library')) {
+          await ctx.newSharedSpaceLibrary({ spaceId: space.id, libraryId: library.id, addedById: owner.id });
+        }
+        if (input.arms.includes('album')) {
+          const { result: album } = await ctx.newAlbum({ ownerId: owner.id, albumName: 'Linked' });
+          await ctx.newAlbumAsset({ albumId: album.id, assetId: asset.id });
+          await ctx.newSharedSpaceAlbum({ spaceId: space.id, albumId: album.id, addedById: owner.id });
+        }
+        return space;
+      };
+
+      return { ctx, sut, owner, viewer, asset, addSpace };
+    };
+
+    it('returns undefined when the asset is in no space', async () => {
+      const { sut, viewer, asset } = await setupAsset();
+
+      await expect(sut.findSpaceForAssetAndUser(asset.id, viewer.id)).resolves.toBeUndefined();
+    });
+
+    it.each<Arm>(['direct', 'library'])(
+      'returns undefined when the viewer is not a member of the space holding the asset (%s)',
+      async (arm) => {
+        const { sut, viewer, asset, addSpace } = await setupAsset();
+        await addSpace({ id: newUuid(), arms: [arm], viewerIsMember: false });
+
+        await expect(sut.findSpaceForAssetAndUser(asset.id, viewer.id)).resolves.toBeUndefined();
+      },
+    );
+
+    it.each<Arm>(['direct', 'library'])(
+      'still resolves a sole space the viewer hides from their timeline (%s)',
+      async (arm) => {
+        const { sut, viewer, asset, addSpace } = await setupAsset();
+        const space = await addSpace({ id: newUuid(), arms: [arm], viewerTimeline: false });
+
+        // The preference is an ordering, not a filter: space people must still resolve for the asset.
+        await expect(sut.findSpaceForAssetAndUser(asset.id, viewer.id)).resolves.toEqual({ spaceId: space.id });
+      },
+    );
+
+    const armPairs: Array<{ hiddenArm: Arm; timelineArm: Arm }> = [
+      { hiddenArm: 'direct', timelineArm: 'direct' },
+      { hiddenArm: 'library', timelineArm: 'library' },
+      { hiddenArm: 'direct', timelineArm: 'library' },
+      { hiddenArm: 'library', timelineArm: 'direct' },
+    ];
+
+    it.each(
+      armPairs.flatMap((pair) => [
+        { ...pair, hiddenIdIsLower: true },
+        { ...pair, hiddenIdIsLower: false },
+      ]),
+    )(
+      'prefers the timeline-enabled space (hidden via $hiddenArm, timeline via $timelineArm, hidden id lower: $hiddenIdIsLower)',
+      async ({ hiddenArm, timelineArm, hiddenIdIsLower }) => {
+        const { sut, viewer, asset, addSpace } = await setupAsset();
+        const [lowerId, higherId] = sortedIds(2);
+
+        await addSpace({ id: hiddenIdIsLower ? lowerId : higherId, arms: [hiddenArm], viewerTimeline: false });
+        const timelineSpace = await addSpace({ id: hiddenIdIsLower ? higherId : lowerId, arms: [timelineArm] });
+
+        await expect(sut.findSpaceForAssetAndUser(asset.id, viewer.id)).resolves.toEqual({
+          spaceId: timelineSpace.id,
+        });
+      },
+    );
+
+    it.each([
+      { label: 'all timeline-enabled', viewerTimeline: true },
+      { label: 'all hidden from the timeline', viewerTimeline: false },
+    ])('breaks a tie on the lowest space id, whatever the insertion order ($label)', async ({ viewerTimeline }) => {
+      const { sut, viewer, asset, addSpace } = await setupAsset();
+      const [lowestId, middleId, highestId] = sortedIds(3);
+
+      // Inserted highest-first, across both arms, so neither insertion order nor arm can explain the pick.
+      await addSpace({ id: highestId, arms: ['direct'], viewerTimeline });
+      await addSpace({ id: middleId, arms: ['library'], viewerTimeline });
+      await addSpace({ id: lowestId, arms: ['direct'], viewerTimeline });
+
+      for (let attempt = 0; attempt < 3; attempt++) {
+        await expect(sut.findSpaceForAssetAndUser(asset.id, viewer.id)).resolves.toEqual({ spaceId: lowestId });
+      }
+    });
+
+    it.each([
+      { hiddenArm: 'direct' as Arm, timelineArm: 'album' as Arm },
+      { hiddenArm: 'album' as Arm, timelineArm: 'library' as Arm },
+    ])(
+      'prefers the timeline-enabled space across the linked-album arm (hidden via $hiddenArm, timeline via $timelineArm)',
+      async ({ hiddenArm, timelineArm }) => {
+        const { sut, viewer, asset, addSpace } = await setupAsset();
+        const [lowerId, higherId] = sortedIds(2);
+
+        await addSpace({ id: lowerId, arms: [hiddenArm], viewerTimeline: false });
+        const timelineSpace = await addSpace({ id: higherId, arms: [timelineArm] });
+
+        await expect(sut.findSpaceForAssetAndUser(asset.id, viewer.id)).resolves.toEqual({
+          spaceId: timelineSpace.id,
+        });
+      },
+    );
+
+    it('prefers the timeline-enabled space among several hidden ones', async () => {
+      const { sut, viewer, asset, addSpace } = await setupAsset();
+      const [firstId, secondId, thirdId, fourthId] = sortedIds(4);
+
+      await addSpace({ id: firstId, arms: ['direct'], viewerTimeline: false });
+      await addSpace({ id: secondId, arms: ['library'], viewerTimeline: false });
+      await addSpace({ id: fourthId, arms: ['direct'], viewerTimeline: false });
+      const timelineSpace = await addSpace({ id: thirdId, arms: ['library'] });
+
+      await expect(sut.findSpaceForAssetAndUser(asset.id, viewer.id)).resolves.toEqual({ spaceId: timelineSpace.id });
+    });
+
+    it('orders by the requesting member’s own timeline flag, not another member’s', async () => {
+      const { sut, owner, viewer, asset, addSpace } = await setupAsset();
+      const [lowerId, higherId] = sortedIds(2);
+
+      // Opposite preferences: the viewer hides the lower space, the owner hides the higher one.
+      await addSpace({ id: lowerId, arms: ['direct'], viewerTimeline: false, ownerTimeline: true });
+      await addSpace({ id: higherId, arms: ['library'], viewerTimeline: true, ownerTimeline: false });
+
+      await expect(sut.findSpaceForAssetAndUser(asset.id, viewer.id)).resolves.toEqual({ spaceId: higherId });
+      await expect(sut.findSpaceForAssetAndUser(asset.id, owner.id)).resolves.toEqual({ spaceId: lowerId });
+    });
+
+    it('does not pick a timeline-enabled space the viewer is not a member of', async () => {
+      const { sut, viewer, asset, addSpace } = await setupAsset();
+      const [lowerId, higherId] = sortedIds(2);
+
+      // The owner shows the lower space on their timeline, but the viewer has no row in it at all.
+      await addSpace({ id: lowerId, arms: ['direct'], viewerIsMember: false });
+      const memberSpace = await addSpace({ id: higherId, arms: ['library'], viewerTimeline: false });
+
+      await expect(sut.findSpaceForAssetAndUser(asset.id, viewer.id)).resolves.toEqual({ spaceId: memberSpace.id });
+    });
+
+    it('counts a space reaching the asset through both arms once, with its own timeline flag', async () => {
+      const { sut, viewer, asset, addSpace } = await setupAsset();
+      const [lowerId, higherId] = sortedIds(2);
+
+      await addSpace({ id: lowerId, arms: ['direct', 'library'], viewerTimeline: false });
+      const timelineSpace = await addSpace({ id: higherId, arms: ['direct', 'library'] });
+
+      await expect(sut.findSpaceForAssetAndUser(asset.id, viewer.id)).resolves.toEqual({ spaceId: timelineSpace.id });
+    });
+
+    it('ignores a library link for an offline asset, even when that space is timeline-enabled', async () => {
+      const { sut, viewer, asset, addSpace } = await setupAsset({ isOffline: true });
+      const [lowerId, higherId] = sortedIds(2);
+
+      await addSpace({ id: lowerId, arms: ['library'] });
+      const directSpace = await addSpace({ id: higherId, arms: ['direct'], viewerTimeline: false });
+
+      await expect(sut.findSpaceForAssetAndUser(asset.id, viewer.id)).resolves.toEqual({ spaceId: directSpace.id });
+    });
+
+    it('returns undefined for a trashed asset through either arm', async () => {
+      const { ctx, sut, viewer, asset, addSpace } = await setupAsset();
+      const [lowerId, higherId] = sortedIds(2);
+      await addSpace({ id: lowerId, arms: ['direct'] });
+      await addSpace({ id: higherId, arms: ['library'] });
+
+      await ctx.softDeleteAsset(asset.id);
+
+      await expect(sut.findSpaceForAssetAndUser(asset.id, viewer.id)).resolves.toBeUndefined();
     });
   });
 });

@@ -1,13 +1,11 @@
-import { AssetOrder, AssetTypeEnum, AssetVisibility, TimeBucketSize, Type } from '@immich/sdk';
-import { describe, expect, it } from 'vitest';
-import { createFilterState } from '$lib/components/filter-panel/filter-panel';
+import { createFilterState } from '#lib/components/filter-panel/filter-panel.ts';
 import {
   buildPhotosTimelineOptions,
-  buildPhotosPickerBucketOptions,
   getPhotosPersonFilterId,
-  getPhotosPersonFilterThumbnailUrl,
   handlePhotosRemoveFilter,
-} from '$lib/utils/photos-filter-options';
+} from '#lib/utils/photos-filter-options.ts';
+import { AssetOrder, AssetTypeEnum, AssetVisibility, Type } from '@immich/sdk';
+import { describe, expect, it } from 'vitest';
 
 /** The signed-in user whose personal timeline /photos is. */
 const MY_USER_ID = 'cccccccc-cccc-4ccc-cccc-cccccccccccc';
@@ -145,13 +143,13 @@ describe('buildPhotosTimelineOptions', () => {
     expect(options.withSharedSpaces).toBe(true);
   });
 
-  it('should include isFavorite and omit shared timeline inclusions when favorites is selected', () => {
+  it('should include isFavorite and keep partner/shared-space scope active when favorites is selected (#763 slice 4)', () => {
     const filters = { ...createFilterState(), isFavorite: true };
     const options = buildPhotosTimelineOptions(filters, MY_USER_ID);
 
     expect(options.isFavorite).toBe(true);
-    expect(options).not.toHaveProperty('withPartners');
-    expect(options).not.toHaveProperty('withSharedSpaces');
+    expect(options.withPartners).toBe(true);
+    expect(options.withSharedSpaces).toBe(true);
   });
 
   it('should include has-no-album when selected', () => {
@@ -277,51 +275,20 @@ describe('buildPhotosTimelineOptions', () => {
       expect(options.userId).toBe(MY_USER_ID);
     });
 
-    it('keeps the owner gate under the favorites chip, where the shared widenings are dropped', () => {
+    it('keeps the owner gate under the favorites chip (#763: the widenings now stay too)', () => {
       const options = buildPhotosTimelineOptions(
         { ...createFilterState(), isFavorite: true, albumId: 'aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa' },
         MY_USER_ID,
       );
 
+      // The owner gate is the point of this test and is unchanged.
       expect(options.userId).toBe(MY_USER_ID);
-      expect(options).not.toHaveProperty('withPartners');
-      expect(options).not.toHaveProperty('withSharedSpaces');
+      // #763: the widenings used to be dropped here, because `isFavorite` was the asset OWNER's
+      // flag and the server rejected the combination. It is a per-user overlay row now, so the
+      // chip narrows to MY favourites and partner/space content stays legitimately in scope.
+      expect(options.withPartners).toBe(true);
+      expect(options.withSharedSpaces).toBe(true);
     });
-  });
-});
-
-describe('buildPhotosPickerBucketOptions', () => {
-  it('keeps baseline month counts when a year or month is selected', () => {
-    const filters = {
-      ...createFilterState(),
-      selectedYear: 2024,
-      selectedMonth: 7,
-      country: 'Japan',
-    };
-
-    const options = buildPhotosPickerBucketOptions(filters, MY_USER_ID);
-
-    expect(options).toMatchObject({
-      userId: MY_USER_ID,
-      country: 'Japan',
-      bucketSize: TimeBucketSize.Month,
-    });
-    expect(options).not.toHaveProperty('takenAfter');
-    expect(options).not.toHaveProperty('takenBefore');
-  });
-
-  it('preserves an explicit custom date range', () => {
-    const filters = {
-      ...createFilterState(),
-      dateAfter: '2024-01-01',
-      dateBefore: '2024-12-31',
-    };
-
-    const options = buildPhotosPickerBucketOptions(filters, MY_USER_ID);
-
-    expect(options.takenAfter).toBe('2024-01-01T00:00:00.000Z');
-    expect(options.takenBefore).toBe('2025-01-01T00:00:00.000Z');
-    expect(options.bucketSize).toBe(TimeBucketSize.Month);
   });
 });
 
@@ -467,26 +434,6 @@ describe('handlePhotosRemoveFilter', () => {
       selectedYear: undefined,
       selectedMonth: undefined,
     });
-  });
-});
-
-describe('getPhotosPersonFilterThumbnailUrl', () => {
-  it('uses the shared-space thumbnail for space-primary scoped people', () => {
-    expect(
-      getPhotosPersonFilterThumbnailUrl({
-        id: 'space-person:space-person-1',
-        primaryProfile: { type: Type.SpacePerson, id: 'space-person-1', spaceId: 'space-1' },
-      }),
-    ).toBe('/api/shared-spaces/space-1/people/space-person-1/thumbnail');
-  });
-
-  it('uses the user person thumbnail for user-primary scoped people', () => {
-    expect(
-      getPhotosPersonFilterThumbnailUrl({
-        id: 'person:person-1',
-        primaryProfile: { type: Type.UserPerson, id: 'person-1' },
-      }),
-    ).toBe('/api/people/person-1/thumbnail');
   });
 });
 

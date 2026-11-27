@@ -143,6 +143,7 @@ describe(ServerService.name, () => {
         duplicateDetection: true,
         facialRecognition: true,
         importFaces: false,
+        backups: false,
         map: true,
         reverseGeocoding: true,
         oauth: false,
@@ -156,15 +157,35 @@ describe(ServerService.name, () => {
         email: false,
         realtimeTranscoding: false,
         peopleStatistics: false,
+        s3Storage: false,
         syncRequestTypes: Object.values(SyncRequestType),
+        localTakenRange: true,
+        searchOptions: true,
+        searchFavoritesAcrossSpaces: true,
+        spatialScene: false,
+        dataSaverVideo: false,
       });
       expect(mocks.systemMetadata.get).toHaveBeenCalled();
+    });
+
+    it('should report spatialScene enabled when the admin turns it on', async () => {
+      mocks.systemMetadata.get.mockResolvedValue({ machineLearning: { spatialScene: { enabled: true } } });
+      const features = await sut.getFeatures();
+      expect(features.spatialScene).toBe(true);
     });
 
     it('should report peopleStatistics enabled when IMMICH_PEOPLE_STATISTICS_ENABLED is set', async () => {
       mocks.config.getEnv.mockReturnValue(mockEnvData({ peopleStatistics: true }));
       const features = await sut.getFeatures();
       expect(features.peopleStatistics).toBe(true);
+    });
+
+    // Gallery-fork: the admin UI hides the database-backup S3 group entirely when this is false, so
+    // it has to follow the env storage backend rather than anything in the saved config.
+    it('should report s3Storage enabled when the storage backend is s3', async () => {
+      mocks.config.getEnv.mockReturnValue(mockEnvData({ storage: { backend: 's3' } }));
+      const features = await sut.getFeatures();
+      expect(features.s3Storage).toBe(true);
     });
 
     // Regression guard: getFeatures is called on every web-app page load; must
@@ -198,7 +219,6 @@ describe(ServerService.name, () => {
         minFaces: 3,
         availableMemoryTypes: [
           'on_this_day',
-          'birthday',
           'recent_trip',
           'month_recap',
           'favorites_throwback',
@@ -240,7 +260,6 @@ describe(ServerService.name, () => {
 
       expect(result.availableMemoryTypes).toEqual([
         'on_this_day',
-        'birthday',
         'month_recap',
         'favorites_throwback',
         'on_this_day_place',

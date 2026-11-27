@@ -13,6 +13,7 @@ import {
   mapTag,
 } from 'src/dtos/tag.dto.js';
 import { JobName, JobStatus, Permission, QueueName } from 'src/enum.js';
+import { checkAssetEditAccess } from 'src/gallery/utils/access-grants.js';
 import { TagAssetTable } from 'src/schema/tables/tag-asset.table.js';
 import { BaseService } from 'src/services/base.service.js';
 import { addAssets, removeAssets } from 'src/utils/asset.util.js';
@@ -71,7 +72,9 @@ export class TagService extends BaseService {
       value = existing.value;
     }
 
+    const assetIds = value === existing.value ? [] : await this.tagRepository.getAssetIdsByTagId(id);
     const tag = await this.tagRepository.update(id, { value, color });
+    await this.syncAssetTags(assetIds);
     return mapTag(tag);
   }
 
@@ -83,15 +86,15 @@ export class TagService extends BaseService {
   async remove(auth: AuthDto, id: string): Promise<void> {
     await this.requireAccess({ auth, permission: Permission.TagDelete, ids: [id] });
 
-    // TODO sync tag changes for affected assets
-
+    const assetIds = await this.tagRepository.getAssetIdsByTagId(id);
     await this.tagRepository.delete(id);
+    await this.syncAssetTags(assetIds);
   }
 
   async bulkTagAssets(auth: AuthDto, dto: TagBulkAssetsDto): Promise<TagBulkAssetsResponseDto> {
     const [tagIds, assetIds] = await Promise.all([
       this.checkAccess({ auth, permission: Permission.TagAsset, ids: dto.tagIds }),
-      this.checkAccess({ auth, permission: Permission.AssetUpdate, ids: dto.assetIds }),
+      checkAssetEditAccess(this.accessRepository, { auth, ids: dto.assetIds }),
     ]);
 
     const items: Insertable<TagAssetTable>[] = [];
@@ -116,9 +119,7 @@ export class TagService extends BaseService {
     const results = await addAssets(
       auth,
       { access: this.accessRepository, bulk: this.tagRepository },
-      // Gallery: owner-only — see the note in memory.service.ts. AssetUpdate admits space editors
-      // in this fork, which would let an editor tag another member's asset.
-      { parentId: id, assetIds: dto.ids, ownerOnly: true },
+      { parentId: id, assetIds: dto.ids, permission: Permission.AssetUpdate },
     );
 
     for (const { id: assetId, success } of results) {
@@ -170,5 +171,17 @@ export class TagService extends BaseService {
       exif: updateLockedColumns({ assetId, tags: tags.map(({ value }) => value) }),
       lockedPropertiesBehavior: 'append',
     });
+  }
+
+  private async syncAssetTags(assetIds: string[]) {
+    if (assetIds.length === 0) {
+      return;
+    }
+
+    for (const assetId of assetIds) {
+      await this.updateTags(assetId);
+    }
+
+    await this.jobRepository.queueAll(assetIds.map((id) => ({ name: JobName.SidecarWrite, data: { id } })));
   }
 }

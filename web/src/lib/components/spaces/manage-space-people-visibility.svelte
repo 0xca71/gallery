@@ -1,7 +1,11 @@
 <script lang="ts">
-  import PeopleVisibilityModal from '$lib/components/people/people-visibility-modal.svelte';
-  import type { VisibilityChange, VisibilityPerson, VisibilitySaveResult } from '$lib/components/people/people-types';
-  import { createUrl } from '$lib/utils';
+  import type {
+    VisibilityChange,
+    VisibilityPerson,
+    VisibilitySaveResult,
+  } from '#lib/components/people/people-types.ts';
+  import PeopleVisibilityModal from '#lib/components/people/people-visibility-modal.svelte';
+  import { getSpacePersonThumbnailUrl } from '#lib/utils/global-person-route.ts';
   import { updateSpacePerson, type SharedSpacePersonResponseDto } from '@immich/sdk';
 
   interface Props {
@@ -20,9 +24,7 @@
     people.map((person) => ({
       id: person.id,
       displayName: person.name || '',
-      thumbnailUrl: createUrl(`/shared-spaces/${spaceId}/people/${person.id}/thumbnail`, {
-        updatedAt: person.updatedAt,
-      }),
+      thumbnailUrl: getSpacePersonThumbnailUrl(person),
       isHidden: person.isHidden,
       type: person.type,
       // `species` has no shared-space equivalent — SharedSpacePersonResponseDto carries only `type`.

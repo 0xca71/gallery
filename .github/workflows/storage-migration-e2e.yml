@@ -1,12 +1,19 @@
 name: Storage Migration E2E
 on:
+  # Automatic runs disabled for this standalone private fork.
   workflow_dispatch:
-    # Disabled for personal-use CI; keep the file for easy re-enable.
+    inputs:
+      branch:
+        description: 'Branch to run against'
+        required: true
+        default: 'main'
+        type: string
 
 permissions: {}
 
 jobs:
   storage-migration-e2e:
+    if: ${{ github.repository == 'open-noodle/gallery' }}
     name: Storage Migration E2E
     runs-on: ubuntu-latest
     permissions:

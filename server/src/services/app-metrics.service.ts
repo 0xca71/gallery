@@ -2,9 +2,12 @@ import { Injectable } from '@nestjs/common';
 import { ObservableCallback, ObservableResult } from '@opentelemetry/api';
 import { OnEvent } from 'src/decorators.js';
 import { ImmichWorker } from 'src/enum.js';
+import {
+  QueueMaintenanceRepository,
+  QueueTelemetryMetrics,
+} from 'src/gallery/repositories/queue-maintenance.repository.js';
 import { AppMetricsRepository, AppMetricsSnapshot } from 'src/repositories/app-metrics.repository.js';
 import { ConfigRepository } from 'src/repositories/config.repository.js';
-import { JobRepository, QueueTelemetryMetrics } from 'src/repositories/job.repository.js';
 import { LoggingRepository } from 'src/repositories/logging.repository.js';
 import { TelemetryRepository } from 'src/repositories/telemetry.repository.js';
 
@@ -25,7 +28,7 @@ export class AppMetricsService {
     private configRepository: ConfigRepository,
     private telemetryRepository: TelemetryRepository,
     private appMetricsRepository: AppMetricsRepository,
-    private jobRepository: JobRepository,
+    private queueMaintenanceRepository: QueueMaintenanceRepository,
   ) {
     this.logger.setContext(AppMetricsService.name);
   }
@@ -164,7 +167,7 @@ export class AppMetricsService {
 
   private async refreshQueueSnapshot(): Promise<QueueTelemetryMetrics | undefined> {
     try {
-      this.queueSnapshot = await this.jobRepository.getTelemetryMetrics();
+      this.queueSnapshot = await this.queueMaintenanceRepository.getTelemetryMetrics();
     } catch (error: Error | unknown) {
       this.logger.warn(`Unable to refresh queue metrics snapshot: ${error instanceof Error ? error.message : error}`);
     } finally {

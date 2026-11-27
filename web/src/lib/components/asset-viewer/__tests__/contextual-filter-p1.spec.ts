@@ -1,54 +1,53 @@
+import { createFilterState, type FilterState } from '#lib/components/filter-panel/filter-panel.ts';
+import { reactivePageMock as mockPage } from '#lib/gallery/__mocks__/reactive-page.mock.svelte.ts';
+import { buildAlbumTimelineOptions } from '#lib/utils/album-filter-options.ts';
+import { decodeFilterParams } from '#lib/utils/filter-url.ts';
+import { buildMapTimeBucketOptions } from '#lib/utils/map-filter-options.ts';
+import { buildPhotosTimelineOptions } from '#lib/utils/photos-filter-options.ts';
+import { buildSpaceTimelineOptions } from '#lib/utils/space-filter-options.ts';
+import { factory } from '#test/unit/factories.ts';
+import { renderWithTooltips } from '#test/unit/helpers.ts';
 import { AssetOrder, AssetTypeEnum, AssetVisibility, type AlbumResponseDto, type AssetResponseDto } from '@immich/sdk';
-import '@testing-library/jest-dom';
-import { fireEvent, screen, waitFor } from '@testing-library/svelte';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { createFilterState, type FilterState } from '$lib/components/filter-panel/filter-panel';
-import { buildAlbumTimelineOptions } from '$lib/utils/album-filter-options';
-import { decodeFilterParams } from '$lib/utils/filter-url';
-import { buildMapTimeBucketOptions } from '$lib/utils/map-filter-options';
-import { buildPhotosTimelineOptions } from '$lib/utils/photos-filter-options';
-import { buildSpaceTimelineOptions } from '$lib/utils/space-filter-options';
-import { renderWithTooltips } from '$tests/helpers';
-import { assetFactory } from '@test-data/factories/asset-factory';
-import { reactivePageMock as mockPage } from '@test-data/mocks/reactive-page.mock.svelte';
+import { page } from 'vitest/browser';
 import DetailPanel from '../DetailPanel.svelte';
 
 /**
- * P1 (spec §5.6) — THE property of the whole feature:
- *
- *   > After clicking a metadata value on asset A, the resulting filtered result set CONTAINS A.
- *
- * i.e. the filter you clicked can never hide the photo you clicked it on.
- *
- * WHY THIS IS NOT "decode(encode(patch)) === patch":
- * there is no result set client-side, so the naive version of this test is a TAUTOLOGY that passes
- * for every bug it exists to catch — including R8 (a `space-person:<uuid>` token in `spacePersonIds`,
- * which the server rejects outright: 400, the whole Space timeline errors out). So this file runs the
- * REAL pipeline, end to end, and then judges the result against the SERVER'S OWN predicates:
- *
- *   the row's own patch, built by the REAL component (never re-implemented here — that is the point:
- *   an append-instead-of-replace or a wrong id shape lives in the component, and a harness that
- *   builds its own patch would never see it)
- *     → applyContextualFilter / buildContextualFilterUrl  (the real URL the click navigates to)
- *     → decodeFilterParams                                (the real hydration the destination does)
- *     → the surface's REAL options builder                (buildPhotos/Space/Album/MapTimeBucketOptions)
- *     → expectOptionsToMatchSubject                       (a mirror of withTimeBucketAssetFilters)
- *
- * The matcher mirrors `server/src/repositories/asset.repository.ts` `withTimeBucketAssetFilters`,
- * which is the ONE query behind all four surfaces' timelines:
- *   - make / model / lensModel / city / state / country / ownerId → `=`      (exact)
- *   - description / originalFileName                              → ILIKE %…% (substring)
- *   - rating                                                      → `>=`
- *   - tagIds                                                      → withAnyTagId  (ANY-OF)
- *   - personIds (hasPeople) / spacePersonIds (hasSpacePeople)     → AND (every id must be on the asset)
- *   - albumId                                                     → inner join album_asset
- *   - takenAfter <= asset.localDateTime <= takenBefore
- *
- * And `expectServerIdShapes` mirrors `time-bucket.dto.ts`'s zod: every id the query carries must be
- * the shape the server accepts, or the request is a 400 rather than a wrong result. `spacePersonIds`
- * is `z.array(z.uuidv4())` — a BARE uuid — while `personIds` is the only field that takes a scoped
- * token. That single assertion is what catches R8.
- */
+P1 (spec §5.6) — THE property of the whole feature:
+
+  > After clicking a metadata value on asset A, the resulting filtered result set CONTAINS A.
+
+i.e. the filter you clicked can never hide the photo you clicked it on.
+
+WHY THIS IS NOT "decode(encode(patch)) === patch":
+there is no result set client-side, so the naive version of this test is a TAUTOLOGY that passes
+for every bug it exists to catch — including R8 (a `space-person:<uuid>` token in `spacePersonIds`,
+which the server rejects outright: 400, the whole Space timeline errors out). So this file runs the
+REAL pipeline, end to end, and then judges the result against the SERVER'S OWN predicates:
+
+  the row's own patch, built by the REAL component (never re-implemented here — that is the point:
+  an append-instead-of-replace or a wrong id shape lives in the component, and a harness that
+  builds its own patch would never see it)
+    → applyContextualFilter / buildContextualFilterUrl  (the real URL the click navigates to)
+    → decodeFilterParams                                (the real hydration the destination does)
+    → the surface's REAL options builder                (buildPhotos/Space/Album/MapTimeBucketOptions)
+    → expectOptionsToMatchSubject                       (a mirror of withTimeBucketAssetFilters)
+
+The matcher mirrors `server/src/gallery/utils/time-bucket-filter.ts` `withTimeBucketAssetFilters`,
+which is the ONE query behind all four surfaces' timelines:
+  - make / model / lensModel / city / state / country / ownerId → `=`      (exact)
+  - description / originalFileName                              → ILIKE %…% (substring)
+  - rating                                                      → `>=`
+  - tagIds                                                      → withAnyTagId  (ANY-OF)
+  - personIds (hasPeople) / spacePersonIds (hasSpacePeople)     → AND (every id must be on the asset)
+  - albumId                                                     → inner join album_asset
+  - takenAfter <= asset.localDateTime <= takenBefore
+
+And `expectServerIdShapes` mirrors `time-bucket.dto.ts`'s zod: every id the query carries must be
+the shape the server accepts, or the request is a 400 rather than a wrong result. `spacePersonIds`
+is `z.array(z.uuidv4())` — a BARE uuid — while `personIds` is the only field that takes a scoped
+token. That single assertion is what catches R8.
+*/
 
 const { gotoMock, getAllAlbumsMock, getAssetInfoMock, faceManagerMock, zoomImageToBase64Mock } = vi.hoisted(() => ({
   gotoMock: vi.fn().mockResolvedValue(undefined),
@@ -67,15 +66,21 @@ vi.mock('@immich/sdk', async (importOriginal) => {
   return { ...actual, getAllAlbums: getAllAlbumsMock, getAssetInfo: getAssetInfoMock };
 });
 
-vi.mock('$app/navigation', () => ({ goto: gotoMock }));
+vi.mock('$app/navigation', async () => ({
+  ...(await import('#test/unit/mocks/app-navigation.ts')),
+  goto: gotoMock,
+}));
 
 vi.mock('$app/state', async () => {
-  const { reactivePageMock } = await import('@test-data/mocks/reactive-page.mock.svelte');
-  return { page: reactivePageMock };
+  const { reactivePageMock } = await import('#lib/gallery/__mocks__/reactive-page.mock.svelte.ts');
+  return { ...(await import('#test/unit/mocks/app-state.svelte.ts')), page: reactivePageMock };
 });
 
-vi.mock('$lib/stores/face.svelte', () => ({ faceManager: faceManagerMock }));
-vi.mock('$lib/utils/people-utils', () => ({ zoomImageToBase64: zoomImageToBase64Mock }));
+vi.mock('#lib/stores/face.svelte.js', () => ({ faceManager: faceManagerMock }));
+vi.mock('#lib/utils/people-utils.ts', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('#lib/utils/people-utils.ts')>()),
+  zoomImageToBase64: zoomImageToBase64Mock,
+}));
 
 const authManagerMock = vi.hoisted(() => ({
   authenticated: true,
@@ -85,9 +90,9 @@ const authManagerMock = vi.hoisted(() => ({
   preferences: { tags: { enabled: true }, ratings: { enabled: true } },
 }));
 
-vi.mock('$lib/managers/auth-manager.svelte', () => ({ authManager: authManagerMock }));
+vi.mock('#lib/managers/auth-manager.svelte.js', () => ({ authManager: authManagerMock }));
 
-vi.mock('$lib/managers/asset-viewer-manager.svelte', () => ({
+vi.mock('#lib/managers/asset-viewer-manager.svelte.js', () => ({
   assetViewerManager: {
     clearHighlightedFaces: vi.fn(),
     closeDetailPanel: vi.fn(),
@@ -105,22 +110,22 @@ vi.mock('$lib/managers/asset-viewer-manager.svelte', () => ({
   },
 }));
 
-vi.mock('$lib/managers/feature-flags-manager.svelte', () => ({
+vi.mock('#lib/managers/feature-flags-manager.svelte.js', () => ({
   featureFlagsManager: { value: { map: false, smartSearch: false, search: false, trash: true } },
 }));
 
-vi.mock('$lib/components/shared-components/map/Map.svelte', async () => {
-  const { default: MockComponent } = await import('@test-data/mocks/map-component.stub.svelte');
+vi.mock('#lib/components/shared-components/map/Map.svelte', async () => {
+  const { default: MockComponent } = await import('#lib/gallery/__mocks__/map-component.stub.svelte');
   return { default: MockComponent };
 });
 
-vi.mock('$lib/components/shared-components/UserAvatar.svelte', async () => {
-  const { default: MockComponent } = await import('@test-data/mocks/noop-component.svelte');
+vi.mock('#lib/components/shared-components/UserAvatar.svelte', async () => {
+  const { default: MockComponent } = await import('#lib/gallery/__mocks__/noop-component.svelte');
   return { default: MockComponent };
 });
 
-vi.mock('$lib/components/asset-viewer/AlbumListItemDetails.svelte', async () => {
-  const { default: MockComponent } = await import('@test-data/mocks/noop-component.svelte');
+vi.mock('#lib/components/asset-viewer/AlbumListItemDetails.svelte', async () => {
+  const { default: MockComponent } = await import('#lib/gallery/__mocks__/noop-component.svelte');
   return { default: MockComponent };
 });
 
@@ -172,19 +177,19 @@ const SPACE_PERSON = {
 } as unknown as NonNullable<AssetResponseDto['people']>[number];
 
 /**
- * The one asset every row is clicked on: a SHARED-SPACE asset (owned by someone else, in a space I
- * am a member of). That is deliberate — it is the only fixture on which every row, INCLUDING the
- * person row, renders an affordance on all four surfaces, and it is the exact shape R8 is about: the
- * same person must go out as a bare `spacePersonId` inside the Space and as a `space-person:` token
- * on /photos.
- *
- * E14 — the date fixture is the plan's: 01:00 on 1 Jan in Auckland is 31 Dec in UTC, and
- * `localDateTime` is the naive local wall clock stamped `Z` (what the server buckets on). A patch
- * derived from anything but the DISPLAYED day (a UTC re-bucketing, or fileCreatedAt) yields
- * 2025-12-31, whose day range then excludes this asset's own localDateTime → P1 goes red.
- */
+The one asset every row is clicked on: a SHARED-SPACE asset (owned by someone else, in a space I
+am a member of). That is deliberate — it is the only fixture on which every row, INCLUDING the
+person row, renders an affordance on all four surfaces, and it is the exact shape R8 is about: the
+same person must go out as a bare `spacePersonId` inside the Space and as a `space-person:` token
+on /photos.
+
+E14 — the date fixture is the plan's: 01:00 on 1 Jan in Auckland is 31 Dec in UTC, and
+`localDateTime` is the naive local wall clock stamped `Z` (what the server buckets on). A patch
+derived from anything but the DISPLAYED day (a UTC re-bucketing, or fileCreatedAt) yields
+2025-12-31, whose day range then excludes this asset's own localDateTime → P1 goes red.
+*/
 const buildSubjectAsset = (): AssetResponseDto =>
-  assetFactory.build({
+  factory.asset({
     id: 'a5e70000-0000-4000-8000-00000000000f',
     ownerId: ASSET_OWNER_ID,
     owner: OWNER,
@@ -230,11 +235,11 @@ const CURRENT_ALBUM = {
 const OTHER_ALBUM = albumDto(OTHER_ALBUM_ID, 'Iceland');
 
 /**
- * The asset as the SERVER sees it — the ground truth the emitted query is judged against. Kept
- * separate from the DTO because the people a row renders come from two different places (the
- * asset's own `people` for a shared-space asset, `faceManager` for an owned one), while the server
- * only ever sees `asset_face.personId` / `shared_space_person_face.personId`.
- */
+The asset as the SERVER sees it — the ground truth the emitted query is judged against. Kept
+separate from the DTO because the people a row renders come from two different places (the
+asset's own `people` for a shared-space asset, `faceManager` for an owned one), while the server
+only ever sees `asset_face.personId` / `shared_space_person_face.personId`.
+*/
 type Subject = {
   asset: AssetResponseDto;
   personIds: string[];
@@ -249,12 +254,12 @@ const SCOPED_PERSON_TOKEN = new RegExp(`^(?:${UUID_SOURCE}|person:${UUID_SOURCE}
 const asArray = (value: unknown): string[] => (Array.isArray(value) ? (value as string[]) : []);
 
 /**
- * Step 3 of P1 — THE ASSERTION THAT CATCHES R8.
- *
- * Mirrors time-bucket.dto.ts's zod. A wrong id shape here is not a wrong result set, it is a **400**:
- * `spacePersonIds` is `z.array(z.uuidv4())`, so a `space-person:<uuid>` token there makes the Space
- * timeline error out entirely. `personIds` is the only field that accepts the scoped token.
- */
+Step 3 of P1 — THE ASSERTION THAT CATCHES R8.
+
+Mirrors time-bucket.dto.ts's zod. A wrong id shape here is not a wrong result set, it is a **400**:
+`spacePersonIds` is `z.array(z.uuidv4())`, so a `space-person:<uuid>` token there makes the Space
+timeline error out entirely. `personIds` is the only field that accepts the scoped token.
+*/
 function expectServerIdShapes(options: Record<string, unknown>) {
   for (const id of asArray(options.spacePersonIds)) {
     expect(id, `spacePersonIds is z.array(z.uuidv4()) — a bare uuid, never a scoped token`).toMatch(BARE_UUID);
@@ -273,10 +278,10 @@ function expectServerIdShapes(options: Record<string, unknown>) {
 }
 
 /**
- * P1 itself: run the SERVER'S predicates over the source asset and require it to survive them.
- * Every key the query can carry is checked, so a row that quietly emits a foreign value (a different
- * album, a person that is not on the asset, tomorrow's date) fails here.
- */
+P1 itself: run the SERVER'S predicates over the source asset and require it to survive them.
+Every key the query can carry is checked, so a row that quietly emits a foreign value (a different
+album, a person that is not on the asset, tomorrow's date) fails here.
+*/
 function expectOptionsToMatchSubject(options: Record<string, unknown>, subject: Subject) {
   const { asset } = subject;
   const exif = asset.exifInfo ?? {};
@@ -405,14 +410,15 @@ const SURFACES: Surface[] = [
 ];
 
 const filterUrlFromClick = async (label: string | RegExp) => {
-  await fireEvent.click(await screen.findByLabelText(label));
+  await page.getByLabelText(label, { exact: true }).click();
   expect(gotoMock).toHaveBeenCalledTimes(1);
   return gotoMock.mock.calls[0][0] as string;
 };
 
 const filterUrlFromLink = async (label: string | RegExp) => {
-  const link = await screen.findByLabelText(label);
-  const href = link.getAttribute('href');
+  const link = page.getByLabelText(label, { exact: true });
+  await expect.element(link).toBeInTheDocument();
+  const href = link.element().getAttribute('href');
   expect(href).toBeTruthy();
   return href as string;
 };
@@ -512,7 +518,7 @@ describe.each(SURFACES)(
 
       mockPage.reset(surface.url);
 
-      renderWithTooltips(DetailPanel, { asset: subject.asset, currentAlbum: CURRENT_ALBUM });
+      await renderWithTooltips(DetailPanel, { asset: subject.asset, currentAlbum: CURRENT_ALBUM });
 
       const url = await row.filterUrl();
 
@@ -547,12 +553,12 @@ describe('P1 — the album surface withholds the album filter rather than lying 
     const surface = SURFACES.find((s) => s.label === 'an album')!;
     mockPage.reset(surface.url);
 
-    renderWithTooltips(DetailPanel, { asset: subject.asset, currentAlbum: CURRENT_ALBUM });
+    await renderWithTooltips(DetailPanel, { asset: subject.asset, currentAlbum: CURRENT_ALBUM });
 
     // The album cards still render — they navigate. Only the filter affordance is withheld.
-    await waitFor(() => expect(screen.getByText('Iceland')).toBeInTheDocument());
-    expect(screen.queryByLabelText('filter_by_album: Iceland')).not.toBeInTheDocument();
-    expect(screen.queryByLabelText(`filter_by_album: ${CURRENT_ALBUM.albumName}`)).not.toBeInTheDocument();
+    await expect.element(page.getByText('Iceland')).toBeInTheDocument();
+    await expect.element(page.getByLabelText('filter_by_album: Iceland')).not.toBeInTheDocument();
+    await expect.element(page.getByLabelText(`filter_by_album: ${CURRENT_ALBUM.albumName}`)).not.toBeInTheDocument();
   });
 });
 
@@ -562,7 +568,7 @@ describe('P1 under merge semantics (§5.6, E25)', () => {
   it('preserves an unrelated active filter the asset also satisfies', async () => {
     mockPage.reset(`${spaceSurface.url}?make=Canon`);
 
-    renderWithTooltips(DetailPanel, { asset: subject.asset, currentAlbum: CURRENT_ALBUM });
+    await renderWithTooltips(DetailPanel, { asset: subject.asset, currentAlbum: CURRENT_ALBUM });
 
     const url = await filterUrlFromClick(`filter_by_location: ${CITY}`);
     const options = optionsFor(spaceSurface, url);
@@ -573,15 +579,15 @@ describe('P1 under merge semantics (§5.6, E25)', () => {
   });
 
   /**
-   * E25 — array patches REPLACE, they never append. This is the case where P1 itself does the work:
-   * `spacePersonIds` (and `personIds`) are AND-ed server-side, so an APPENDING person patch keeps the
-   * already-active person — who is not on this asset — in the query, and the asset drops out of the
-   * very filter that was clicked on it.
-   */
+  E25 — array patches REPLACE, they never append. This is the case where P1 itself does the work:
+  `spacePersonIds` (and `personIds`) are AND-ed server-side, so an APPENDING person patch keeps the
+  already-active person — who is not on this asset — in the query, and the asset drops out of the
+  very filter that was clicked on it.
+  */
   it('E25: a person click REPLACES an active person filter (appending would AND in a stranger)', async () => {
     mockPage.reset(`${spaceSurface.url}?people=${OTHER_SPACE_PERSON_ID}`);
 
-    renderWithTooltips(DetailPanel, { asset: subject.asset, currentAlbum: CURRENT_ALBUM });
+    await renderWithTooltips(DetailPanel, { asset: subject.asset, currentAlbum: CURRENT_ALBUM });
 
     const url = await filterUrlFromLink(`filter_by_person: ${PERSON_NAME}`);
     const options = optionsFor(spaceSurface, url);
@@ -594,15 +600,15 @@ describe('P1 under merge semantics (§5.6, E25)', () => {
   });
 
   /**
-   * The tag half of E25 needs its own assertion rather than leaning on P1: `tagIds` is ANY-OF
-   * server-side (withAnyTagId), so an appended tag cannot by itself evict the asset from its own
-   * filter — but it still silently widens a filter the user asked to be narrowed, and it makes two
-   * adjacent rows of the same panel move the result set in opposite directions.
-   */
+  The tag half of E25 needs its own assertion rather than leaning on P1: `tagIds` is ANY-OF
+  server-side (withAnyTagId), so an appended tag cannot by itself evict the asset from its own
+  filter — but it still silently widens a filter the user asked to be narrowed, and it makes two
+  adjacent rows of the same panel move the result set in opposite directions.
+  */
   it('E25: a tag click REPLACES an active tag filter rather than appending to it', async () => {
     mockPage.reset(`${spaceSurface.url}?tags=${OTHER_TAG_ID}`);
 
-    renderWithTooltips(DetailPanel, { asset: subject.asset, currentAlbum: CURRENT_ALBUM });
+    await renderWithTooltips(DetailPanel, { asset: subject.asset, currentAlbum: CURRENT_ALBUM });
 
     const url = await filterUrlFromLink('filter_by_tag: holiday/2026');
     const options = optionsFor(spaceSurface, url);
@@ -613,20 +619,20 @@ describe('P1 under merge semantics (§5.6, E25)', () => {
 });
 
 /**
- * The other half of the person story (R8): an OWN person on an OWN asset. There is no space person
- * to scope to, so the query carries the `person:<uuid>` token — and P1 says that uuid has to be one
- * the asset actually has a face for.
- *
- * The token is scoped rather than bare so it matches what `getPhotosPersonFilterId` derives for the
- * same person, which is what the chip's `personNames` map and the panel's people options are keyed
- * by; the server accepts both forms.
- */
+The other half of the person story (R8): an OWN person on an OWN asset. There is no space person
+to scope to, so the query carries the `person:<uuid>` token — and P1 says that uuid has to be one
+the asset actually has a face for.
+
+The token is scoped rather than bare so it matches what `getPhotosPersonFilterId` derives for the
+same person, which is what the chip's `personNames` map and the panel's people options are keyed
+by; the server accepts both forms.
+*/
 describe('P1 — an own person on an own asset', () => {
   const ownedSurfaces = SURFACES.filter((s) => s.label === '/photos' || s.label === 'an album');
 
   beforeEach(() => {
     subject = {
-      asset: assetFactory.build({
+      asset: factory.asset({
         ...buildSubjectAsset(),
         ownerId: VIEWER_ID,
         resolvedSpaceId: undefined,
@@ -644,7 +650,7 @@ describe('P1 — an own person on an own asset', () => {
   it.each(ownedSurfaces)('carries the scoped person token on $label', async (surface) => {
     mockPage.reset(surface.url);
 
-    renderWithTooltips(DetailPanel, { asset: subject.asset, currentAlbum: CURRENT_ALBUM });
+    await renderWithTooltips(DetailPanel, { asset: subject.asset, currentAlbum: CURRENT_ALBUM });
 
     const url = await filterUrlFromLink(`filter_by_person: ${PERSON_NAME}`);
     const options = optionsFor(surface, url);

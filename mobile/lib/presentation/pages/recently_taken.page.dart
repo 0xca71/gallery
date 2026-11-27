@@ -1,5 +1,6 @@
 import 'package:auto_route/auto_route.dart';
 import 'package:flutter/widgets.dart';
+import 'package:immich_mobile/gallery/search/search_scope.dart';
 import 'package:immich_mobile/generated/translations.g.dart';
 import 'package:immich_mobile/presentation/widgets/timeline/timeline.widget.dart';
 import 'package:immich_mobile/presentation/widgets/timeline/timeline_route_scope.dart';
@@ -10,8 +11,6 @@ import 'package:immich_mobile/widgets/common/mesmerizing_sliver_app_bar.dart';
 @RoutePage()
 class RecentlyTakenPage extends StatelessWidget {
   const RecentlyTakenPage({super.key});
-
-  static const timelineOverviewControlsEnabled = true;
 
   @override
   Widget build(BuildContext context) {
@@ -24,6 +23,7 @@ class RecentlyTakenPage extends StatelessWidget {
 
         return ref.watch(timelineFactoryProvider).remoteAssets(user.id, groupBy: groupBy, temporalScope: scope);
       },
+      search: const RecentlyTakenSearchScope(),
       child: Timeline(withGroupingPill: true, appBar: MesmerizingSliverAppBar(title: context.t.recently_taken)),
     );
   }

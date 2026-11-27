@@ -1,30 +1,42 @@
 <script lang="ts">
-  import { page } from '$app/state';
-  import HeaderActionButton from '$lib/components/HeaderActionButton.svelte';
-  import OnEvents from '$lib/components/OnEvents.svelte';
-  import { authManager } from '$lib/managers/auth-manager.svelte';
-  import { Route } from '$lib/route';
-  import { getAssetActions } from '$lib/services/asset.service';
-  import { removeTag } from '$lib/utils/asset-utils';
-  import { buildContextualFilterUrl } from '$lib/utils/filter-target';
+  import HeaderActionButton from '#lib/components/HeaderActionButton.svelte';
+  import OnEvents from '#lib/components/OnEvents.svelte';
+  import { authManager } from '#lib/managers/auth-manager.svelte.ts';
+  import { Route } from '#lib/route.ts';
+  import { getAssetActions } from '#lib/services/asset.service.ts';
+  import { removeTag } from '#lib/utils/asset-utils.ts';
+  import { buildContextualFilterUrl } from '#lib/utils/filter-target.ts';
   import { getAssetInfo, type AssetResponseDto } from '@immich/sdk';
   import { Badge, IconButton, Link, Text } from '@immich/ui';
   import { mdiOpenInNew } from '@mdi/js';
   import { t } from 'svelte-i18n';
+  import { page } from '$app/state';
 
   interface Props {
     asset: AssetResponseDto;
     isOwner: boolean;
     /**
-     * R4/E2 — false on a shared link, where there is no timeline to filter. Threaded from
-     * DetailPanel exactly like `isOwner`. (Tags are already shared-link-suppressed by the section
-     * gate below; this is belt-and-braces.)
-     */
+    #734: widens the ADD-tag affordance to a space editor. Per-tag REMOVE stays gated on the
+    real `isOwner` below — not because removal always 403s for an editor (it doesn't:
+    `TagService.removeAssets` passes `canAlwaysRemove: Permission.TagDelete`, and
+    `asset.util.ts:81-85` short-circuits the per-asset check for the caller's OWN tags, so an
+    editor removing a tag they added themselves succeeds today). The real reason is that
+    `TagResponseDto` carries no `userId`, so the client cannot tell which tags on this asset are
+    the caller's own versus the owner's, and offering remove on all of them would fail on the
+    owner's. Defaults to `isOwner` so every call site keeps today's behavior unless it
+    explicitly widens editability.
+    */
+    canEdit?: boolean;
+    /**
+    R4/E2 — false on a shared link, where there is no timeline to filter. Threaded from
+    DetailPanel exactly like `isOwner`. (Tags are already shared-link-suppressed by the section
+    gate below; this is belt-and-braces.)
+    */
     canFilter?: boolean;
     spaceId?: string;
   }
 
-  let { asset = $bindable(), isOwner, canFilter = false, spaceId }: Props = $props();
+  let { asset = $bindable(), isOwner, canEdit = isOwner, canFilter = false, spaceId }: Props = $props();
   let effectiveSpaceId = $derived(spaceId || asset.resolvedSpaceId);
 
   let tags = $derived(asset.tags || []);
@@ -48,11 +60,12 @@
 <OnEvents {onAssetsTag} />
 
 <!--
-  Tags are read-only metadata: anyone with read access to the asset sees them (#796). Only the
-  edit affordances below (per-tag remove, "add tag") stay owner-gated. Non-owners with no tags to
-  show get no empty section; the owner keeps it so the "add tag" affordance is always reachable.
+  Tags are read-only metadata: anyone with read access to the asset sees them (#796). Per-tag
+  remove stays owner-gated below; "add tag" is gated on `canEdit` (#734: a space editor can add).
+  Non-owner non-editors with no tags to show get no empty section; an owner or editor keeps it so
+  the "add tag" affordance is always reachable.
 -->
-{#if !authManager.isSharedLink && (isOwner || tags.length > 0)}
+{#if !authManager.isSharedLink && (isOwner || canEdit || tags.length > 0)}
   <section class="mt-4 px-4">
     <div class="flex h-10 w-full items-center justify-between text-sm">
       <Text color="muted">{$t('tags')}</Text>
@@ -74,7 +87,7 @@
           -->
           {#if canFilter}
             <Link
-              href={buildContextualFilterUrl(page.url, { tagIds: [tag.id] })}
+              href={buildContextualFilterUrl(new URL(page.url.href), { tagIds: [tag.id] })}
               aria-label="{$t('filter_by_tag')}: {tag.value}"
               underline={false}
               class="px-2 font-light"
@@ -97,7 +110,7 @@
           {/if}
         </Badge>
       {/each}
-      {#if isOwner}
+      {#if canEdit}
         <HeaderActionButton action={Tag} />
       {/if}
     </section>

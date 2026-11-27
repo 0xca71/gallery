@@ -1,35 +1,55 @@
 <script lang="ts">
-  import { onMount, untrack } from 'svelte';
-  import { t } from 'svelte-i18n';
-  import type { AssetResponseDto } from '@immich/sdk';
-  import { Button, LoadingSpinner } from '@immich/ui';
-  import { Route } from '$lib/route';
-  import { handleError } from '$lib/utils/handle-error';
-  import { randomSeedManager } from '$lib/managers/random-seed-manager.svelte';
+  import LoadingSpinner from '#lib/components/shared-components/LoadingSpinner.svelte';
+  import { libraryViewOptions } from '#lib/gallery/library-view/library-view.svelte.ts';
+  import { randomSeedManager } from '#lib/managers/random-seed-manager.svelte.ts';
+  import { Route } from '#lib/route.ts';
   import {
-    buildRandomSearchFilter,
+    buildRandomSearchQuery,
     defaultRandomFilter,
     isRandomExhausted,
     loadRandomBatch,
     loadRandomTotal,
     mergeUniqueAssets,
-  } from '$lib/utils/explore-random';
+    type RandomFilterState,
+    type RandomSearchQuery,
+  } from '#lib/utils/explore-random.ts';
+  import { handleError } from '#lib/utils/handle-error.ts';
+  import { AssetVisibility, type AssetResponseDto } from '@immich/sdk';
+  import { Button } from '@immich/ui';
+  import { onMount, untrack } from 'svelte';
+  import { t } from 'svelte-i18n';
   import ExploreAssetRow from './ExploreAssetRow.svelte';
   import RandomFilterControls from './RandomFilterControls.svelte';
+
+  const initialScope: RandomSearchQuery = {};
+  const initialFilter = $state(defaultRandomFilter());
 
   let {
     full = false,
     onselect,
     viewerAssetId,
     onassetschange,
+    scope = initialScope,
+    filter = $bindable(initialFilter),
   }: {
     full?: boolean;
+    scope?: RandomSearchQuery;
+    filter?: RandomFilterState;
     onselect: (assets: AssetResponseDto[], asset: AssetResponseDto) => void;
     viewerAssetId?: string;
     onassetschange?: (assets: AssetResponseDto[]) => void;
   } = $props();
 
-  let filter = $state(defaultRandomFilter());
+  const activeScope = $derived({
+    visibility: AssetVisibility.Timeline,
+    withSharedSpaces: true,
+    ...libraryViewOptions(),
+    ...scope,
+  });
+  const scopeKey = $derived(JSON.stringify(activeScope));
+  const query = $derived(buildRandomSearchQuery(filter, activeScope));
+  const queryKey = $derived(JSON.stringify(query));
+  let mounted = $state(false);
   let assets = $state<AssetResponseDto[]>([]);
   let loading = $state(false);
   let failed = $state(false);
@@ -44,42 +64,52 @@
   let viewerLoadAttempt: string | undefined;
 
   async function refresh() {
-    if (loading) {
-      return;
-    }
     controller?.abort();
     controller = new AbortController();
     const { signal } = controller;
     loading = true;
     failed = false;
     assets = [];
+    onassetschange?.(assets);
     total = null;
     exhausted = false;
     autoLoadPaused = false;
     viewerLoadAttempt = undefined;
 
     try {
-      const query = buildRandomSearchFilter(filter);
       if (full) {
-        const seed = randomSeedManager.take(filter);
+        const seed = randomSeedManager.take(filter, scopeKey);
         if (seed) {
           assets = seed;
           total = await loadRandomTotal(query, signal).catch(() => null);
+          if (signal.aborted) {
+            return;
+          }
           exhausted = isRandomExhausted(assets.length, total, seed.length);
         } else {
           const [batch, matching] = await Promise.all([
             loadRandomBatch(query, signal),
             loadRandomTotal(query, signal).catch(() => null),
           ]);
+          if (signal.aborted) {
+            return;
+          }
           assets = batch;
           total = matching;
           exhausted = isRandomExhausted(assets.length, total, batch.length);
         }
       } else {
-        assets = await loadRandomBatch(query, signal, previewSize);
-        if (!signal.aborted) {
-          randomSeedManager.set(assets, filter);
+        const batch = await loadRandomBatch(query, signal, previewSize);
+        if (signal.aborted) {
+          return;
         }
+        assets = batch;
+        if (!signal.aborted) {
+          randomSeedManager.set(assets, filter, scopeKey);
+        }
+      }
+      if (!signal.aborted) {
+        onassetschange?.(assets);
       }
     } catch (error) {
       if (!signal.aborted) {
@@ -87,7 +117,9 @@
         handleError(error, $t('errors.failed_to_load_assets'));
       }
     } finally {
-      loading = false;
+      if (!signal.aborted) {
+        loading = false;
+      }
     }
   }
 
@@ -98,7 +130,7 @@
     const signal = controller.signal;
     loading = true;
     try {
-      const batch = await loadRandomBatch(buildRandomSearchFilter(filter), signal);
+      const batch = await loadRandomBatch(query, signal);
       if (signal.aborted) {
         return;
       }
@@ -113,7 +145,9 @@
         handleError(error, $t('errors.failed_to_load_assets'));
       }
     } finally {
-      loading = false;
+      if (!signal.aborted) {
+        loading = false;
+      }
     }
   }
 
@@ -163,8 +197,15 @@
     untrack(() => void loadMore());
   });
 
+  $effect(() => {
+    void queryKey;
+    if (mounted) {
+      untrack(() => void refresh());
+    }
+  });
+
   onMount(() => {
-    void refresh();
+    mounted = true;
     return () => controller?.abort();
   });
 </script>

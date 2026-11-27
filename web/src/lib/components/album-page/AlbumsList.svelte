@@ -1,34 +1,25 @@
 <script lang="ts">
-  import AlbumCardGroup from '$lib/components/album-page/AlbumCardGroup.svelte';
-  import AlbumsTable from '$lib/components/album-page/AlbumsTable.svelte';
-  import OnEvents from '$lib/components/OnEvents.svelte';
-  import MenuOption from '$lib/components/shared-components/context-menu/MenuOption.svelte';
-  import RightClickContextMenu from '$lib/components/shared-components/context-menu/RightClickContextMenu.svelte';
-  import { authManager } from '$lib/managers/auth-manager.svelte';
-  import AlbumEditModal from '$lib/modals/AlbumEditModal.svelte';
-  import AlbumOptionsModal from '$lib/modals/AlbumOptionsModal.svelte';
-  import { handleDeleteAlbum, handleDownloadAlbum } from '$lib/services/album.service';
+  import AlbumCardGroup from '#lib/components/album-page/AlbumCardGroup.svelte';
+  import AlbumsTable from '#lib/components/album-page/AlbumsTable.svelte';
+  import { authManager } from '#lib/managers/auth-manager.svelte.ts';
+  import { handleDeleteAlbum, isAlbumOwner } from '#lib/services/album.service.ts';
   import {
     AlbumFilter,
     AlbumGroupBy,
     AlbumSortBy,
     AlbumViewMode,
-    locale,
     SortOrder,
+    locale,
     type AlbumViewSettings,
-  } from '$lib/stores/preferences.store';
+  } from '#lib/stores/preferences.store.ts';
   import {
     getSelectedAlbumGroupOption,
-    isAlbumEditor,
     sortAlbums,
     stringToSortOrder,
     type AlbumGroup,
-  } from '$lib/utils/album-utils';
-  import type { ContextMenuPosition } from '$lib/utils/context-menu';
-  import { normalizeSearchString } from '$lib/utils/string-utils';
-  import { AlbumUserRole, type AlbumResponseDto, type SharedLinkResponseDto } from '@immich/sdk';
-  import { modalManager } from '@immich/ui';
-  import { mdiDeleteOutline, mdiDownload, mdiRenameOutline, mdiShareVariantOutline } from '@mdi/js';
+  } from '#lib/utils/album-utils.ts';
+  import { normalizeSearchString } from '#lib/utils/string-utils.ts';
+  import { type AlbumResponseDto } from '@immich/sdk';
   import { groupBy } from 'lodash-es';
   import { onMount, type Snippet } from 'svelte';
   import { t } from 'svelte-i18n';
@@ -45,8 +36,8 @@
   }
 
   let {
-    ownedAlbums = $bindable([]),
-    sharedAlbums = $bindable([]),
+    ownedAlbums = [],
+    sharedAlbums = [],
     searchQuery = '',
     userSettings,
     allowEdit = false,
@@ -62,7 +53,7 @@
 
   const groupOptions: AlbumGroupOption = {
     /** No grouping */
-    [AlbumGroupBy.None]: (order, albums): AlbumGroup[] => {
+    [AlbumGroupBy.None]: (_, albums): AlbumGroup[] => {
       return [
         {
           id: $t('albums'),
@@ -136,10 +127,7 @@
         return sharedAlbums;
       }
       default: {
-        const nonOwnedAlbums = sharedAlbums.filter(
-          (album) =>
-            album.albumUsers.find(({ user: { id } }) => id === authManager.user.id)?.role !== AlbumUserRole.Owner,
-        );
+        const nonOwnedAlbums = sharedAlbums.filter((album) => !isAlbumOwner(album));
         return nonOwnedAlbums.length > 0 ? ownedAlbums.concat(nonOwnedAlbums) : ownedAlbums;
       }
     }
@@ -167,27 +155,10 @@
     }));
   });
 
-  let contextMenuPosition: ContextMenuPosition = $state({ x: 0, y: 0 });
-  let selectedAlbum: AlbumResponseDto | undefined = $state();
-  let isOpen = $state(false);
-
   // TODO get rid of this
   $effect(() => {
     albumGroupIds = groupedAlbums.map(({ id }) => id);
   });
-
-  // Editing follows the server's Permission.AlbumUpdate (owner ∪ editor). Delete stays
-  // owner-only because Permission.AlbumDelete is. Share stays owner-only because this menu
-  // has always gated it that way — the server's Permission.AlbumShare is actually owner ∪
-  // editor, so the UI is deliberately the stricter of the two, and widening it is not this
-  // change's business. `allowEdit` gates all of them — only /albums passes it, and a list
-  // that opted out of editing must not sprout an Edit entry.
-  let canEditSelectedAlbum = $derived(
-    allowEdit && !!selectedAlbum && isAlbumEditor(selectedAlbum, authManager.user.id),
-  );
-  let isSelectedAlbumOwner = $derived(
-    allowEdit && !!selectedAlbum && selectedAlbum.albumUsers[0].user.id === authManager.user.id,
-  );
 
   onMount(async () => {
     if (allowEdit) {
@@ -195,124 +166,27 @@
     }
   });
 
-  const showAlbumContextMenu = (contextMenuDetail: ContextMenuPosition, album: AlbumResponseDto) => {
-    selectedAlbum = album;
-    contextMenuPosition = {
-      x: contextMenuDetail.x,
-      y: contextMenuDetail.y,
-    };
-    isOpen = true;
-  };
-
-  const closeAlbumContextMenu = () => {
-    isOpen = false;
-  };
-
-  const handleSelect = async (action: 'edit' | 'share' | 'download' | 'delete') => {
-    closeAlbumContextMenu();
-
-    if (!selectedAlbum) {
-      return;
-    }
-
-    switch (action) {
-      case 'edit': {
-        await modalManager.show(AlbumEditModal, { album: selectedAlbum });
-        break;
-      }
-
-      case 'share': {
-        await modalManager.show(AlbumOptionsModal, { album: selectedAlbum });
-        break;
-      }
-
-      case 'download': {
-        await handleDownloadAlbum(selectedAlbum);
-        break;
-      }
-
-      case 'delete': {
-        await handleDeleteAlbum(selectedAlbum);
-        break;
-      }
-    }
-  };
-
   const removeAlbumsIfEmpty = async () => {
     const albumsToRemove = ownedAlbums.filter((album) => album.assetCount === 0 && !album.albumName);
     await Promise.allSettled(albumsToRemove.map((album) => handleDeleteAlbum(album, { prompt: false, notify: false })));
   };
-
-  const findAndUpdate = (albums: AlbumResponseDto[], album: AlbumResponseDto) => {
-    const target = albums.find(({ id }) => id === album.id);
-    if (target) {
-      Object.assign(target, album);
-    }
-
-    return albums;
-  };
-
-  const onAlbumUpdate = (album: AlbumResponseDto) => {
-    ownedAlbums = findAndUpdate(ownedAlbums, album);
-    sharedAlbums = findAndUpdate(sharedAlbums, album);
-  };
-
-  const onAlbumDelete = (album: AlbumResponseDto) => {
-    ownedAlbums = ownedAlbums.filter(({ id }) => id !== album.id);
-    sharedAlbums = sharedAlbums.filter(({ id }) => id !== album.id);
-  };
-
-  const onSharedLinkCreate = (sharedLink: SharedLinkResponseDto) => {
-    if (sharedLink.album) {
-      onAlbumUpdate(sharedLink.album);
-    }
-  };
 </script>
-
-<OnEvents {onAlbumUpdate} {onAlbumDelete} {onSharedLinkCreate} />
 
 {#if albums.length > 0}
   {#if userSettings.view === AlbumViewMode.Cover}
     <!-- Album Cards -->
     {#if albumGroupOption === AlbumGroupBy.None}
-      <AlbumCardGroup
-        albums={groupedAlbums[0].albums}
-        {showOwner}
-        showDateRange
-        showItemCount
-        onShowContextMenu={showAlbumContextMenu}
-      />
+      <AlbumCardGroup albums={groupedAlbums[0].albums} {showOwner} showDateRange showItemCount />
     {:else}
       {#each groupedAlbums as albumGroup (albumGroup.id)}
-        <AlbumCardGroup
-          albums={albumGroup.albums}
-          group={albumGroup}
-          {showOwner}
-          showDateRange
-          showItemCount
-          onShowContextMenu={showAlbumContextMenu}
-        />
+        <AlbumCardGroup albums={albumGroup.albums} group={albumGroup} {showOwner} showDateRange showItemCount />
       {/each}
     {/if}
   {:else if userSettings.view === AlbumViewMode.List}
     <!-- Album Table -->
-    <AlbumsTable {groupedAlbums} {albumGroupOption} onShowContextMenu={showAlbumContextMenu} />
+    <AlbumsTable {groupedAlbums} {albumGroupOption} />
   {/if}
 {:else}
   <!-- Empty Message -->
   {@render empty?.()}
 {/if}
-
-<!-- Context Menu -->
-<RightClickContextMenu title={$t('album_options')} {...contextMenuPosition} {isOpen} onClose={closeAlbumContextMenu}>
-  {#if canEditSelectedAlbum}
-    <MenuOption icon={mdiRenameOutline} text={$t('edit_album')} onClick={() => handleSelect('edit')} />
-  {/if}
-  {#if isSelectedAlbumOwner}
-    <MenuOption icon={mdiShareVariantOutline} text={$t('share')} onClick={() => handleSelect('share')} />
-  {/if}
-  <MenuOption icon={mdiDownload} text={$t('download')} onClick={() => handleSelect('download')} />
-  {#if isSelectedAlbumOwner}
-    <MenuOption icon={mdiDeleteOutline} text={$t('delete')} onClick={() => handleSelect('delete')} />
-  {/if}
-</RightClickContextMenu>

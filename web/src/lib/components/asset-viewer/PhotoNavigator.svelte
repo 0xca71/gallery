@@ -1,12 +1,11 @@
 <script lang="ts">
-  import { assetViewerManager } from '$lib/managers/asset-viewer-manager.svelte';
-  import { mediaQueryManager } from '$lib/stores/media-query-manager.svelte';
-  import { navigatorViewport, panToNavigatorPoint } from '$lib/utils/zoom-geometry';
-  import { scaleToFit, type Size } from '$lib/utils/container-utils';
-  import { swapsDimensions } from '$lib/utils/zoom-geometry';
+  import { assetViewerManager } from '#lib/managers/asset-viewer-manager.svelte.ts';
+  import { mediaQueryManager } from '#lib/stores/media-query-manager.svelte.ts';
+  import { scaleToFit, type Size } from '#lib/utils/container-utils.ts';
+  import { navigatorViewport, panToNavigatorPoint, swapsDimensions } from '#lib/utils/zoom-geometry.ts';
+  import { onDestroy } from 'svelte';
   import { t } from 'svelte-i18n';
   import { fade } from 'svelte/transition';
-  import { onDestroy } from 'svelte';
 
   let {
     image,

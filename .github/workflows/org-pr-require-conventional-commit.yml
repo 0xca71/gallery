@@ -2,10 +2,11 @@ name: PR Conventional Commit
 
 on:
   workflow_dispatch:
-    # Disabled for personal-use CI; keep the file for easy re-enable.
+    # Automatic runs disabled for this standalone private fork.
 
 jobs:
   validate-pr-title:
+    if: ${{ github.repository == 'immich-app/immich' }}
     name: Validate PR Title (conventional commit)
     uses: immich-app/devtools/.github/workflows/shared-pr-require-conventional-commit.yml@f852dea251d00397830d83977184b6551e84589c # main
     permissions:

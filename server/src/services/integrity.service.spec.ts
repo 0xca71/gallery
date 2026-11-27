@@ -1,7 +1,4 @@
-import { S3StorageBackend } from 'src/backends/s3-storage.backend.js';
-import { JobStatus } from 'src/enum.js';
 import { IntegrityService } from 'src/services/integrity.service.js';
-import { StorageService } from 'src/services/storage.service.js';
 import { ServiceMocks, newTestService } from 'test/utils.js';
 
 describe(IntegrityService.name, () => {
@@ -14,6 +11,35 @@ describe(IntegrityService.name, () => {
 
   it('should work', () => {
     expect(sut).toBeDefined();
+  });
+
+  describe('handleUntrackedFiles', () => {
+    const decomposedPath = '/data/upload/upload/user-id/Cafe\u{301}.jpg';
+    const composedPath = '/data/upload/upload/user-id/Caf\u{E9}.jpg';
+
+    beforeEach(() => {
+      mocks.integrityReport.getAssetPathsByPaths.mockResolvedValue([]);
+      mocks.integrityReport.getPersonThumbnailPathsByPaths.mockResolvedValue([]);
+    });
+
+    it.each([
+      { scannedPath: decomposedPath, storedPath: composedPath },
+      { scannedPath: composedPath, storedPath: decomposedPath },
+    ])(
+      'should not report a tracked asset whose path differs only by unicode normalization',
+      async ({ scannedPath, storedPath }) => {
+        mocks.integrityReport.getAssetPathsByPaths.mockResolvedValue([
+          { originalPath: storedPath, encodedVideoPath: null },
+        ]);
+
+        await sut.handleUntrackedFiles({ type: 'asset', paths: [scannedPath] });
+
+        expect(mocks.integrityReport.getAssetPathsByPaths).toHaveBeenCalledWith(
+          expect.arrayContaining([decomposedPath, composedPath]),
+        );
+        expect(mocks.integrityReport.create).not.toHaveBeenCalled();
+      },
+    );
   });
 
   describe('handleUntrackedRefresh', () => {
@@ -76,27 +102,6 @@ describe(IntegrityService.name, () => {
 
       expect(mocks.storage.unlink).toHaveBeenCalledExactlyOnceWith(untracked);
       expect(mocks.integrityReport.deleteByIds).toHaveBeenCalledWith(['tracked-report', 'untracked-report']);
-    });
-  });
-
-  describe('S3 backend guard (open-noodle/gallery#685)', () => {
-    afterEach(() => {
-      vitest.restoreAllMocks();
-    });
-
-    it('skips scan jobs when an S3 backend is configured', async () => {
-      vitest.spyOn(StorageService, 'getS3Backend').mockReturnValue({} as S3StorageBackend);
-
-      await expect(sut.handleMissingFilesQueueAll()).resolves.toBe(JobStatus.Skipped);
-      await expect(sut.handleUntrackedFilesQueueAll()).resolves.toBe(JobStatus.Skipped);
-      await expect(sut.handleChecksumFiles()).resolves.toBe(JobStatus.Skipped);
-      expect(mocks.storage.walk).not.toHaveBeenCalled();
-    });
-
-    it('does not skip when no S3 backend is configured', () => {
-      vitest.spyOn(StorageService, 'getS3Backend').mockReturnValue(void 0);
-
-      expect(sut['skipIfS3Configured']()).toBe(false);
     });
   });
 

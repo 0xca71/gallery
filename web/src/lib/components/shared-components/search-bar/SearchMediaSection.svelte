@@ -1,8 +1,8 @@
 <script lang="ts">
-  import { MediaType } from '$lib/constants';
+  import { MediaType } from '#lib/constants.ts';
+  import { searchManager } from '#lib/managers/search-manager.svelte.ts';
   import { Text } from '@immich/ui';
   import { t } from 'svelte-i18n';
-  import { searchManager } from '$lib/managers/search-manager.svelte';
   import SearchButton from './SearchButton.svelte';
 
   let filteredMedia = $derived(searchManager.filter.mediaType);
@@ -33,13 +33,6 @@
         onclick={() => (searchManager.filter.mediaType = MediaType.Video)}
       >
         {$t('video')}
-      </SearchButton>
-      <SearchButton
-        checked
-        active={filteredMedia === MediaType.LivePhoto}
-        onclick={() => (searchManager.filter.mediaType = MediaType.LivePhoto)}
-      >
-        {$t('live_photo')}
       </SearchButton>
     </div>
   </fieldset>

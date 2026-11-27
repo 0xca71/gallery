@@ -3,16 +3,6 @@ import { createHash } from 'node:crypto';
 import { basename } from 'node:path';
 import { Readable, Writable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
-import type { ArgOf } from 'src/repositories/event.repository.js';
-import type {
-  IIntegrityDeleteReportTypeJob,
-  IIntegrityDeleteReportsJob,
-  IIntegrityJob,
-  IIntegrityMissingFilesJob,
-  IIntegrityPathWithChecksumJob,
-  IIntegrityPathWithReportJob,
-  IIntegrityUntrackedFilesJob,
-} from 'src/types.js';
 import { JOBS_LIBRARY_PAGINATION_SIZE } from 'src/constants.js';
 import { StorageCore } from 'src/cores/storage.core.js';
 import { OnEvent, OnJob } from 'src/decorators.js';
@@ -33,55 +23,47 @@ import {
   StorageFolder,
   SystemMetadataKey,
 } from 'src/enum.js';
+import type { ArgOf } from 'src/repositories/event.repository.js';
 import { BaseService } from 'src/services/base.service.js';
-import { StorageService } from 'src/services/storage.service.js';
+import type {
+  IIntegrityDeleteReportTypeJob,
+  IIntegrityDeleteReportsJob,
+  IIntegrityJob,
+  IIntegrityMissingFilesJob,
+  IIntegrityPathWithChecksumJob,
+  IIntegrityPathWithReportJob,
+  IIntegrityUntrackedFilesJob,
+} from 'src/types.js';
 import { ImmichFileResponse } from 'src/utils/file.js';
 import { batched, handlePromiseError } from 'src/utils/misc.js';
 
 /**
- * Untracked Files:
- *   Files are detected in /data/encoded-video, /data/library, /data/upload
- *     Checked against the asset table
- *   Files are detected in /data/thumbs
- *     Checked against the asset_file table
- *
- *   * Can perform download or delete of files
- *
- * Missing Files:
- *   Paths are queried from asset(originalPath, encodedVideoPath), asset_file(path)
- *     Check whether files exist on disk
- *
- *   * Reports must include origin (asset or asset_file) & ID for further action
- *   * Can perform trash (asset) or delete (asset_file)
- *
- * Checksum Mismatch:
- *   Paths & checksums are queried from asset(originalPath, checksum)
- *     Check whether files match checksum, missing files ignored
- *
- *   * Reports must include origin (as above) for further action
- *   * Can perform download or trash (asset)
- */
+Untracked Files:
+  Files are detected in /data/encoded-video, /data/library, /data/upload
+    Checked against the asset table
+  Files are detected in /data/thumbs
+    Checked against the asset_file table
+
+Can perform download or delete of files
+
+Missing Files:
+  Paths are queried from asset(originalPath, encodedVideoPath), asset_file(path)
+    Check whether files exist on disk
+
+Reports must include origin (asset or asset_file) & ID for further action
+Can perform trash (asset) or delete (asset_file)
+
+Checksum Mismatch:
+  Paths & checksums are queried from asset(originalPath, checksum)
+    Check whether files match checksum, missing files ignored
+
+Reports must include origin (as above) for further action
+Can perform download or trash (asset)
+*/
 
 @Injectable()
 export class IntegrityService extends BaseService {
   private integrityLock = false;
-
-  /**
-   * Integrity checks read the filesystem directly (stat/walk/read streams) and are not yet
-   * S3-aware — on instances with an S3 storage backend they would report every S3-stored
-   * file as missing or corrupt, and "resolving" those false reports trashes healthy assets.
-   * Skip all integrity scan jobs whenever an S3 backend is configured, including mixed
-   * disk+S3 setups mid-migration. Tracked in https://github.com/open-noodle/gallery/issues/685.
-   */
-  private skipIfS3Configured(): boolean {
-    if (StorageService.getS3Backend()) {
-      this.logger.warn(
-        'Skipping integrity check job: an S3 storage backend is configured and integrity checks are not yet S3-aware (open-noodle/gallery#685).',
-      );
-      return true;
-    }
-    return false;
-  }
 
   @OnEvent({ name: 'ConfigInit', workers: [ImmichWorker.Microservices] })
   async onConfigInit({
@@ -237,10 +219,6 @@ export class IntegrityService extends BaseService {
 
   @OnJob({ name: JobName.IntegrityUntrackedFilesQueueAll, queue: QueueName.IntegrityCheck })
   async handleUntrackedFilesQueueAll({ refreshOnly }: IIntegrityJob = {}): Promise<JobStatus> {
-    if (this.skipIfS3Configured()) {
-      return JobStatus.Skipped;
-    }
-
     await this.queueRefreshAllUntrackedFiles();
 
     if (refreshOnly) {
@@ -295,53 +273,57 @@ export class IntegrityService extends BaseService {
 
   @OnJob({ name: JobName.IntegrityUntrackedFiles, queue: QueueName.IntegrityCheck })
   async handleUntrackedFiles({ type, paths }: IIntegrityUntrackedFilesJob): Promise<JobStatus> {
-    if (this.skipIfS3Configured()) {
-      return JobStatus.Skipped;
-    }
-
     this.logger.log(`Processing batch of ${paths.length} files to check if they are untracked.`);
 
-    const untrackedFiles = new Set<string>(paths);
+    const lookupPaths = [...new Set(paths.flatMap((path) => [path, path.normalize('NFC'), path.normalize('NFD')]))];
+
+    const trackedPaths = new Set<string>();
     if (type === 'asset') {
-      const assets = await this.integrityRepository.getAssetPathsByPaths(paths);
+      const assets = await this.integrityRepository.getAssetPathsByPaths(lookupPaths);
       for (const { originalPath, encodedVideoPath } of assets) {
-        untrackedFiles.delete(originalPath);
+        trackedPaths.add(originalPath.normalize('NFC'));
 
         if (encodedVideoPath) {
-          untrackedFiles.delete(encodedVideoPath);
+          trackedPaths.add(encodedVideoPath.normalize('NFC'));
         }
       }
     } else {
-      const assets = await this.integrityRepository.getAssetFilePathsByPaths(paths);
+      const assets = await this.integrityRepository.getAssetFilePathsByPaths(lookupPaths);
       for (const { path } of assets) {
-        untrackedFiles.delete(path);
+        trackedPaths.add(path.normalize('NFC'));
       }
     }
 
-    const personThumbnailPaths = await this.integrityRepository.getPersonThumbnailPathsByPaths(paths);
+    const personThumbnailPaths = await this.integrityRepository.getPersonThumbnailPathsByPaths(lookupPaths);
     for (const { thumbnailPath } of personThumbnailPaths) {
-      untrackedFiles.delete(thumbnailPath);
+      trackedPaths.add(thumbnailPath.normalize('NFC'));
     }
 
-    if (untrackedFiles.size > 0) {
+    for (const { path } of await this.getGalleryThumbnailFolderPaths(lookupPaths)) {
+      trackedPaths.add(path.normalize('NFC'));
+    }
+
+    for (const { path } of await this.dataSaverVideoRepository.getPathsByPaths(lookupPaths)) {
+      trackedPaths.add(path.normalize('NFC'));
+    }
+
+    const untrackedFiles = [...new Set(paths)].filter((path) => !trackedPaths.has(path.normalize('NFC')));
+
+    if (untrackedFiles.length > 0) {
       await this.integrityRepository.create(
-        [...untrackedFiles].map((path) => ({
+        untrackedFiles.map((path) => ({
           type: IntegrityReport.UntrackedFile,
           path,
         })),
       );
     }
 
-    this.logger.log(`Processed ${paths.length} and found ${untrackedFiles.size} untracked file(s).`);
+    this.logger.log(`Processed ${paths.length} and found ${untrackedFiles.length} untracked file(s).`);
     return JobStatus.Success;
   }
 
   @OnJob({ name: JobName.IntegrityUntrackedFilesRefresh, queue: QueueName.IntegrityCheck })
   async handleUntrackedRefresh({ items }: IIntegrityPathWithReportJob): Promise<JobStatus> {
-    if (this.skipIfS3Configured()) {
-      return JobStatus.Skipped;
-    }
-
     this.logger.log(`Processing batch of ${items.length} reports to check if they are out of date.`);
 
     const tracked =
@@ -397,10 +379,6 @@ export class IntegrityService extends BaseService {
 
   @OnJob({ name: JobName.IntegrityMissingFilesQueueAll, queue: QueueName.IntegrityCheck })
   async handleMissingFilesQueueAll({ refreshOnly }: IIntegrityJob = {}): Promise<JobStatus> {
-    if (this.skipIfS3Configured()) {
-      return JobStatus.Skipped;
-    }
-
     if (refreshOnly) {
       await this.queueRefreshAllMissingFiles();
       return JobStatus.Success;
@@ -428,10 +406,6 @@ export class IntegrityService extends BaseService {
 
   @OnJob({ name: JobName.IntegrityMissingFiles, queue: QueueName.IntegrityCheck })
   async handleMissingFiles({ items }: IIntegrityMissingFilesJob): Promise<JobStatus> {
-    if (this.skipIfS3Configured()) {
-      return JobStatus.Skipped;
-    }
-
     this.logger.log(`Processing batch of ${items.length} files to check if they are missing.`);
 
     const results = await Promise.all(
@@ -471,10 +445,6 @@ export class IntegrityService extends BaseService {
 
   @OnJob({ name: JobName.IntegrityMissingFilesRefresh, queue: QueueName.IntegrityCheck })
   async handleMissingRefresh({ items: paths }: IIntegrityPathWithReportJob): Promise<JobStatus> {
-    if (this.skipIfS3Configured()) {
-      return JobStatus.Skipped;
-    }
-
     this.logger.log(`Processing batch of ${paths.length} reports to check if they are out of date.`);
 
     const results = await Promise.all(
@@ -570,10 +540,6 @@ export class IntegrityService extends BaseService {
 
   @OnJob({ name: JobName.IntegrityChecksumFiles, queue: QueueName.IntegrityCheck })
   async handleChecksumFiles({ refreshOnly }: IIntegrityJob = {}): Promise<JobStatus> {
-    if (this.skipIfS3Configured()) {
-      return JobStatus.Skipped;
-    }
-
     if (refreshOnly) {
       await this.queueRefreshAllChecksumFiles();
       return JobStatus.Success;
@@ -646,10 +612,6 @@ export class IntegrityService extends BaseService {
 
   @OnJob({ name: JobName.IntegrityChecksumFilesRefresh, queue: QueueName.IntegrityCheck })
   async handleChecksumRefresh({ items: paths }: IIntegrityPathWithChecksumJob): Promise<JobStatus> {
-    if (this.skipIfS3Configured()) {
-      return JobStatus.Skipped;
-    }
-
     this.logger.log(`Processing batch of ${paths.length} reports to check if they are out of date.`);
 
     const results = await Promise.all(

@@ -1,17 +1,18 @@
 <script lang="ts">
-  import { Button, Icon, Modal, ModalBody, ModalFooter } from '@immich/ui';
-  import { mdiChevronLeft, mdiChevronRight } from '@mdi/js';
-  import { DateTime } from 'luxon';
-  import { locale, t } from 'svelte-i18n';
-  import { dateFormats } from '$lib/constants';
-  import { getContentMetrics, type ContentMetrics } from '$lib/utils/container-utils';
+  import type { FacePhotoFace } from '#lib/components/face-cleanup/face-photo.ts';
+  import { dateFormats } from '#lib/constants.ts';
+  import { frameAroundFace } from '#lib/gallery/utils/face-frame.ts';
+  import { getContentMetrics, type ContentMetrics } from '#lib/utils/container-utils.ts';
   import {
     clampFaceBoxToImage,
     getAdminFacePreviewUrl,
     getBoundingBox,
     isUsableFaceBox,
-  } from '$lib/utils/people-utils';
-  import type { FacePhotoFace } from '$lib/components/face-cleanup/face-photo';
+  } from '#lib/utils/people-utils.ts';
+  import { Button, Icon, Modal, ModalBody, ModalFooter } from '@immich/ui';
+  import { mdiChevronLeft, mdiChevronRight } from '@mdi/js';
+  import { DateTime } from 'luxon';
+  import { locale, t } from 'svelte-i18n';
 
   // #1061: a 250px face crop cannot separate two similar-looking children. This shows the SOURCE PHOTO with
   // the detection boxed, through the admin-gated preview route — never /photos/{assetId}, which enforces
@@ -26,10 +27,10 @@
     /** Current selection state of a face. Omit (with onToggleSelect) to render no selection control at all. */
     isSelected?: (assetFaceId: string) => boolean;
     /**
-     * Whether a face may be ADDED to the selection. Defaults to always. The rest-of-cluster grid's gate is
-     * asymmetric — a staged face can always be removed, but a new one can only be added once a valid
-     * destination is chosen — so this governs adding only; removing is never blocked.
-     */
+    Whether a face may be ADDED to the selection. Defaults to always. The rest-of-cluster grid's gate is
+    asymmetric — a staged face can always be removed, but a new one can only be added once a valid
+    destination is chosen — so this governs adding only; removing is never blocked.
+    */
     canSelect?: (assetFaceId: string) => boolean;
     onToggleSelect?: (assetFaceId: string) => void;
   }
@@ -59,7 +60,7 @@
     if (!metrics || !isUsableFaceBox(face)) {
       return null;
     }
-    return getBoundingBox([{ id: face.assetFaceId, ...clampFaceBoxToImage(face) }], metrics)[0] ?? null;
+    return frameAroundFace(getBoundingBox([{ id: face.assetFaceId, ...clampFaceBoxToImage(face) }], metrics)[0]);
   });
 
   // Luxon directly rather than fromISODateTimeUTC: that helper casts to `DateTime<true>`, which erases the
@@ -92,8 +93,9 @@
            (container − img)/2, so a box positioned from the outer div's edge lands offset on any photo whose
            aspect ratio doesn't fill the row (portrait previews inside this modal's ~728px body). This inner
            div is a flex item sized to its own content (the img), so it and the img share one coordinate
-           origin — see PersonSuggestionReviewModal.svelte for the same shrink-wrap principle. -->
-      <div class="relative">
+           origin — see PersonSuggestionReviewModal.svelte for the same shrink-wrap principle. It also clips, so
+           the frame around a face at the photo's edge, and its dimming, stop at the photo. -->
+      <div class="relative overflow-hidden">
         <img
           src={getAdminFacePreviewUrl(face.assetFaceId)}
           alt=""
@@ -105,7 +107,7 @@
           <!-- Only the CLICKED face is boxed. The console holds no data for the other people in the frame, and
                one box answers the question the admin is actually asking. -->
           <div
-            class="pointer-events-none absolute rounded-sm border-2 border-primary shadow-[0_0_0_9999px_rgba(0,0,0,0.35)]"
+            class="pointer-events-none absolute rounded-sm shadow-[0_0_0_9999px_rgba(0,0,0,0.35)] outline-2 outline-primary"
             style="top: {box.top}px; left: {box.left}px; width: {box.width}px; height: {box.height}px;"
             data-testid="face-photo-box"
           ></div>

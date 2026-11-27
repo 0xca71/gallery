@@ -6,8 +6,6 @@ import 'package:immich_mobile/repositories/api.repository.dart';
 import 'package:immich_mobile/services/api.service.dart';
 import 'package:openapi/api.dart';
 
-enum Direction { sharedWithMe, sharedByMe }
-
 final partnerApiRepositoryProvider = Provider((ref) => PartnerApiRepository(ref.watch(apiServiceProvider)));
 
 class PartnerApiRepository extends ApiRepository {

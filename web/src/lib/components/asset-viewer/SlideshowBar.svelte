@@ -1,10 +1,10 @@
 <script lang="ts">
-  import { shortcuts, type ShortcutOptions } from '$lib/actions/shortcut';
-  import ProgressBar from '$lib/components/shared-components/progress-bar/ProgressBar.svelte';
-  import { ProgressBarStatus } from '$lib/constants';
-  import { languageManager } from '$lib/managers/language-manager.svelte';
-  import SlideshowSettingsModal from '$lib/modals/SlideshowSettingsModal.svelte';
-  import { SlideshowNavigation, SlideshowState, slideshowStore } from '$lib/stores/slideshow.store';
+  import { shortcuts, type ShortcutOptions } from '#lib/actions/shortcut.ts';
+  import ProgressBar from '#lib/components/shared-components/progress-bar/ProgressBar.svelte';
+  import { ProgressBarStatus } from '#lib/constants.ts';
+  import { languageManager } from '#lib/managers/language-manager.svelte.ts';
+  import SlideshowSettingsModal from '#lib/modals/SlideshowSettingsModal.svelte';
+  import { SlideshowNavigation, SlideshowState, slideshowStore } from '#lib/stores/slideshow.store.ts';
   import { AssetTypeEnum } from '@immich/sdk';
   import { IconButton, modalManager } from '@immich/ui';
   import { mdiChevronLeft, mdiChevronRight, mdiClose, mdiCog, mdiPause, mdiPlay } from '@mdi/js';
@@ -22,8 +22,15 @@
 
   let { assetType, onNext = () => {}, onPrevious = () => {}, onClose = () => {} }: Props = $props();
 
-  const { restartProgress, stopProgress, slideshowDelay, showProgressBar, slideshowNavigation, slideshowState } =
-    slideshowStore;
+  const {
+    restartProgress,
+    stopProgress,
+    slideshowDelay,
+    showProgressBar,
+    slideshowNavigation,
+    slideshowState,
+    slideshowAutoplay,
+  } = slideshowStore;
 
   let progressBarStatus: ProgressBarStatus | undefined = $state();
   let progressBar = $state<ReturnType<typeof ProgressBar>>();
@@ -31,6 +38,7 @@
   let timer: NodeJS.Timeout;
   let isOverControls = $state(false);
   const isVideoSlide = $derived(assetType === AssetTypeEnum.Video);
+  const showPlayPause = $derived(!isVideoSlide && $slideshowAutoplay);
 
   let unsubscribeRestart: () => void;
   let unsubscribeStop: () => void;
@@ -129,7 +137,7 @@
     ];
 
     // For videos, allow the native HTML5 element to handle space for play/pause
-    if (!isVideoSlide) {
+    if (showPlayPause) {
       bindings.push({
         shortcut: { key: ' ' },
         onShortcut: togglePause,
@@ -163,7 +171,7 @@
       aria-label={$t('exit_slideshow')}
     />
 
-    {#if !isVideoSlide}
+    {#if showPlayPause}
       <IconButton
         variant="ghost"
         shape="round"

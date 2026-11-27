@@ -1,17 +1,14 @@
-import { getAllAlbums } from '@immich/sdk';
-import { authenticate } from '$lib/utils/auth';
-import { getFormatter } from '$lib/utils/i18n';
+import { getAllAlbumsQuery } from '#lib/queries/album.query.ts';
+import { queryClient } from '#lib/queries/client.ts';
+import { authenticate } from '#lib/utils/auth.ts';
+import { getFormatter } from '#lib/utils/i18n.ts';
 import type { PageLoad } from './$types';
 
 export const load = (async ({ url }) => {
   await authenticate(url);
-  const sharedAlbums = await getAllAlbums({ isShared: true });
-  const albums = await getAllAlbums({ isOwned: true });
-  const $t = await getFormatter();
+  const [, $t] = await Promise.all([queryClient.query({ ...getAllAlbumsQuery(), staleTime: 0 }), getFormatter()]);
 
   return {
-    albums,
-    sharedAlbums,
     meta: {
       title: $t('albums'),
     },

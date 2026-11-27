@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:immich_mobile/gallery/space_badge_setting.dart';
 import 'package:immich_mobile/generated/translations.g.dart';
 import 'package:immich_mobile/providers/app_settings.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/settings.provider.dart';
@@ -16,6 +17,7 @@ class AssetListSettings extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final storageIndicator = useValueNotifier(ref.watch(appConfigProvider.select((s) => s.timeline.storageIndicator)));
+    final smoothScrubbing = useValueNotifier(ref.watch(appConfigProvider.select((s) => s.timeline.smoothScrubbing)));
 
     final assetListSetting = [
       SettingsSwitchListTile(
@@ -27,6 +29,17 @@ class AssetListSettings extends HookConsumerWidget {
           ref.invalidate(settingsProvider);
         },
       ),
+      SettingsSwitchListTile(
+        valueNotifier: smoothScrubbing,
+        title: context.t.theme_setting_asset_list_smooth_scrubbing_title,
+        subtitle: context.t.theme_setting_asset_list_smooth_scrubbing_subtitle,
+        onChanged: (value) {
+          unawaited(ref.read(settingsProvider).write(.timelineSmoothScrubbing, value));
+          ref.invalidate(appSettingsServiceProvider);
+          ref.invalidate(settingsProvider);
+        },
+      ),
+      const SpaceBadgeSettingTile(),
       const LayoutSettings(),
       const GroupSettings(),
     ];

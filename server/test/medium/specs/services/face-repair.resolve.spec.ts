@@ -1,8 +1,10 @@
 import { BadRequestException, ConflictException } from '@nestjs/common';
-import { Kysely } from 'kysely';
+import { Kysely, sql } from 'kysely';
 import { randomUUID } from 'node:crypto';
 import { vi } from 'vitest';
 import { JobName, SourceType } from 'src/enum.js';
+import { FaceSearchRepository } from 'src/gallery/repositories/face-search.repository.js';
+import { GalleryPersonRepository } from 'src/gallery/repositories/gallery-person.repository.js';
 import { ConfigRepository } from 'src/repositories/config.repository.js';
 import { DatabaseRepository } from 'src/repositories/database.repository.js';
 import { FaceIdentityRepository } from 'src/repositories/face-identity.repository.js';
@@ -40,6 +42,7 @@ const setup = () => {
       FacePersonVerdictRepository,
       FaceIdentityRepository,
       SearchRepository,
+      FaceSearchRepository,
       PersonRepository,
       ConfigRepository,
       DatabaseRepository,
@@ -157,6 +160,11 @@ const seedFacesBulk = async (ctx: Ctx, ownerId: string, personId: string, count:
       .values(searchRows.slice(index, index + 1000))
       .execute();
   }
+  // Refresh the planner's statistics, as autovacuum would after a bulk load. The template database records
+  // asset_face as known-empty (reltuples = 0, left by an index created on the empty table), so a plan
+  // cached on a pooled connection by an earlier test assumes it is still empty and scans it once per
+  // flagged face: about 4 s locally and past the 30 s timeout on CI. ANALYZE also invalidates those plans.
+  await sql`analyze asset, asset_face, face_search`.execute(db);
   return faces.map((face) => face.id);
 };
 
@@ -2341,13 +2349,13 @@ describe('FaceRepairService.resolveFaces: move-lock survives a later person merg
 
     // dest is later merged away into dest2 (mergePersonProfile unconditionally sets the target's identityId,
     // which FKs to face_identity — seed a real row so the merge doesn't fail on an unrelated FK violation).
-    const personRepository = ctx.get(PersonRepository);
+    const galleryPersonRepository = ctx.get(GalleryPersonRepository);
     const identity = await db
       .insertInto('face_identity')
       .values({ type: 'person' })
       .returningAll()
       .executeTakeFirstOrThrow();
-    await personRepository.mergePersonProfile({
+    await galleryPersonRepository.mergePersonProfile({
       sourcePersonId: dest.personGroupId,
       targetPersonId: dest2.personGroupId,
       targetIdentityId: identity.id,

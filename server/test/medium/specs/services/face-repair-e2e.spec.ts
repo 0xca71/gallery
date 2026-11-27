@@ -1,6 +1,7 @@
 import { Kysely } from 'kysely';
 import { Mocked } from 'vitest';
 import { AssetVisibility, JobName, SourceType } from 'src/enum.js';
+import { FaceSearchRepository } from 'src/gallery/repositories/face-search.repository.js';
 import { AccessRepository } from 'src/repositories/access.repository.js';
 import { ConfigRepository } from 'src/repositories/config.repository.js';
 import { DatabaseRepository } from 'src/repositories/database.repository.js';
@@ -62,6 +63,7 @@ const setupRepair = (db: Kysely<DB>) => {
       FaceRepairDeclineRepository,
       FacePersonVerdictRepository,
       SearchRepository,
+      FaceSearchRepository,
       PersonRepository,
       FaceIdentityRepository,
       ConfigRepository,
@@ -89,6 +91,7 @@ const setupPerson = (db: Kysely<DB>) => {
       FaceIdentityRepository,
       PersonRepository,
       SearchRepository,
+      FaceSearchRepository,
       SharedSpaceRepository,
     ],
     mock: [JobRepository, LoggingRepository, SystemMetadataRepository],
@@ -108,11 +111,12 @@ const buildLinkedCluster = async (
   ctx: ReturnType<typeof setupRepair>['ctx'],
   ownerId: string,
   embedding: string,
+  // eslint-disable-next-line unicorn/no-unnecessary-parameters
   faceCount: number,
-  name?: string,
+  name = '',
 ) => {
   const faceIdentityRepo = ctx.get(FaceIdentityRepository);
-  const { person } = await ctx.newPerson({ ownerId, name: name ?? '' });
+  const { person } = await ctx.newPerson({ ownerId, name });
   const identity = await faceIdentityRepo.ensurePersonIdentity(person.personGroupId);
   const faceIds: string[] = [];
   for (let index = 0; index < faceCount; index++) {

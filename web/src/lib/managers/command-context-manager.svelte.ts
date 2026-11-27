@@ -1,3 +1,7 @@
+import { authManager } from '#lib/managers/auth-manager.svelte.ts';
+import type { TimelineAsset } from '#lib/managers/timeline-manager/types.ts';
+import type { OnArchive, OnDelete, OnFavorite, OnUndoDelete } from '#lib/utils/actions.ts';
+import { isAlbumsRoute, isSpacesRoute } from '#lib/utils/navigation.ts';
 import {
   AlbumUserRole,
   AssetVisibility,
@@ -7,10 +11,6 @@ import {
   type SharedSpaceResponseDto,
 } from '@immich/sdk';
 import { page } from '$app/state';
-import { authManager } from '$lib/managers/auth-manager.svelte';
-import type { TimelineAsset } from '$lib/managers/timeline-manager/types';
-import type { OnArchive, OnDelete, OnFavorite, OnUndoDelete } from '$lib/utils/actions';
-import { isAlbumsRoute, isSpacesRoute } from '$lib/utils/navigation';
 
 export interface AlbumContext {
   id: string;
@@ -53,6 +53,19 @@ export interface SelectionCommandContext {
   isAllFavorite: boolean;
   isAllArchived: boolean;
   isAllTrashed: boolean;
+  /**
+  Which of `selectedAssetIds` the caller may edit (#734). `undefined` means not yet
+  resolved — a consumer should hide the affected actions until it resolves, rather than
+  popping them in late. An all-owned selection resolves synchronously, without a request.
+  
+  Always `undefined` on this context: nothing today gates on `canEditMetadata` /
+  `canSetVisibility` off the cmdk-driven `CommandContext.selection`
+  (`selection-command-handlers.ts` only gates favorite/archive/delete, which stay
+  `isAllUserOwned`-only) — resolving it here would be dead work. The real consumer is
+  `SelectionToolbar.svelte`, which builds its own `SelectionCommandContext` (see that
+  component's header comment) and resolves this field itself.
+  */
+  editableSelectedAssetIds: string[] | undefined;
   clearSelection: () => void;
   onFavorite?: OnFavorite;
   onArchive?: OnArchive;
@@ -113,12 +126,12 @@ class CommandContextManager {
   }
 
   /**
-   * Snapshot read at provider-run time. Pure; no side effects.
-   *
-   * Album/space are gated by the current route id so a stale context left
-   * behind by a page unmount race can't leak verbs onto an unrelated page
-   * (e.g. album commands appearing while on a space).
-   */
+  Snapshot read at provider-run time. Pure; no side effects.
+  
+  Album/space are gated by the current route id so a stale context left
+  behind by a page unmount race can't leak verbs onto an unrelated page
+  (e.g. album commands appearing while on a space).
+  */
   getContext(): CommandContext {
     const u = authManager.authenticated ? authManager.user : null;
     const routeId = page.route.id;
@@ -160,6 +173,7 @@ class CommandContextManager {
       isAllFavorite: assets.every((asset) => asset.isFavorite),
       isAllArchived: assets.every((asset) => asset.visibility === AssetVisibility.Archive),
       isAllTrashed: assets.every((asset) => asset.isTrashed),
+      editableSelectedAssetIds: undefined,
       clearSelection: registered.options.clearSelection,
       onFavorite: registered.options.getOnFavorite?.(),
       onArchive: registered.options.getOnArchive?.(),
@@ -188,10 +202,10 @@ class CommandContextManager {
 export const commandContextManager = new CommandContextManager();
 
 /**
- * Call inside a page component's script block. Registers a reactive album
- * context derived from the page's DTO thunk, computes `isOwner` / `isMember`,
- * and clears on unmount.
- */
+Call inside a page component's script block. Registers a reactive album
+context derived from the page's DTO thunk, computes `isOwner` / `isMember`,
+and clears on unmount.
+*/
 export function registerAlbumContext(albumDto: () => AlbumResponseDto) {
   $effect(() => {
     const currentUserId = authManager.authenticated ? (authManager.user?.id ?? null) : null;
@@ -219,10 +233,10 @@ export function registerAlbumContext(albumDto: () => AlbumResponseDto) {
 }
 
 /**
- * Call inside a space page component's script block. Takes two thunks because
- * the space detail loader fetches space and members separately; `space.members`
- * on the DTO is NOT reliably populated.
- */
+Call inside a space page component's script block. Takes two thunks because
+the space detail loader fetches space and members separately; `space.members`
+on the DTO is NOT reliably populated.
+*/
 export function registerSpaceContext(
   getSpace: () => SharedSpaceResponseDto | undefined,
   getMembers: () => SharedSpaceMemberResponseDto[] | undefined,

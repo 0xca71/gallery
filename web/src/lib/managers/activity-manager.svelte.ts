@@ -1,18 +1,18 @@
+import { authManager } from '#lib/managers/auth-manager.svelte.ts';
+import { handlePromiseError } from '#lib/utils.ts';
+import { handleError } from '#lib/utils/handle-error.ts';
 import {
+  ReactionLevel,
+  ReactionType,
   createActivity,
   deleteActivity,
   getActivities,
   getActivityStatistics,
-  ReactionLevel,
-  ReactionType,
   type ActivityCreateDto,
   type ActivityResponseDto,
 } from '@immich/sdk';
 import { t } from 'svelte-i18n';
 import { get } from 'svelte/store';
-import { authManager } from '$lib/managers/auth-manager.svelte';
-import { handlePromiseError } from '$lib/utils';
-import { handleError } from '$lib/utils/handle-error';
 
 type CacheKey = string;
 type ActivityCache = {
@@ -54,8 +54,8 @@ class ActivityManager {
     return this.#isLiked;
   }
 
-  #getCacheKey(albumId: string, assetId?: string) {
-    return `${albumId}:${assetId ?? ''}`;
+  #getCacheKey(albumId: string, assetId: string = '') {
+    return `${albumId}:${assetId}`;
   }
 
   async init(albumId: string, assetId?: string) {
@@ -98,7 +98,7 @@ class ActivityManager {
     return activity;
   }
 
-  async deleteActivity(activity: ActivityResponseDto, index?: number) {
+  async deleteActivity(activity: ActivityResponseDto) {
     if (!this.#albumId) {
       return;
     }
@@ -111,9 +111,7 @@ class ActivityManager {
       this.#likeCount--;
     }
 
-    this.#activities = index
-      ? this.#activities.splice(index, 1)
-      : this.#activities.filter(({ id }) => id !== activity.id);
+    this.#activities = this.#activities.filter(({ id }) => id !== activity.id);
 
     await deleteActivity({ id: activity.id });
     this.#invalidateCache(this.#albumId, this.#assetId);

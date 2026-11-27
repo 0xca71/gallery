@@ -1,8 +1,8 @@
 <script lang="ts">
+  import { getAssetMediaUrl } from '#lib/utils.ts';
+  import { getAltText } from '#lib/utils/thumbnail-util.ts';
+  import { toTimelineAsset } from '#lib/utils/timeline-util.ts';
   import { AssetMediaSize, type AssetResponseDto } from '@immich/sdk';
-  import { getAssetMediaUrl } from '$lib/utils';
-  import { getAltText } from '$lib/utils/thumbnail-util';
-  import { toTimelineAsset } from '$lib/utils/timeline-util';
 
   let {
     assets,

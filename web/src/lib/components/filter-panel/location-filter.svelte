@@ -1,8 +1,9 @@
 <script lang="ts">
+  import { countryMatchesQuery, localizeCountry, sortCountries } from '#lib/gallery/utils/country-names.ts';
   import { Icon } from '@immich/ui';
   import { mdiChevronDown, mdiChevronRight, mdiMagnify } from '@mdi/js';
   import { onDestroy, untrack } from 'svelte';
-  import { t } from 'svelte-i18n';
+  import { locale, t } from 'svelte-i18n';
   import type { FilterContext } from './filter-panel';
 
   interface Props {
@@ -56,6 +57,8 @@
   let query = $derived(searchQuery.trim().toLowerCase());
   let searchChildren = $derived(query.length >= MIN_SEARCH_LENGTH);
   const matches = (value: string) => value.toLowerCase().includes(query);
+
+  const countryMatches = (country: string) => countryMatchesQuery(country, $locale, query);
 
   function drain() {
     while (!disposed && activeRequests < MAX_CONCURRENT_REQUESTS && queue.length > 0) {
@@ -161,12 +164,13 @@
     const state = expandedStates[country];
     const allCities = expandedAllCities[country];
     const legacy = !onStateFetch;
+    const states = cache[stateKey(country)];
     untrack(() => {
       ensure('states', country);
       if (state) {
         ensure('cities', country, state);
       }
-      if (allCities || legacy) {
+      if (allCities || legacy || states?.length === 0) {
         ensure('cities', country);
       }
     });
@@ -234,7 +238,7 @@
     const values = cache[stateKey(country)] ?? [];
     const selected = selectedCountry === country ? selectedState : undefined;
     const available = selected && !values.includes(selected) ? [...values, selected] : values;
-    if (!query || (expandedCountry === country && matches(country))) {
+    if (!query || (expandedCountry === country && countryMatches(country))) {
       return available;
     }
     return available.filter(
@@ -248,7 +252,7 @@
     const values = cache[cityKey(country, state)] ?? [];
     const selected = selectedCountry === country && selectedState === state ? selectedCity : undefined;
     const filtered =
-      !query || (expandedCountry === country && matches(country)) || (state && matches(state))
+      !query || (expandedCountry === country && countryMatches(country)) || (state && matches(state))
         ? values
         : searchChildren
           ? values.filter((city) => matches(city))
@@ -272,10 +276,10 @@
   }
 
   let filteredCountries = $derived(
-    countries.filter(
+    sortCountries(countries, $locale).filter(
       (country) =>
         !query ||
-        matches(country) ||
+        countryMatches(country) ||
         selectedCountry === country ||
         (searchChildren &&
           (statesFor(country).length > 0 || (cache[cityKey(country)] ?? []).some((city) => matches(city)))),
@@ -377,7 +381,7 @@
 {/snippet}
 
 {#snippet stateButton(country: string | undefined, state: string)}
-  {@const selected = selectedState === state && selectedCountry === country && !selectedCity}
+  {const selected = $derived(selectedState === state && selectedCountry === country && !selectedCity)}
   <button
     type="button"
     class="flex min-w-0 flex-1 items-center gap-2 rounded-lg px-2 py-1.5 text-sm hover:bg-subtle {selected
@@ -392,15 +396,13 @@
 {/snippet}
 
 {#snippet cityList(country: string, state?: string)}
-  {@const key = cityKey(country, state)}
-  {@const values = citiesFor(country, state)}
-  {@const visible = limited(
-    values,
-    key,
-    selectedCountry === country && selectedState === state ? selectedCity : undefined,
+  {const key = $derived(cityKey(country, state))}
+  {const values = $derived(citiesFor(country, state))}
+  {const visible = $derived(
+    limited(values, key, selectedCountry === country && selectedState === state ? selectedCity : undefined),
   )}
   {#each visible as city (city)}
-    {@const selected = isCitySelected(country, city, state)}
+    {const selected = $derived(isCitySelected(country, city, state))}
     <button
       type="button"
       class="-mx-2 flex w-[calc(100%+1rem)] items-center gap-2 rounded-lg px-2 py-1.5 text-sm hover:bg-subtle {state
@@ -454,11 +456,11 @@
         data-testid="location-country-{orphanedCountry}"
       >
         {@render indicator(!selectedState && !selectedCity)}<span class="flex-1 truncate text-left"
-          >{orphanedCountry}</span
+          >{localizeCountry(orphanedCountry, $locale)}</span
         >
       </button>
       {#if selectedState}<div class="ml-5">{@render stateButton(orphanedCountry, selectedState)}</div>{/if}
-      {#if selectedCity && Object.hasOwn(cache, cityKey(orphanedCountry, selectedState))}
+      {#if selectedCity}
         {@render cityList(orphanedCountry, selectedState)}
       {/if}
     {/if}
@@ -481,8 +483,8 @@
     {/if}
 
     {#each visibleCountries as country (country)}
-      {@const selected = selectedCountry === country && !selectedCity && !selectedState}
-      {@const expanded = expandedCountry === country}
+      {const selected = $derived(selectedCountry === country && !selectedCity && !selectedState)}
+      {const expanded = $derived(expandedCountry === country)}
       <div class="-mx-2 flex items-center">
         <button
           type="button"
@@ -493,15 +495,20 @@
           aria-pressed={selected}
           data-testid="location-country-{country}"
         >
-          {@render indicator(selected)}<span class="flex-1 truncate text-left">{country}</span>
+          {@render indicator(selected)}<span class="flex-1 truncate text-left">{localizeCountry(country, $locale)}</span
+          >
         </button>
-        {@render expandButton(country, expanded, `location-expand-country-${country}`, () => toggleCountry(country))}
+        {@render expandButton(localizeCountry(country, $locale), expanded, `location-expand-country-${country}`, () =>
+          toggleCountry(country),
+        )}
       </div>
       {#if expanded || (searchChildren && statesFor(country).length > 0)}
-        {@const values = statesFor(country)}
-        {@const visible = limited(values, stateKey(country), selectedCountry === country ? selectedState : undefined)}
+        {const values = $derived(statesFor(country))}
+        {const visible = $derived(
+          limited(values, stateKey(country), selectedCountry === country ? selectedState : undefined),
+        )}
         {#each visible as state (state)}
-          {@const stateExpanded = expandedStates[country] === state}
+          {const stateExpanded = $derived(expandedStates[country] === state)}
           <div class="-mx-2 ml-5 flex items-center">
             {@render stateButton(country, state)}
             {@render expandButton(state, stateExpanded, `location-expand-state-${country}-${state}`, () => {

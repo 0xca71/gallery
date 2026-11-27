@@ -1,6 +1,8 @@
 <script lang="ts">
-  import { shortcuts } from '$lib/actions/shortcut';
-  import { transformManager } from '$lib/managers/edit/transform-manager.svelte';
+  import { shortcuts } from '#lib/actions/shortcut.ts';
+  import AdjustPanel from '#lib/gallery/edit/AdjustPanel.svelte';
+  import { imageAdjustManager } from '#lib/gallery/edit/image-adjust-manager.svelte.ts';
+  import { transformManager } from '#lib/managers/edit/transform-manager.svelte.ts';
   import { Button, HStack, IconButton } from '@immich/ui';
   import { mdiFlipHorizontal, mdiFlipVertical, mdiRotateLeft, mdiRotateRight } from '@mdi/js';
   import { t } from 'svelte-i18n';
@@ -149,12 +151,18 @@
     </div>
   </div>
 
-  <div class="mt-6 flex h-10 w-full items-center justify-between text-sm">
+  <!-- Gallery: the Edit/Crop toggle and Adjust sliders; the crop heading and grid show in Crop. -->
+  <AdjustPanel />
+
+  <div
+    class="mt-6 flex h-10 w-full items-center justify-between text-sm"
+    class:hidden={imageAdjustManager.mode !== 'crop'}
+  >
     <h2>{$t('crop')}</h2>
   </div>
 
   <!-- Aspect Ratio Grid -->
-  <div class="mb-4 grid grid-cols-2">
+  <div class="mb-4 grid grid-cols-2" class:hidden={imageAdjustManager.mode !== 'crop'}>
     {#each aspectRatios as ratio (ratio.value)}
       <HStack>
         <Button

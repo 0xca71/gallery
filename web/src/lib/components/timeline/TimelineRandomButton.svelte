@@ -1,5 +1,5 @@
 <script lang="ts">
-  import LoadingSpinner from '$lib/components/shared-components/LoadingSpinner.svelte';
+  import LoadingSpinner from '#lib/components/shared-components/LoadingSpinner.svelte';
   import { Icon } from '@immich/ui';
   import { mdiShuffle } from '@mdi/js';
   import { t } from 'svelte-i18n';

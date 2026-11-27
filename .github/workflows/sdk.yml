@@ -2,12 +2,13 @@ name: Update Immich SDK
 
 on:
   workflow_dispatch:
-    # Disabled for personal-use CI; keep the file for easy re-enable.
+    # Automatic runs disabled for this standalone private fork.
 
 permissions: {}
 
 jobs:
   publish:
+    if: ${{ github.repository == 'immich-app/immich' }}
     name: Publish `@immich/sdk`
     runs-on: ubuntu-latest
     permissions:
@@ -22,7 +23,7 @@ jobs:
           token: ${{ github.token }}
 
       - name: Setup Mise
-        uses: immich-app/devtools/actions/use-mise@06a9ef925332c91be647d6256642b86b398592c8 # use-mise-action-v3.2.1
+        uses: immich-app/devtools/actions/use-mise@caac7f7e4298458a14238959504f411fc6cc7f06 # use-mise-action-v3.2.3
         with:
           github_token: ${{ github.token }}
 

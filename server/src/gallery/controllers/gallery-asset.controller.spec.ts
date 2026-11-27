@@ -1,0 +1,219 @@
+import request from 'supertest';
+import { AssetController } from 'src/controllers/asset.controller.js';
+import { controllers } from 'src/controllers/index.js';
+import { GalleryAssetController } from 'src/gallery/controllers/gallery-asset.controller.js';
+import { DataSaverVideoService } from 'src/gallery/services/data-saver-video.service.js';
+import { GalleryAssetService } from 'src/gallery/services/gallery-asset.service.js';
+import { SpatialSceneService } from 'src/gallery/services/spatial-scene.service.js';
+import { factory } from 'test/small.factory.js';
+import { ControllerContext, controllerSetup, mockBaseService } from 'test/utils.js';
+
+describe(GalleryAssetController.name, () => {
+  let ctx: ControllerContext;
+  const service = mockBaseService(GalleryAssetService);
+  const spatialScene = mockBaseService(SpatialSceneService);
+  const dataSaverVideo = mockBaseService(DataSaverVideoService);
+
+  beforeAll(async () => {
+    ctx = await controllerSetup(GalleryAssetController, [
+      { provide: GalleryAssetService, useValue: service },
+      { provide: SpatialSceneService, useValue: spatialScene },
+      { provide: DataSaverVideoService, useValue: dataSaverVideo },
+    ]);
+    return () => ctx.close();
+  });
+
+  beforeEach(() => {
+    service.resetAllMocks();
+    spatialScene.resetAllMocks();
+    dataSaverVideo.resetAllMocks();
+    ctx.reset();
+  });
+
+  it('is mounted before AssetController so PUT /assets/favorites wins over PUT /assets/:id', () => {
+    expect(controllers.indexOf(GalleryAssetController)).toBeLessThan(controllers.indexOf(AssetController));
+  });
+
+  describe('PUT /assets/favorites', () => {
+    it('should be an authenticated route', async () => {
+      await request(ctx.getHttpServer()).put('/assets/favorites');
+      expect(ctx.authenticate).toHaveBeenCalled();
+    });
+
+    it('should set favorites for the caller', async () => {
+      const ids = [factory.uuid()];
+      const { status } = await request(ctx.getHttpServer()).put('/assets/favorites').send({ ids, isFavorite: true });
+      expect(status).toBe(204);
+      expect(service.updateFavorites).toHaveBeenCalledWith(undefined, { ids, isFavorite: true });
+    });
+  });
+
+  describe('POST /assets/editable', () => {
+    it('should be an authenticated route', async () => {
+      await request(ctx.getHttpServer()).post('/assets/editable');
+      expect(ctx.authenticate).toHaveBeenCalled();
+    });
+  });
+
+  describe('POST /assets/spaces', () => {
+    it('should be an authenticated route', async () => {
+      await request(ctx.getHttpServer()).post('/assets/spaces');
+      expect(ctx.authenticate).toHaveBeenCalled();
+    });
+
+    it('should require between 1 and 1000 valid asset ids', async () => {
+      const tooMany = Array.from({ length: 1001 }, () => factory.uuid());
+      for (const assetIds of [[], ['123'], tooMany]) {
+        const { status } = await request(ctx.getHttpServer()).post('/assets/spaces').send({ assetIds });
+        expect(status).toBe(400);
+      }
+      expect(service.getSpaces).not.toHaveBeenCalled();
+    });
+
+    it('should resolve the spaces', async () => {
+      const assetIds = [factory.uuid()];
+      service.getSpaces.mockResolvedValue({ assets: [] });
+      const { status } = await request(ctx.getHttpServer()).post('/assets/spaces').send({ assetIds });
+      expect(status).toBe(200);
+      expect(service.getSpaces).toHaveBeenCalledWith(undefined, { assetIds });
+    });
+  });
+
+  describe('PUT /assets/:id/trim', () => {
+    it('should be an authenticated route', async () => {
+      await request(ctx.getHttpServer()).put(`/assets/${factory.uuid()}/trim`);
+      expect(ctx.authenticate).toHaveBeenCalled();
+    });
+
+    it('should require a valid id', async () => {
+      const { status } = await request(ctx.getHttpServer()).put('/assets/123/trim').send({ startTime: 1, endTime: 2 });
+      expect(status).toBe(400);
+    });
+
+    it('should reject an end time that is not after the start time', async () => {
+      const { status, body } = await request(ctx.getHttpServer())
+        .put(`/assets/${factory.uuid()}/trim`)
+        .send({ startTime: 2, endTime: 2 });
+      expect(status).toBe(400);
+      expect(JSON.stringify(body)).toContain('endTime must be greater than startTime');
+      expect(service.setTrim).not.toHaveBeenCalled();
+    });
+
+    it('should trim the video', async () => {
+      const id = factory.uuid();
+      const { status } = await request(ctx.getHttpServer())
+        .put(`/assets/${id}/trim`)
+        .send({ startTime: 1.5, endTime: 3 });
+      expect(status).toBe(200);
+      expect(service.setTrim).toHaveBeenCalledWith(undefined, id, { startTime: 1.5, endTime: 3 });
+    });
+  });
+
+  describe('GET /assets/:id/depth', () => {
+    it('should be an authenticated route', async () => {
+      await request(ctx.getHttpServer()).get(`/assets/${factory.uuid()}/depth`);
+      expect(ctx.authenticate).toHaveBeenCalled();
+    });
+
+    it('should require a valid id', async () => {
+      const { status } = await request(ctx.getHttpServer()).get('/assets/not-a-uuid/depth');
+      expect(status).toBe(400);
+      expect(spatialScene.getDepthMap).not.toHaveBeenCalled();
+    });
+
+    it('should ask the service for the depth map', async () => {
+      const id = factory.uuid();
+      await request(ctx.getHttpServer()).get(`/assets/${id}/depth`);
+      expect(spatialScene.getDepthMap).toHaveBeenCalledWith(undefined, id);
+    });
+  });
+
+  describe('GET /assets/:id/video/data-saver', () => {
+    it('should be an authenticated route', async () => {
+      await request(ctx.getHttpServer()).get(`/assets/${factory.uuid()}/video/data-saver`);
+      expect(ctx.authenticate).toHaveBeenCalled();
+    });
+
+    it('should require a valid id', async () => {
+      const { status } = await request(ctx.getHttpServer()).get('/assets/not-a-uuid/video/data-saver');
+      expect(status).toBe(400);
+      expect(dataSaverVideo.playbackDataSaverVideo).not.toHaveBeenCalled();
+    });
+
+    it('should pass the range header to the service', async () => {
+      const id = factory.uuid();
+      await request(ctx.getHttpServer()).get(`/assets/${id}/video/data-saver`).set('Range', 'bytes=0-1023');
+      expect(dataSaverVideo.playbackDataSaverVideo).toHaveBeenCalledWith(undefined, id, 'bytes=0-1023');
+    });
+  });
+
+  describe('GET /assets/:id/trim', () => {
+    it('should be an authenticated route', async () => {
+      await request(ctx.getHttpServer()).get(`/assets/${factory.uuid()}/trim`);
+      expect(ctx.authenticate).toHaveBeenCalled();
+    });
+  });
+
+  describe('DELETE /assets/:id/trim', () => {
+    it('should be an authenticated route', async () => {
+      await request(ctx.getHttpServer()).delete(`/assets/${factory.uuid()}/trim`);
+      expect(ctx.authenticate).toHaveBeenCalled();
+    });
+
+    it('should remove the trim', async () => {
+      const id = factory.uuid();
+      const { status } = await request(ctx.getHttpServer()).delete(`/assets/${id}/trim`);
+      expect(status).toBe(204);
+      expect(service.removeTrim).toHaveBeenCalledWith(undefined, id);
+    });
+  });
+
+  describe('PUT /assets/:id/adjust', () => {
+    it('should be an authenticated route', async () => {
+      await request(ctx.getHttpServer()).put(`/assets/${factory.uuid()}/adjust`);
+      expect(ctx.authenticate).toHaveBeenCalled();
+    });
+
+    it('should require a valid id', async () => {
+      const { status } = await request(ctx.getHttpServer()).put('/assets/123/adjust').send({ exposure: 10 });
+      expect(status).toBe(400);
+    });
+
+    it.each([{ exposure: 101 }, { contrast: -101 }, { saturation: 'more' }, { invert: 'yes' }])(
+      'should reject %o',
+      async (dto) => {
+        const { status } = await request(ctx.getHttpServer()).put(`/assets/${factory.uuid()}/adjust`).send(dto);
+        expect(status).toBe(400);
+        expect(service.setAdjust).not.toHaveBeenCalled();
+      },
+    );
+
+    it('should default the values it is not given to neutral', async () => {
+      const id = factory.uuid();
+      const { status } = await request(ctx.getHttpServer()).put(`/assets/${id}/adjust`).send({ exposure: -12.5 });
+      expect(status).toBe(200);
+      expect(service.setAdjust).toHaveBeenCalledWith(undefined, id, {
+        exposure: -12.5,
+        contrast: 0,
+        saturation: 0,
+        invert: false,
+      });
+    });
+  });
+
+  describe('GET /assets/:id/adjust', () => {
+    it('should be an authenticated route', async () => {
+      await request(ctx.getHttpServer()).get(`/assets/${factory.uuid()}/adjust`);
+      expect(ctx.authenticate).toHaveBeenCalled();
+    });
+  });
+
+  describe('DELETE /assets/:id/adjust', () => {
+    it('should remove the adjustment', async () => {
+      const id = factory.uuid();
+      const { status } = await request(ctx.getHttpServer()).delete(`/assets/${id}/adjust`);
+      expect(status).toBe(204);
+      expect(service.removeAdjust).toHaveBeenCalledWith(undefined, id);
+    });
+  });
+});

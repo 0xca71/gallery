@@ -22,6 +22,12 @@ class BackgroundWorkerApiImpl: BackgroundWorkerFgHostApi {
     print("BackgroundWorkerApiImpl:disableUploadWorker Disabled background workers")
   }
   
+  func wasLaunchedInBackground() throws -> Bool {
+    return BackgroundWorkerApiImpl.launchedInBackground
+  }
+
+  // Stays false until iOS runs one of the background tasks
+  private static var launchedInBackground = false
   // Same intent as upstream #30574 (derive the BGTaskScheduler ids from Info.plist rather than
   // hard-coding them), but keep the fork's non-crashing form from #627: upstream force-unwraps
   // both the plist lookup (`as!`) and the suffix match (`!`), which traps at launch if the key is
@@ -38,6 +44,7 @@ class BackgroundWorkerApiImpl: BackgroundWorkerFgHostApi {
   public static func registerBackgroundWorkers() {
       BGTaskScheduler.shared.register(
           forTaskWithIdentifier: processingTaskID, using: nil) { task in
+          launchedInBackground = true
           if task is BGProcessingTask {
             handleBackgroundProcessing(task: task as! BGProcessingTask)
           }
@@ -45,6 +52,7 @@ class BackgroundWorkerApiImpl: BackgroundWorkerFgHostApi {
 
       BGTaskScheduler.shared.register(
           forTaskWithIdentifier: refreshTaskID, using: nil) { task in
+          launchedInBackground = true
           if task is BGAppRefreshTask {
             handleBackgroundRefresh(task: task as! BGAppRefreshTask)
           }

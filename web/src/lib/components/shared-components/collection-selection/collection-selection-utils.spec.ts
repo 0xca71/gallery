@@ -2,8 +2,11 @@
 import { SharedSpaceRole, type AlbumResponseDto, type SharedSpaceResponseDto } from '@immich/sdk';
 import { describe, expect, it } from 'vitest';
 import {
+  CollectionModalRowConverter,
+  CollectionModalRowType,
   albumToCollection,
   collectionKey,
+  isSelectableRowType,
   isValidNewSpaceName,
   isWritableSpace,
   pickRecent,
@@ -11,7 +14,6 @@ import {
   sortByNameAsc,
   spaceToCollection,
 } from './collection-selection-utils';
-import { CollectionModalRowConverter, CollectionModalRowType, isSelectableRowType } from './collection-selection-utils';
 
 const album = (id: string, name: string, updatedAt = '2024-01-01T00:00:00Z') =>
   ({ id, albumName: name, updatedAt, assetCount: 0, shared: false }) as unknown as AlbumResponseDto;
@@ -219,6 +221,7 @@ describe('CollectionModalRowConverter', () => {
   // album, mirroring mobile's SpaceCollectionSection. A linked album is an ordinary `album`
   // collection, so the dispatch (POST /albums/:id/assets) is unchanged.
   describe('space expansion (#965)', () => {
+    // eslint-disable-next-line unicorn/no-unnecessary-parameters
     const withAlbums = (id: string, name: string, albumCount: number) => s(id, name, { albumCount });
     const items = (rows: ReturnType<typeof conv.toModalRows>) =>
       rows.filter((r) => r.type === CollectionModalRowType.COLLECTION_ITEM);

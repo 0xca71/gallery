@@ -1,4 +1,5 @@
 import { join } from 'node:path';
+import { THUMBNAIL_DECODING_TIER } from 'src/constants.js';
 import { StorageCore } from 'src/cores/storage.core.js';
 import { SystemConfig } from 'src/dtos/config.dto.js';
 import { StorageFolder } from 'src/enum.js';
@@ -23,8 +24,9 @@ export const generateProfileImage = async (
   );
   storageCore.ensureFolders(outputPath);
 
+  const decoded = await media.decodeImage(input, { colorspace: image.colorspace, processInvalidImages: false });
   await media.generateThumbnail(
-    input,
+    decoded,
     {
       colorspace: image.colorspace,
       format: image.thumbnail.format,
@@ -32,6 +34,7 @@ export const generateProfileImage = async (
       progressive: image.thumbnail.progressive,
       size: image.thumbnail.size,
       processInvalidImages: false,
+      decodingTier: THUMBNAIL_DECODING_TIER,
     },
     outputPath,
   );

@@ -1,15 +1,9 @@
 import { BadRequestException, ConflictException, ForbiddenException, Injectable } from '@nestjs/common';
 import { isUndefined, omitBy } from 'lodash-es';
 import { DateTime, Duration } from 'luxon';
-import { isAbsolute } from 'node:path';
-import type { ShallowDehydrateObject } from 'kysely';
-import type { AssetFace, AssetFile } from 'src/database.js';
-import type { AuthDto } from 'src/dtos/auth.dto.js';
-import type { ArgOf } from 'src/repositories/event.repository.js';
-import type { LinkedSpacePerson } from 'src/repositories/shared-space.repository.js';
-import type { JobItem, JobOf } from 'src/types.js';
-import { StorageCore } from 'src/cores/storage.core.js';
-import { OnEvent, OnJob } from 'src/decorators.js';
+import { isDiskPath } from 'src/backends/disk-storage.backend.js';
+import type { AssetFile } from 'src/database.js';
+import { OnJob } from 'src/decorators.js';
 import { AssetResponseDto, SanitizedAssetResponseDto, mapAsset } from 'src/dtos/asset-response.dto.js';
 import {
   AssetBulkDeleteDto,
@@ -26,12 +20,12 @@ import {
   UpdateAssetDto,
   mapStats,
 } from 'src/dtos/asset.dto.js';
+import { isMetadataHidden, type AuthDto } from 'src/dtos/auth.dto.js';
 import {
   AssetEditAction,
-  type AssetEditActionItem,
   AssetEditsCreateDto,
   AssetEditsResponseDto,
-  type TrimParameters,
+  type AssetEditActionItem,
 } from 'src/dtos/editing.dto.js';
 import { AssetOcrResponseDto } from 'src/dtos/ocr.dto.js';
 import {
@@ -44,8 +38,12 @@ import {
   Permission,
   QueueName,
 } from 'src/enum.js';
+import { requireAssetEditAccess } from 'src/gallery/utils/access-grants.js';
+import { applyAssetResponseOverlay } from 'src/gallery/utils/asset-response-overlay.js';
+import { afterAssetUpdate, beforeAssetUpdate, beforeAssetUpdateAll } from 'src/gallery/utils/asset-update-hooks.js';
+import { logCrossOwnerEdit } from 'src/gallery/utils/cross-owner-edit.js';
 import { BaseService } from 'src/services/base.service.js';
-import { StorageService } from 'src/services/storage.service.js';
+import type { JobItem, JobOf } from 'src/types.js';
 import { requireElevatedPermission } from 'src/utils/access.js';
 import {
   getAssetFiles,
@@ -56,9 +54,9 @@ import {
   onBeforeUnlink,
 } from 'src/utils/asset.util.js';
 import { isDeadlockError, retryOnDeadlock, updateLockedColumns } from 'src/utils/database.js';
-import { asDateTimeString, extractTimeZone } from 'src/utils/date.js';
+import { extractTimeZone } from 'src/utils/date.js';
+import { favoriteViewerId } from 'src/utils/favorite.js';
 import { batched, findOrFail } from 'src/utils/misc.js';
-import { applyResolvedIdentityMetadata } from 'src/utils/person-identity.js';
 import { getCropBoundsDimensions, transformOcrBoundingBox } from 'src/utils/transform.js';
 
 @Injectable()
@@ -75,137 +73,44 @@ export class AssetService extends BaseService {
   async get(auth: AuthDto, id: string, spaceId?: string): Promise<AssetResponseDto | SanitizedAssetResponseDto> {
     await this.requireAccess({ auth, permission: Permission.AssetRead, ids: [id] });
 
-    const asset = await this.assetRepository.getById(id, {
-      exifInfo: true,
-      owner: true,
-      faces: { person: true, viewingUserId: auth.user.id },
-      stack: { assets: true },
-      edits: true,
-      tags: true,
-    });
+    // #763: the isFavoriteForUser overlay is resolved for the CALLER. A shared-link session has no
+    // caller of its own — auth.user is the link OWNER — so favoriteViewerId returns undefined there
+    // and the response reports false rather than the owner's private favorites.
+    const asset = await this.assetRepository.getById(
+      id,
+      {
+        exifInfo: true,
+        owner: true,
+        faces: { person: true, viewingUserId: auth.user.id },
+        stack: { assets: true },
+        edits: true,
+        tags: true,
+      },
+      favoriteViewerId(auth),
+    );
 
     if (!asset) {
       throw new BadRequestException('Asset not found');
     }
 
-    if (auth.sharedLink && !auth.sharedLink.showExif) {
-      return mapAsset(asset, { stripMetadata: true, withStack: true, auth });
-    }
-
     const data = mapAsset(asset, { withStack: true, auth });
 
-    if (auth.sharedLink) {
-      delete data.owner;
+    if (isMetadataHidden(auth)) {
+      return data;
     }
 
-    if (auth.sharedLink) {
-      data.people = [];
-    } else if (spaceId) {
-      const member = await this.sharedSpaceRepository.getMember(spaceId, auth.user.id);
-      if (!member) {
-        throw new ForbiddenException('Not a member of this space');
-      }
-
-      const hasSpaceAccess = await this.accessRepository.asset.checkSpaceAccessForSpace(
-        auth.user.id,
-        spaceId,
-        new Set([id]),
-      );
-      if (hasSpaceAccess.size === 0 || !data.people) {
-        data.people = [];
-      } else {
-        const globalPersonIds = data.people.map((p) => p.id);
-        const spacePersonMap = await this.sharedSpaceRepository.findSpacePersonsByLinkedPersonIds(
-          spaceId,
-          globalPersonIds,
-        );
-        this.applySpacePeople(data, spacePersonMap);
-        data.people = data.people.filter((p) => p.spacePersonId && !spacePersonMap.get(p.id)?.isHidden);
-      }
-    } else if (data.ownerId === auth.user.id) {
-      // The owner is viewing their own asset with no space context. A name or birthday set in a
-      // shared space is resolved at read time against the face identity and is never written back
-      // to `person` (see PersonService.getById). Without overlaying that resolution here, the raw
-      // person row carries a null birthDate and the asset detail view shows no age.
-      await this.applyResolvedPersonMetadata(auth, data, asset.faces ?? []);
-    } else {
-      // No spaceId — try to find a space containing this asset for this user
-      const spaceForAsset = await this.sharedSpaceRepository.findSpaceForAssetAndUser(id, auth.user.id);
-      if (spaceForAsset) {
-        const globalPersonIds = (data.people || []).map((p) => p.id);
-        const spacePersonMap = await this.sharedSpaceRepository.findSpacePersonsByLinkedPersonIds(
-          spaceForAsset.spaceId,
-          globalPersonIds,
-        );
-        this.applySpacePeople(data, spacePersonMap);
-        data.people = (data.people || []).filter((p) => p.spacePersonId && !spacePersonMap.get(p.id)?.isHidden);
-        data.resolvedSpaceId = spaceForAsset.spaceId;
-      } else {
-        // #796: no space contains this asset for the viewer, so they reach it through an album
-        // share or partner sharing. Read access to the asset carries read access to who is in it —
-        // minus anyone the owner marked hidden, which must not leak off-box.
-        data.people = (data.people || []).filter((person) => !person.isHidden);
-      }
-    }
+    await applyAssetResponseOverlay(
+      {
+        access: this.accessRepository,
+        faceIdentity: this.faceIdentityRepository,
+        sharedSpace: this.sharedSpaceRepository,
+        spatialScene: this.spatialSceneRepository,
+        getConfig: () => this.getConfig({ withCache: true }),
+      },
+      { auth, id, spaceId, data, faces: asset.faces ?? [] },
+    );
 
     return data;
-  }
-
-  private async applyResolvedPersonMetadata(
-    auth: AuthDto,
-    data: AssetResponseDto,
-    faces: ShallowDehydrateObject<AssetFace>[],
-  ) {
-    const people = data.people;
-    if (!people?.length) {
-      return;
-    }
-
-    const identityByPersonId = new Map<string, string>();
-    for (const face of faces) {
-      if (face.person?.personGroupId && face.person.identityId) {
-        identityByPersonId.set(face.person.personGroupId, face.person.identityId);
-      }
-    }
-
-    // Shared with PersonService.getFacesById, the sibling read path the Info panel uses for the
-    // owner — the two have to resolve identically or the age appears on one surface only (#808).
-    await applyResolvedIdentityMetadata({
-      people,
-      identityByPersonId,
-      resolve: (identityId) => this.faceIdentityRepository.getResolvedPersonByIdentityId(auth.user.id, identityId),
-    });
-  }
-
-  private applySpacePeople(data: AssetResponseDto, spacePersonMap: Map<string, LinkedSpacePerson>) {
-    for (const person of data.people || []) {
-      const spacePerson = spacePersonMap.get(person.id);
-      if (!spacePerson) {
-        continue;
-      }
-
-      person.spacePersonId = spacePerson.id;
-      person.isHidden = spacePerson.isHidden;
-
-      const name = spacePerson.name;
-      if (name !== undefined) {
-        person.name = name ?? '';
-      }
-
-      person.thumbnailPath = '';
-
-      if (spacePerson.birthDate !== undefined) {
-        person.birthDate = spacePerson.birthDate ?? null;
-      }
-
-      if (spacePerson.updatedAt !== undefined) {
-        person.updatedAt = asDateTimeString(spacePerson.updatedAt);
-      }
-
-      if (spacePerson.type) {
-        person.type = spacePerson.type;
-      }
-    }
   }
 
   async unlinkAndDeleteLivePhoto(auth: AuthDto, id: string): Promise<AssetResponseDto> {
@@ -223,7 +128,12 @@ export class AssetService extends BaseService {
     await onBeforeUnlink({ asset: this.assetRepository, event: this.eventRepository }, { livePhotoVideoId: videoId });
 
     const result = await retryOnDeadlock(() =>
-      this.assetRepository.unlinkAndDeleteLivePhoto({ photoId: id, videoId, ownerId: auth.user.id }),
+      this.assetRepository.unlinkAndDeleteLivePhoto({
+        photoId: id,
+        videoId,
+        ownerId: auth.user.id,
+        ...(auth.session?.hasElevatedPermission && { hasElevatedPermission: true }),
+      }),
     );
     if (result === 'shared') {
       throw new ConflictException('Live photo video is still linked to another photo');
@@ -239,13 +149,16 @@ export class AssetService extends BaseService {
   }
 
   async update(auth: AuthDto, id: string, dto: UpdateAssetDto): Promise<AssetResponseDto> {
-    await this.requireAccess({ auth, permission: Permission.AssetUpdate, ids: [id] });
+    await requireAssetEditAccess(this.accessRepository, { auth, ids: [id] });
 
     // rbac-3: visibility AND livePhotoVideoId are owner-only structural writes (see updateAll). A space editor
-    // holds AssetUpdate over other members' assets via checkSpaceEditAccess, but must not flip their visibility
+    // holds edit access over other members' assets via checkSpaceEditAccess, but must not flip their visibility
     // (fleet-wide tombstone) or re-link their motion video. Reject if either is set on an asset the caller does
     // not own; other metadata (description/rating/…) stays editor-allowed. Runs BEFORE the livePhotoVideoId
     // link/unlink side-effects and the visibility transition helper below.
+    //
+    // isFavorite is NOT owner-gated (#763): it writes only the caller's own asset_favorite row via
+    // updateFavorites, never the owner's state.
     if (dto.visibility !== undefined || dto.livePhotoVideoId !== undefined) {
       const ownedIds = await this.checkAccess({ auth, permission: Permission.AssetDelete, ids: [id] });
       if (!ownedIds.has(id)) {
@@ -253,11 +166,12 @@ export class AssetService extends BaseService {
       }
     }
 
-    const { description, dateTimeOriginal, latitude, longitude, rating, ...rest } = dto;
+    const { description, dateTimeOriginal, latitude, longitude, rating, isFavorite: _isFavorite, ...rest } = dto;
     const repos = { asset: this.assetRepository, event: this.eventRepository };
 
     let previousMotion: { id: string } | null = null;
     if (rest.livePhotoVideoId) {
+      await this.requireAccess({ auth, permission: Permission.AssetUpdate, ids: [rest.livePhotoVideoId] });
       await onBeforeLink(repos, { userId: auth.user.id, livePhotoVideoId: rest.livePhotoVideoId });
     } else if (rest.livePhotoVideoId === null) {
       const asset = await this.findOrFail(id);
@@ -266,17 +180,13 @@ export class AssetService extends BaseService {
       }
     }
 
-    await this.updateExif({ id, description, dateTimeOriginal, latitude, longitude, rating });
+    const wroteMetadata = await this.updateExif({ id, description, dateTimeOriginal, latitude, longitude, rating });
 
-    // correctness-8: capture the PRIOR visibility before the write so the transition helper can tell a
-    // genuine boundary crossing from a no-op re-affirm (e.g. Hidden -> Hidden).
-    let priorVisibility: AssetVisibility | undefined;
-    if (dto.visibility !== undefined) {
-      const priorAsset = await this.assetRepository.getById(id);
-      priorVisibility = priorAsset?.visibility;
-    }
+    const priorVisibilities = await beforeAssetUpdate(this.assetUpdateRepositories, auth, id, dto);
 
-    const asset = await this.assetRepository.update({ id, ...rest });
+    // #763: auth.user.id is the CALLER — this endpoint requires Permission.AssetUpdate (never
+    // sharedLink: true, see asset.controller.ts), so auth.user.id is always a genuine caller here.
+    const asset = await this.assetRepository.update({ id, ...rest }, auth.user.id);
 
     if (previousMotion && asset) {
       await onAfterUnlink(repos, {
@@ -290,45 +200,18 @@ export class AssetService extends BaseService {
       throw new BadRequestException('Asset not found');
     }
 
-    // security-4: the single-asset PUT previously wrote `visibility` straight through, skipping every
-    // #757 transition side-effect the bulk path runs — member devices kept hidden/locked bytes forever and
-    // Locked assets stayed in the owner's albums. Route it through the same helper so a single PUT is
-    // byte-for-byte equivalent to a one-id bulk update. No-op for non-space assets (the emits match nothing).
-    if (dto.visibility !== undefined) {
-      await this.applyVisibilityTransitionSideEffects([id], dto.visibility, new Map([[id, priorVisibility]]));
+    await afterAssetUpdate(this.assetUpdateRepositories, auth, [id], dto, priorVisibilities);
+
+    if (!wroteMetadata) {
+      this.websocketRepository.clientSend('on_asset_update', auth.user.id, mapAsset(asset, { auth }));
     }
 
     return this.get(auth, id) as Promise<AssetResponseDto>;
   }
 
-  // Motion-photo bypass: the live-photo/motion paths (asset.util onBeforeLink/onAfterUnlink,
-  // metadata linkLivePhotos, metadata extraction-hide) flip a motion video's visibility directly and emit
-  // AssetHide/AssetShow — but nothing routed those to the #757 space purge, so a motion video in a
-  // space-linked library kept its bytes on member devices. AssetHide/AssetShow fire only on a genuine
-  // Timeline↔Hidden crossing, so we run the same transition side-effects for the single asset.
-  @OnEvent({ name: 'AssetHide' })
-  async onAssetHide({ assetId }: ArgOf<'AssetHide'>): Promise<void> {
-    // AssetHide fires only on Timeline→Hidden → seed a shareable prior so it registers as a crossing.
-    await this.applyVisibilityTransitionSideEffects(
-      [assetId],
-      AssetVisibility.Hidden,
-      new Map([[assetId, AssetVisibility.Timeline]]),
-    );
-  }
-
-  @OnEvent({ name: 'AssetShow' })
-  async onAssetShow({ assetId }: ArgOf<'AssetShow'>): Promise<void> {
-    await this.applyVisibilityTransitionSideEffects(
-      [assetId],
-      AssetVisibility.Timeline,
-      new Map([[assetId, AssetVisibility.Hidden]]),
-    );
-  }
-
   async updateAll(auth: AuthDto, dto: AssetBulkUpdateDto): Promise<void> {
     const {
       ids,
-      isFavorite,
       visibility,
       dateTimeOriginal,
       latitude,
@@ -339,24 +222,30 @@ export class AssetService extends BaseService {
       dateTimeRelative,
       timeZone,
     } = dto;
-    await this.requireAccess({ auth, permission: Permission.AssetUpdate, ids });
+    await requireAssetEditAccess(this.accessRepository, { auth, ids });
 
     // rbac-3: `visibility` is destructive — flipping an asset to Locked/Hidden strips it from the owner's
-    // albums (removeAssetsFromAll) and #757-tombstones it off every member device. AssetUpdate grants a space
-    // EDITOR that power over OTHER members' direct+library assets (checkSpaceEditAccess), which would let an
-    // editor wipe another member's asset fleet-wide. Restrict visibility to OWNED ids: reject the whole request
+    // albums (removeAssetsFromAll) and #757-tombstones it off every member device. Edit access grants a space
+    // EDITOR that power over OTHER members' direct+library+album assets (checkSpaceEditAccess), which would let
+    // an editor wipe another member's asset fleet-wide. Restrict visibility to OWNED ids: reject the whole request
     // if visibility is set on any id the caller does not own. This guard MUST run before the write and the
     // applyVisibilityTransitionSideEffects cascade below, or the destructive side-effects fire before the guard.
     // AssetDelete == the pure owner arm (checkOwnerAccess, same hasElevatedPermission as the AssetUpdate gate's
     // isOwner sub-check); a library-backed asset owned by another user is correctly NOT returned as owned.
-    if (visibility !== undefined) {
+    //
+    // duplicateId takes the same guard: it is the owner's own duplicate clean-up, and an editor must not pull a
+    // member's asset into or out of a duplicate group. isFavorite is NOT owner-gated (#763): it writes only the
+    // caller's own asset_favorite row via updateFavorites, never the owner's state.
+    if (visibility !== undefined || duplicateId !== undefined) {
       const ownedIds = await this.checkAccess({ auth, permission: Permission.AssetDelete, ids });
       if (ownedIds.size !== new Set(ids).size) {
-        throw new ForbiddenException('Visibility can only be changed on assets you own');
+        throw new ForbiddenException('Visibility and duplicate grouping can only be changed on assets you own');
       }
     }
 
-    const assetDto = omitBy({ isFavorite, visibility, duplicateId }, isUndefined);
+    const priorVisibilities = await beforeAssetUpdateAll(this.assetUpdateRepositories, auth, dto);
+
+    const assetDto = omitBy({ visibility, duplicateId }, isUndefined);
 
     // When latitude/longitude are updated in bulk, reverse-geocode once so country/state/city
     // stay in sync across all selected assets. See updateExif() for the rationale.
@@ -373,13 +262,15 @@ export class AssetService extends BaseService {
         description,
         dateTimeOriginal,
         ...geo,
-        formattedAddress: geo ? null : undefined,
+        formattedAddress: latitude === undefined && longitude === undefined ? undefined : null,
       },
       isUndefined,
     );
 
+    let shouldWriteSidecar = false;
     if (Object.keys(exifDto).length > 0) {
       await this.assetRepository.updateAllExif(ids, exifDto);
+      shouldWriteSidecar = true;
     }
 
     const extractedTimeZone = extractTimeZone(dateTimeOriginal);
@@ -390,93 +281,22 @@ export class AssetService extends BaseService {
       extractedTimeZone?.type === 'fixed'
     ) {
       await this.assetRepository.updateDateTimeOriginal(ids, dateTimeRelative, timeZone ?? extractedTimeZone?.name);
-    }
-
-    // correctness-8: capture PRIOR visibilities before the write so the transition helper can tell a
-    // genuine boundary crossing from a no-op re-affirm (e.g. Hidden -> Hidden, Timeline -> Archive).
-    const priorVisibilities = new Map<string, AssetVisibility>();
-    if (visibility !== undefined) {
-      const priorAssets = await this.assetRepository.getByIds(ids);
-      for (const priorAsset of priorAssets) {
-        priorVisibilities.set(priorAsset.id, priorAsset.visibility);
-      }
+      shouldWriteSidecar = true;
     }
 
     if (Object.keys(assetDto).length > 0) {
       await this.assetRepository.updateAll(ids, assetDto);
     }
 
-    if (visibility !== undefined) {
-      await this.applyVisibilityTransitionSideEffects(ids, visibility, priorVisibilities);
-    }
+    await afterAssetUpdate(this.assetUpdateRepositories, auth, ids, dto, priorVisibilities);
 
-    await this.jobRepository.queueAll(ids.map((id) => ({ name: JobName.SidecarWrite, data: { id } })));
-  }
-
-  /**
-   * Runs every #757 visibility-transition side-effect (removeAssetsFromAll on Locked + the direct/album/
-   * library space purge/restore emits). Shared by updateAll (bulk), update (single) and the AssetHide/
-   * AssetShow event handlers (motion photos).
-   *
-   * correctness-6 — NOT wrapped in a Kysely transaction: the UPDATE, removeAssetsFromAll and each emit run
-   * on a DIFFERENT repository's own `this.db` handle, so a single `transaction()` would hit the
-   * `this.db`-inside-`transaction()` pool deadlock (#595). Resilience instead comes from the purge being
-   * UNCONDITIONAL-AND-IDEMPOTENT on a non-shareable next (M3): it no longer depends on the prior visibility
-   * read before the write, so a retry that re-reads an already-Hidden/Locked asset (e.g. after a crash or a
-   * failed emit) re-affirms the tombstone rather than silently no-op'ing. Re-running emits the same audit
-   * rows harmlessly. A crash between the UPDATE and the emits therefore leaves a RECOVERABLE state (re-run
-   * converges), not a corrupted one.
-   */
-  private async applyVisibilityTransitionSideEffects(
-    ids: string[],
-    nextVisibility: AssetVisibility,
-    priorVisibilities: Map<string, AssetVisibility | undefined>,
-  ): Promise<void> {
-    const shareable = (v: AssetVisibility | undefined) =>
-      v === AssetVisibility.Timeline || v === AssetVisibility.Archive;
-
-    if (nextVisibility === AssetVisibility.Timeline || nextVisibility === AssetVisibility.Archive) {
-      // Restore: only assets whose PRIOR was non-shareable (Hidden/Locked) cross back in. A shareable→
-      // shareable move (e.g. Timeline↔Archive, unarchive re-affirm) is not a crossing → no emit.
-      const restoreIds = ids.filter((id) => !shareable(priorVisibilities.get(id)));
-      if (restoreIds.length > 0) {
-        await this.sharedSpaceRepository.emitDirectAssetVisibilityRestore(restoreIds);
-        await this.sharedSpaceRepository.emitAlbumAssetVisibilityRestore(restoreIds);
-        // L4: the library ASSET ROW restore is automatic (the visibility UPDATE bumped asset.updateId),
-        // but its EXIF is not — asset_exif.updateId is untouched by a visibility flip, so without this
-        // emit a restored library asset would show empty EXIF forever on an already-synced member device.
-        await this.sharedSpaceRepository.emitLibraryAssetVisibilityRestore(restoreIds);
+    if (shouldWriteSidecar) {
+      await this.jobRepository.queueAll(ids.map((id) => ({ name: JobName.SidecarWrite, data: { id } })));
+    } else {
+      const assets = await this.assetRepository.getByIds(ids, auth.user.id);
+      for (const asset of assets) {
+        this.websocketRepository.clientSend('on_asset_update', auth.user.id, mapAsset(asset, { auth }));
       }
-      return;
-    }
-
-    // nextVisibility is non-shareable (Hidden or Locked).
-    // M-1: strip album membership UNCONDITIONALLY on Locked — do NOT gate on prior !== Locked. The old
-    // "lock-once" gate was not retry-convergent: a crash between the visibility UPDATE and this strip left
-    // the album_asset rows in place with no tombstone, and on retry priorVisibilities read Locked so the
-    // strip was skipped FOREVER — a durable on-device leak, plus a silent re-share into the space when the
-    // asset was later unlocked (the surviving album_asset rows were restored). Calling removeAssetsFromAll
-    // on every id is idempotent: an already-stripped asset matches zero rows (a no-op), while a
-    // crashed-first-attempt asset gets its surviving rows deleted and the album delete-audit trigger fires
-    // the tombstone the crashed attempt never sent (delivered via SharedSpaceAlbumToAssetSync.getDeletes).
-    // Keep the empty-batch guard (removeAssetsFromAll has none — an empty `IN ()` is invalid SQL), matching
-    // the purge/restore branches in this method.
-    if (nextVisibility === AssetVisibility.Locked && ids.length > 0) {
-      await this.albumRepository.removeAssetsFromAll(ids);
-    }
-
-    // Purge: unconditional on every id whenever nextVisibility is non-shareable (M3, retry-convergent).
-    // This branch already guarantees nextVisibility ∈ {Hidden, Locked}, so we don't need to know the prior
-    // to decide whether to purge — a re-affirm (Hidden→Hidden, Locked→Locked) re-emits the same tombstone,
-    // which is harmless (idempotent) and is exactly what lets a retry after a failed emit converge.
-    const purgeIds = ids;
-    if (purgeIds.length > 0) {
-      await this.sharedSpaceRepository.emitDirectAssetVisibilityPurge(purgeIds);
-      if (nextVisibility === AssetVisibility.Hidden) {
-        // Locked's album removal is handled by removeAssetsFromAll above → no album tombstone for Locked.
-        await this.sharedSpaceRepository.emitAlbumAssetVisibilityPurge(purgeIds);
-      }
-      await this.sharedSpaceRepository.emitLibraryAssetVisibilityPurge(purgeIds);
     }
   }
 
@@ -560,13 +380,13 @@ export class AssetService extends BaseService {
     // assets guarantee sourceFile.path !== targetSidecarPath.
     const targetSidecarPath = `${targetAsset.originalPath}.xmp`;
 
-    const { localPath, cleanup } = await this.ensureLocalFile(sourceFile.path);
+    const { localPath, cleanup } = await this.backendMedia.ensureLocalFile(sourceFile.path);
     try {
-      if (isAbsolute(targetSidecarPath)) {
+      if (isDiskPath(targetSidecarPath)) {
         this.storageCore.ensureFolders(targetSidecarPath);
         await this.storageRepository.copyFile(localPath, targetSidecarPath);
       } else {
-        const backend = StorageService.resolveBackendForKey(targetSidecarPath);
+        const backend = await this.backendMedia.backendFor(targetSidecarPath);
         const stream = this.storageRepository.createPlainReadStream(localPath);
         await backend.put(targetSidecarPath, stream, { contentType: 'application/xml' });
       }
@@ -590,10 +410,15 @@ export class AssetService extends BaseService {
       .minus(Duration.fromObject({ days: trashedDays }))
       .toJSDate();
 
+    let count = 0;
     for await (const assets of batched(this.assetJobRepository.streamForDeletedJob(trashedBefore))) {
       await this.jobRepository.queueAll(
-        assets.map(({ id, isOffline }) => ({ name: JobName.AssetDelete, data: { id, deleteOnDisk: !isOffline } })),
+        assets.map(({ id }) => ({ name: JobName.AssetDelete, data: { id, deleteOnDisk: true } })),
       );
+      count += assets.length;
+    }
+    if (count > 0) {
+      this.logger.log(`Automatically queued ${count} expired trash asset(s) for deletion`);
     }
 
     return JobStatus.Success;
@@ -611,13 +436,16 @@ export class AssetService extends BaseService {
   }
 
   private async handleAssetDeletionUnlocked(job: JobOf<JobName.AssetDelete>): Promise<JobStatus> {
-    const { id, deleteOnDisk } = job;
+    const { id, deleteOnDisk: isDeleteOnDiskRequest } = job;
 
     const asset = await this.assetJobRepository.getForAssetDeletion(id);
 
     if (!asset) {
       return JobStatus.Failed;
     }
+
+    // isOffline is an alias for excluded library assets
+    const deleteOnDisk = isDeleteOnDiskRequest && !asset.isOffline;
 
     if (asset.stack) {
       // asset.stack.assets only includes timeline visible assets and excludes the primary asset
@@ -691,7 +519,7 @@ export class AssetService extends BaseService {
       assetFiles.encodedVideoFile?.path,
     ];
 
-    if (deleteOnDisk && !asset.isOffline) {
+    if (deleteOnDisk) {
       files.push(assetFiles.sidecarFile?.path, asset.originalPath);
     }
 
@@ -738,7 +566,7 @@ export class AssetService extends BaseService {
   }
 
   async upsertBulkMetadata(auth: AuthDto, dto: AssetMetadataBulkUpsertDto): Promise<AssetMetadataBulkResponseDto[]> {
-    await this.requireAccess({ auth, permission: Permission.AssetUpdate, ids: dto.items.map((item) => item.assetId) });
+    await requireAssetEditAccess(this.accessRepository, { auth, ids: dto.items.map((item) => item.assetId) });
 
     const uniqueKeys = new Set<string>();
     for (const item of dto.items) {
@@ -754,7 +582,7 @@ export class AssetService extends BaseService {
   }
 
   async upsertMetadata(auth: AuthDto, id: string, dto: AssetMetadataUpsertDto): Promise<AssetMetadataResponseDto[]> {
-    await this.requireAccess({ auth, permission: Permission.AssetUpdate, ids: [id] });
+    await requireAssetEditAccess(this.accessRepository, { auth, ids: [id] });
 
     const uniqueKeys = new Set<string>();
     for (const { key } of dto.items) {
@@ -779,17 +607,17 @@ export class AssetService extends BaseService {
   }
 
   async deleteMetadataByKey(auth: AuthDto, id: string, key: string): Promise<void> {
-    await this.requireAccess({ auth, permission: Permission.AssetUpdate, ids: [id] });
+    await requireAssetEditAccess(this.accessRepository, { auth, ids: [id] });
     return this.assetRepository.deleteMetadataByKey(id, key);
   }
 
   async deleteBulkMetadata(auth: AuthDto, dto: AssetMetadataBulkDeleteDto) {
-    await this.requireAccess({ auth, permission: Permission.AssetUpdate, ids: dto.items.map((item) => item.assetId) });
+    await requireAssetEditAccess(this.accessRepository, { auth, ids: dto.items.map((item) => item.assetId) });
     await this.assetRepository.deleteBulkMetadata(dto.items);
   }
 
   async run(auth: AuthDto, dto: AssetJobsDto) {
-    await this.requireAccess({ auth, permission: Permission.AssetUpdate, ids: dto.assetIds });
+    await requireAssetEditAccess(this.accessRepository, { auth, ids: dto.assetIds });
 
     const jobs: JobItem[] = [];
 
@@ -822,6 +650,9 @@ export class AssetService extends BaseService {
 
   async ensureAssetAddress(auth: AuthDto, id: string): Promise<{ formattedAddress: string | null }> {
     await this.requireAccess({ auth, permission: Permission.AssetRead, ids: [id] });
+    if (auth.sharedLink) {
+      throw new ForbiddenException('Shared links cannot resolve detailed addresses');
+    }
     const { reverseGeocoding } = await this.getConfig({ withCache: true });
     return { formattedAddress: reverseGeocoding.enabled ? await this.mapRepository.ensureDetailedAddress(id) : null };
   }
@@ -857,21 +688,24 @@ export class AssetService extends BaseService {
         longitude,
         rating,
         ...geo,
-        formattedAddress: geo ? null : undefined,
+        formattedAddress: latitude === undefined && longitude === undefined ? undefined : null,
       },
       isUndefined,
     );
 
-    if (Object.keys(writes).length > 0) {
-      await this.assetRepository.upsertExif({
-        exif: updateLockedColumns({
-          assetId: id,
-          ...writes,
-        }),
-        lockedPropertiesBehavior: 'append',
-      });
-      await this.jobRepository.queue({ name: JobName.SidecarWrite, data: { id } });
+    if (Object.keys(writes).length === 0) {
+      return false;
     }
+
+    await this.assetRepository.upsertExif({
+      exif: updateLockedColumns({
+        assetId: id,
+        ...writes,
+      }),
+      lockedPropertiesBehavior: 'append',
+    });
+    await this.jobRepository.queue({ name: JobName.SidecarWrite, data: { id } });
+    return true;
   }
 
   async getAssetEdits(auth: AuthDto, id: string): Promise<AssetEditsResponseDto> {
@@ -899,126 +733,64 @@ export class AssetService extends BaseService {
       throw new BadRequestException('Asset not found');
     }
 
-    const edits = dto.edits as AssetEditActionItem[];
-    const hasTrim = edits.some((e) => e.action === AssetEditAction.Trim);
-    const hasSpatial = edits.some((e) =>
-      [AssetEditAction.Crop, AssetEditAction.Rotate, AssetEditAction.Mirror].includes(e.action),
-    );
-
-    // Reject mixed spatial + trim edits
-    if (hasTrim && hasSpatial) {
-      throw new BadRequestException('Cannot combine trim with spatial edits');
+    if (asset.type !== AssetType.Image) {
+      throw new BadRequestException('Only images can be edited');
     }
 
-    if (hasTrim) {
-      // Video trim validation
-      if (asset.type !== AssetType.Video) {
-        throw new BadRequestException('Trim is only supported for video assets');
+    if (asset.livePhotoVideoId) {
+      throw new BadRequestException('Editing live photos is not supported');
+    }
+
+    if (isPanorama(asset)) {
+      throw new BadRequestException('Editing panorama images is not supported');
+    }
+
+    if (asset.originalPath?.toLowerCase().endsWith('.gif')) {
+      throw new BadRequestException('Editing GIF images is not supported');
+    }
+
+    if (asset.originalPath?.toLowerCase().endsWith('.svg')) {
+      throw new BadRequestException('Editing SVG images is not supported');
+    }
+
+    // check that crop parameters will not go out of bounds
+    const { width: assetWidth, height: assetHeight } = getDimensions(asset);
+
+    if (!assetWidth || !assetHeight) {
+      throw new BadRequestException('Asset dimensions are not available for editing');
+    }
+
+    const edits = dto.edits as AssetEditActionItem[];
+    const crop = edits.find((e) => e.action === AssetEditAction.Crop);
+    if (crop) {
+      if (edits[0].action !== AssetEditAction.Crop) {
+        throw new BadRequestException('Crop action must be the first edit action');
       }
 
-      if (asset.livePhotoVideoId) {
-        throw new BadRequestException('Trimming live photos is not supported');
-      }
-
-      // Block external-library videos: absolute paths outside the media location.
-      // S3-backed originals are relative keys, resolved through the storage backend.
-      if (isAbsolute(asset.originalPath) && !StorageCore.isImmichPath(asset.originalPath)) {
-        throw new BadRequestException('Video trimming is not available for external library videos');
-      }
-
-      // Audio-only file check. getProbeInput hands ffprobe an absolute path (disk) or a
-      // presigned URL (S3) — it does NOT download the video, which matters here because
-      // this runs inside the request.
-      let probeResult: Awaited<ReturnType<typeof this.mediaRepository.probe>>;
-      try {
-        probeResult = await this.mediaRepository.probe(await this.getProbeInput(asset.originalPath));
-      } catch {
-        // Never surface or log the raw ffprobe error: for S3 originals getProbeInput yields a
-        // presigned URL (a bearer credential) that ffprobe echoes in its stderr, which would
-        // otherwise leak into error logs. Log only the asset id.
-        this.logger.error(`Failed to probe video for trim (asset ${id})`);
-        throw new BadRequestException('Unable to read video for trimming');
-      }
-      if (!probeResult.videoStreams || probeResult.videoStreams.length === 0) {
-        throw new BadRequestException('Cannot trim audio-only files');
-      }
-
-      // When re-trimming, asset.duration reflects the previous trim.
-      // Use originalDuration from the existing trim edit if available.
-      const existingEdits = await this.assetEditRepository.getAll(id);
-      const existingTrim = existingEdits.find((e) => e.action === AssetEditAction.Trim);
-      const existingOriginalDuration = existingTrim
-        ? (existingTrim.parameters as TrimParameters & { originalDuration?: number }).originalDuration
-        : undefined;
-
-      const durationSeconds = existingOriginalDuration ?? (asset.duration === null ? null : asset.duration / 1000);
-      if (durationSeconds === null || durationSeconds <= 0) {
-        throw new BadRequestException('Video duration is not available');
-      }
-
-      // Very short video check (against original duration)
-      if (durationSeconds < 2) {
-        throw new BadRequestException('Video is too short to trim (minimum 2 seconds)');
-      }
-
-      const trim = edits.find((e) => e.action === AssetEditAction.Trim)!;
-      const { startTime, endTime } = trim.parameters as TrimParameters;
-
-      if (endTime > durationSeconds) {
-        throw new BadRequestException('End time exceeds video duration');
-      }
-
-      if (startTime === 0 && endTime >= durationSeconds && !existingTrim) {
-        throw new BadRequestException('Trim must actually remove content');
-      }
-
-      // Enrich with originalDuration before storing (preserve original, not current trimmed)
-      (trim.parameters as TrimParameters & { originalDuration: number }).originalDuration = durationSeconds;
-    } else {
-      // Existing image validation
-      if (asset.type !== AssetType.Image) {
-        throw new BadRequestException('Only images can be edited');
-      }
-
-      if (asset.livePhotoVideoId) {
-        throw new BadRequestException('Editing live photos is not supported');
-      }
-
-      if (isPanorama(asset)) {
-        throw new BadRequestException('Editing panorama images is not supported');
-      }
-
-      if (asset.originalPath?.toLowerCase().endsWith('.gif')) {
-        throw new BadRequestException('Editing GIF images is not supported');
-      }
-
-      if (asset.originalPath?.toLowerCase().endsWith('.svg')) {
-        throw new BadRequestException('Editing SVG images is not supported');
-      }
-
-      // Crop bounds validation
+      // check that crop parameters will not go out of bounds
       const { width: assetWidth, height: assetHeight } = getDimensions(asset);
+
       if (!assetWidth || !assetHeight) {
         throw new BadRequestException('Asset dimensions are not available for editing');
       }
 
-      const crop = edits.find((e) => e.action === AssetEditAction.Crop);
-      if (crop) {
-        if (edits[0].action !== AssetEditAction.Crop) {
-          throw new BadRequestException('Crop action must be the first edit action');
-        }
-
-        const bounds = getCropBoundsDimensions(edits, { width: assetWidth, height: assetHeight });
-        const { x, y, width, height } = crop.parameters;
-        if (x + width > bounds.width || y + height > bounds.height) {
-          throw new BadRequestException('Crop parameters are out of bounds');
-        }
+      const bounds = getCropBoundsDimensions(edits, { width: assetWidth, height: assetHeight });
+      const { x, y, width, height } = crop.parameters;
+      if (x + width > bounds.width || y + height > bounds.height) {
+        throw new BadRequestException('Crop parameters are out of bounds');
       }
     }
 
     const newEdits = await this.assetEditRepository.replaceAll(id, edits);
-    await this.jobRepository.queue({ name: JobName.AssetEditThumbnailGeneration, data: { id } });
+    await this.jobRepository.queue({
+      name: JobName.AssetEditThumbnailGeneration,
+      data: await this.assetEditJobData(auth, id),
+    });
 
+    // #734: after the write succeeds — a rejected write must log nothing.
+    await logCrossOwnerEdit(this.accessRepository, this.sharedSpaceRepository, this.logger, auth, [id]);
+
+    // Return the asset and its applied edits
     return {
       assetId: id,
       edits: newEdits,
@@ -1040,18 +812,13 @@ export class AssetService extends BaseService {
       throw new BadRequestException('Asset not found');
     }
 
-    // Read existing edits to check for trim (need originalDuration for restore)
-    const existingEdits = await this.assetEditRepository.getAll(id);
-    const trimEdit = existingEdits.find((e) => e.action === AssetEditAction.Trim);
-    if (trimEdit) {
-      const params = trimEdit.parameters as TrimParameters & { originalDuration?: number };
-      if (params.originalDuration) {
-        const restoredDuration = Math.round(params.originalDuration * 1000);
-        await this.assetRepository.update({ id, duration: restoredDuration });
-      }
-    }
-
     await this.assetEditRepository.replaceAll(id, []);
-    await this.jobRepository.queue({ name: JobName.AssetEditThumbnailGeneration, data: { id } });
+    await this.jobRepository.queue({
+      name: JobName.AssetEditThumbnailGeneration,
+      data: await this.assetEditJobData(auth, id),
+    });
+
+    // #734: after the write succeeds — a rejected write must log nothing.
+    await logCrossOwnerEdit(this.accessRepository, this.sharedSpaceRepository, this.logger, auth, [id]);
   }
 }

@@ -1,14 +1,17 @@
-import { InjectKysely } from 'nestjs-kysely';
 import type { Expression, ExpressionBuilder, Kysely, SqlBool } from 'kysely';
+import { InjectKysely } from 'nestjs-kysely';
 import { DummyValue, GenerateSql } from 'src/decorators.js';
 import { AssetVisibility } from 'src/enum.js';
+import { folderPathMatch } from 'src/gallery/utils/folder-path.js';
+import { projectedDuration } from 'src/gallery/utils/projected-duration.js';
 import { DB } from 'src/schema/index.js';
 import { asUuid, withExif } from 'src/utils/database.js';
+import { favoriteExistsFor } from 'src/utils/favorite.js';
 import {
-  type TimelineHiddenScope,
   hiddenFromOwnTimeline,
-  spaceAssetPathBranches,
+  ownedOrSharedWithViewer,
   timelineHiddenScopeIsEmpty,
+  type TimelineHiddenScope,
 } from 'src/utils/shared-space-album-scope.js';
 
 // #1041 §3: `ownedOrSpaceAccessible` already ORs a visible-path branch alongside the owner term
@@ -47,25 +50,31 @@ export class ViewRepository {
     hiddenScope?: TimelineHiddenScope,
     visibleSpaceIds?: string[],
   ) {
-    const normalizedPath = partialPath.replaceAll(/\/$/g, '');
-
-    return this.db
-      .selectFrom('asset')
-      .selectAll('asset')
-      .$call(withExif)
-      .where((eb) => this.ownedOrSpaceAccessible(eb, userId, hiddenScope, visibleSpaceIds))
-      .where('visibility', '=', AssetVisibility.Timeline)
-      .where('deletedAt', 'is', null)
-      .where('fileCreatedAt', 'is not', null)
-      .where('fileModifiedAt', 'is not', null)
-      .where('localDateTime', 'is not', null)
-      .where('originalPath', 'like', `%${normalizedPath}/%`)
-      .where('originalPath', 'not like', `%${normalizedPath}/%/%`)
-      .orderBy(
-        (eb) => eb.fn('regexp_replace', ['asset.originalPath', eb.val('.*/(.+)'), eb.val(String.raw`\1`)]),
-        'asc',
-      )
-      .execute();
+    return (
+      this.db
+        .selectFrom('asset')
+        .selectAll('asset')
+        .select(projectedDuration)
+        .$call(withExif)
+        // #763: userId doubles as the caller here (this repository has only one user concept — no
+        // owner/caller split like the shared-space browse paths), so it's also the right id to
+        // project the per-user isFavorite overlay for. Gated on `.$if` (always true — userId is a
+        // required param) purely so Kysely infers `isFavoriteForUser` as optional, matching
+        // MapAsset and every other projection site instead of forcing it required here alone.
+        .$if(!!userId, (qb) => qb.select((eb) => favoriteExistsFor(eb, userId).as('isFavoriteForUser')))
+        .where((eb) => this.ownedOrSpaceAccessible(eb, userId, hiddenScope, visibleSpaceIds))
+        .where('visibility', '=', AssetVisibility.Timeline)
+        .where('deletedAt', 'is', null)
+        .where('fileCreatedAt', 'is not', null)
+        .where('fileModifiedAt', 'is not', null)
+        .where('localDateTime', 'is not', null)
+        .where((eb) => folderPathMatch(eb, partialPath))
+        .orderBy(
+          (eb) => eb.fn('regexp_replace', ['asset.originalPath', eb.val('.*/(.+)'), eb.val(String.raw`\1`)]),
+          'asc',
+        )
+        .execute()
+    );
   }
 
   // The folder explorer shows folders for assets a user can actually see: their own,
@@ -101,15 +110,10 @@ export class ViewRepository {
       ? eb.and([eb('asset.ownerId', '=', asUuid(userId)), subtraction])
       : eb('asset.ownerId', '=', asUuid(userId));
 
-    return eb.or([
-      ownerTerm,
-      ...spaceAssetPathBranches(eb, {
-        correlateAssetId: 'asset.id',
-        correlateLibraryId: 'asset.libraryId',
-        scope: visibleSpaceIds ? { spaceIds: visibleSpaceIds } : { memberUserId: userId },
-        albumTimelineGate: 'personal',
-        viewerId: userId,
-      }),
-    ]);
+    return ownedOrSharedWithViewer(eb, ownerTerm, {
+      scope: visibleSpaceIds ? { spaceIds: visibleSpaceIds } : { memberUserId: userId },
+      albumTimelineGate: 'personal',
+      viewerId: userId,
+    });
   }
 }

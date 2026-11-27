@@ -1,6 +1,11 @@
 import { Kysely } from 'kysely';
+import { Mocked } from 'vitest';
 import { SystemConfig } from 'src/dtos/config.dto.js';
 import { AssetFileType, AssetVisibility, JobName, JobStatus, SharedSpaceRole, SystemMetadataKey } from 'src/enum.js';
+import { FaceSearchRepository } from 'src/gallery/repositories/face-search.repository.js';
+import { GalleryMachineLearningRepository } from 'src/gallery/repositories/gallery-machine-learning.repository.js';
+import { PetFaceRepository } from 'src/gallery/repositories/pet-face.repository.js';
+import { personIdentityId, personSidecarColumns, personSpecies } from 'src/gallery/utils/person-sidecar.js';
 import { AssetJobRepository } from 'src/repositories/asset-job.repository.js';
 import { AssetRepository } from 'src/repositories/asset.repository.js';
 import { ConfigRepository } from 'src/repositories/config.repository.js';
@@ -42,6 +47,7 @@ const axisEmbedding = (axis: 'first' | 'second') => {
 // A small perturbation of axisEmbedding('first'): flips a handful of the 256 "on" dimensions off.
 // Cosine distance from the pure axis is small (a near-identical pet, e.g. a second photo of the
 // same dog), unlike axisEmbedding('second') which is maximally far.
+// eslint-disable-next-line unicorn/no-unnecessary-parameters
 const nearAxisEmbedding = (axis: 'first' | 'second', flips: number) => {
   const values = Array.from({ length: 512 }, (_, index) => {
     const inFirstHalf = index < 256;
@@ -53,6 +59,7 @@ const nearAxisEmbedding = (axis: 'first' | 'second', flips: number) => {
   return '[' + values.join(',') + ']';
 };
 
+// eslint-disable-next-line unicorn/no-unnecessary-parameters
 const setup = (db?: Kysely<DB>) => {
   clearConfigCache();
   const { sut, ctx } = newMediumService(PetRecognitionService, {
@@ -62,7 +69,9 @@ const setup = (db?: Kysely<DB>) => {
       DatabaseRepository,
       FaceIdentityRepository,
       PersonRepository,
+      PetFaceRepository,
       SearchRepository,
+      FaceSearchRepository,
       SharedSpaceRepository,
       SystemMetadataRepository,
     ],
@@ -137,6 +146,7 @@ describe('PetRecognitionService.handlePetRecognition (medium)', () => {
     const person = await ctx.database
       .selectFrom('person')
       .selectAll()
+      .select(personSidecarColumns())
       .where('personGroupId', '=', rows[0].personGroupId!)
       .executeTakeFirstOrThrow();
     expect(person.type).toBe('pet');
@@ -188,7 +198,7 @@ describe('PetRecognitionService.handlePetRecognition (medium)', () => {
 
     const people = await ctx.database
       .selectFrom('person')
-      .select(['personGroupId', 'species'])
+      .select(['personGroupId', personSpecies().as('species')])
       .where(
         'personGroupId',
         'in',
@@ -244,10 +254,10 @@ describe('PetRecognitionService.handlePetRecognition (medium)', () => {
   });
 });
 
-describe('PersonRepository.deleteAllPets (medium)', () => {
+describe('PetFaceRepository.deleteAllPets (medium)', () => {
   it('deletes an unassigned pet face identified only by its pet_search row (R1.1)', async () => {
     const { ctx } = setup();
-    const personRepository = ctx.get(PersonRepository);
+    const petFaceRepository = ctx.get(PetFaceRepository);
     const { user } = await ctx.newUser();
 
     // Recognition wrote this face + embedding, but it was never clustered into a person, so the
@@ -259,7 +269,7 @@ describe('PersonRepository.deleteAllPets (medium)', () => {
       .values({ faceId: unassignedFace.id, embedding: axisEmbedding('first') })
       .execute();
 
-    await personRepository.deleteAllPets();
+    await petFaceRepository.deleteAllPets();
 
     const faceRows = await ctx.database
       .selectFrom('asset_face')
@@ -278,7 +288,7 @@ describe('PersonRepository.deleteAllPets (medium)', () => {
 
   it('pin: deletes an assigned pet face, its person and its pet_search row (R1.2)', async () => {
     const { ctx } = setup();
-    const personRepository = ctx.get(PersonRepository);
+    const petFaceRepository = ctx.get(PetFaceRepository);
     const { user } = await ctx.newUser();
 
     const { person: petPerson } = await ctx.newPerson({ ownerId: user.id, type: 'pet', species: 'dog' });
@@ -292,7 +302,7 @@ describe('PersonRepository.deleteAllPets (medium)', () => {
       .values({ faceId: petFace.id, embedding: axisEmbedding('first') })
       .execute();
 
-    await personRepository.deleteAllPets();
+    await petFaceRepository.deleteAllPets();
 
     expect(
       await ctx.database
@@ -311,7 +321,7 @@ describe('PersonRepository.deleteAllPets (medium)', () => {
 
   it('pin: leaves a human person, face and face_search row untouched (R1.3)', async () => {
     const { ctx } = setup();
-    const personRepository = ctx.get(PersonRepository);
+    const petFaceRepository = ctx.get(PetFaceRepository);
     const { user } = await ctx.newUser();
 
     const { person: humanPerson } = await ctx.newPerson({ ownerId: user.id, name: 'Human' });
@@ -325,11 +335,12 @@ describe('PersonRepository.deleteAllPets (medium)', () => {
       .values({ faceId: humanFace.id, embedding: axisEmbedding('second') })
       .execute();
 
-    await personRepository.deleteAllPets();
+    await petFaceRepository.deleteAllPets();
 
     const personRow = await ctx.database
       .selectFrom('person')
       .selectAll()
+      .select(personSidecarColumns())
       .where('personGroupId', '=', humanPerson.personGroupId)
       .executeTakeFirstOrThrow();
     expect(personRow.type).toBe('person');
@@ -478,6 +489,7 @@ describe('PetRecognitionService.handleQueuePetRecognition (medium)', () => {
       const humanPersonRow = await ctx.database
         .selectFrom('person')
         .selectAll()
+        .select(personSidecarColumns())
         .where('personGroupId', '=', humanPerson.personGroupId)
         .executeTakeFirstOrThrow();
       expect(humanPersonRow.type).toBe('person');
@@ -678,6 +690,7 @@ describe('PetRecognitionService model switch (medium)', () => {
       const birdPersonRow = await ctx.database
         .selectFrom('person')
         .selectAll()
+        .select(personSidecarColumns())
         .where('personGroupId', '=', birdBucket.personGroupId)
         .executeTakeFirstOrThrow();
       expect(birdPersonRow.species).toBe('bird');
@@ -722,7 +735,7 @@ describe('PetRecognitionService model switch — shared-space copies (medium)', 
     const individual = await ctx.database
       .selectFrom('person')
       .innerJoin('asset_face', 'asset_face.personGroupId', 'person.personGroupId')
-      .select(['person.personGroupId', 'person.identityId'])
+      .select(['person.personGroupId', personIdentityId().as('identityId')])
       .where('asset_face.id', '=', face.id)
       .executeTakeFirstOrThrow();
     expect(individual.identityId).not.toBeNull();
@@ -864,7 +877,9 @@ const setupDetection = (db?: Kysely<DB>) => {
       DatabaseRepository,
       FaceIdentityRepository,
       PersonRepository,
+      PetFaceRepository,
       SearchRepository,
+      FaceSearchRepository,
       SharedSpaceRepository,
       SystemMetadataRepository,
     ],
@@ -895,18 +910,20 @@ describe('pet detection -> recognition pipeline (medium)', () => {
     const { asset } = await ctx.newAsset({ ownerId: user.id, visibility: AssetVisibility.Timeline });
     await ctx.newAssetFile({ assetId: asset.id, type: AssetFileType.Preview, path: `/preview/${asset.id}.webp` });
 
-    ctx.getMock(MachineLearningRepository).detectPets.mockResolvedValue({
-      imageHeight: 500,
-      imageWidth: 400,
-      pets: [
-        {
-          boundingBox: { x1: 10, y1: 20, x2: 110, y2: 120 },
-          score: 0.9,
-          label: 'dog',
-          embedding: axisEmbedding('first'),
-        },
-      ],
-    });
+    ctx
+      .getMock<typeof MachineLearningRepository, Mocked<GalleryMachineLearningRepository>>(MachineLearningRepository)
+      .detectPets.mockResolvedValue({
+        imageHeight: 500,
+        imageWidth: 400,
+        pets: [
+          {
+            boundingBox: { x1: 10, y1: 20, x2: 110, y2: 120 },
+            score: 0.9,
+            label: 'dog',
+            embedding: axisEmbedding('first'),
+          },
+        ],
+      });
 
     expect(await detectionSut.handlePetDetection({ id: asset.id })).toBe(JobStatus.Success);
 
@@ -942,6 +959,7 @@ describe('pet detection -> recognition pipeline (medium)', () => {
     const person = await ctx.database
       .selectFrom('person')
       .selectAll()
+      .select(personSidecarColumns())
       .where('personGroupId', '=', faceRow.personGroupId!)
       .executeTakeFirstOrThrow();
     expect(person.type).toBe('pet');

@@ -36,9 +36,65 @@ The mobile app is typically compatible with the current and prior major version.
 Thus, we recommend upgrading all mobile clients before upgrading the server to ensure compatibility.
 
 We do not backport patches to earlier versions. We encourage all users to run the most recent stable release of Gallery.
-Downgrading to an earlier version, even within the same minor version, is not supported.
+Downgrading is not supported in general: an earlier release does not know the database changes a later one made. To go back to an earlier Gallery release anyway, follow [Rolling back to an earlier release](#rolling-back-to-an-earlier-release).
 
 [semver]: https://semver.org/
+
+## Rolling back to an earlier release
+
+An earlier Gallery release refuses to start on a database that has Gallery migrations it does not ship. Undo those migrations first, with the release you are leaving, which is the one that knows how to undo them. Each step moves its data back to where the earlier release keeps it, so nothing the earlier release can show is lost. Data for features the earlier release does not have goes with the step that undoes them: going back to a 5.7 release drops favorites set by anyone other than the asset's owner, and the record of who added each face. The procedure was tested going back to `v5.8.0-rc.1` and upgrading again; going back to 5.7 was not tested.
+
+Three older Gallery migrations do not move their data back, so going back to a release from before one of them loses that data:
+
+- `1778000000000-MoveClassificationToConfig`: the classification categories. Undoing it recreates the old classification tables empty and removes the categories from the settings.
+- `1777000000000-AdminScopedClassification`: the owner and tag of each classification category, which come back empty.
+- `1775100000000-DropSpacePersonThumbnailPath`: the thumbnail of each space person, whose path comes back empty.
+
+1. Back up your database.
+2. Stop the stack with `docker compose down`, and keep the current image in your compose file for now.
+3. Find the newest Gallery migration the earlier release ships, for example for `v5.8.0-rc.1`:
+
+   ```bash
+   docker run --rm --entrypoint ls ghcr.io/open-noodle/gallery-server:v5.8.0-rc.1 /usr/src/app/server/dist/schema/migrations-gallery
+   ```
+
+4. List the Gallery migrations your database has, newest first:
+
+   ```bash
+   docker compose up -d database
+   docker compose exec database psql -U postgres -d immich -c 'SELECT "name" FROM "gallery_migrations" ORDER BY "name" DESC LIMIT 20;'
+   ```
+
+5. Undo the newest Gallery migration with the current image, and repeat until the newest name left is the one from step 3. Each run logs `Reverted migration "<name>"`. Do not run it once more: when no Gallery migration is left to undo, it undoes one of the base database migrations Gallery shares with its upstream project.
+
+   ```bash
+   docker compose run --rm immich-server "node server/dist/bin/gallery-migrations.js revert"
+   ```
+
+   This command does not go through the image's start script, so it does not read `*_FILE` secrets. If your compose file passes the database password or URL that way, add `-e DB_PASSWORD=<password>` (or `-e DB_URL=<url>`) to the `run` command.
+
+   The command undoes the most recently applied migration, which is not always the one with the newest name. Before moving on, check that every name the list shows is one the earlier release ships, not only the newest.
+
+   `1790900000000-SplitSharedPersonGroups` is the exception. It splits people that several users share one per user, and while any are split it can only be undone after every Gallery migration applied after it; the command refuses otherwise. If the list still shows it, the earlier release does not ship it, and this query returns a number above 0, delete only its record instead:
+
+   ```bash
+   docker compose exec database psql -U postgres -d immich -c 'SELECT count(*) FROM "person_group_split";'
+   docker compose exec database psql -U postgres -d immich -c "DELETE FROM \"gallery_migrations\" WHERE \"name\" = '1790900000000-SplitSharedPersonGroups';"
+   ```
+
+   The earlier release works with the split people. To run `revert-to-immich.sql` later, upgrade to this release again first: the earlier release's copy of the script does not put shared people back together.
+
+6. Releases before the separate `gallery_migrations` table (all of 5.7 and the 5.8 release candidates) look for their migration records in `kysely_migrations`. For those, copy the records back:
+
+   ```bash
+   docker compose exec database psql -U postgres -d immich -c 'INSERT INTO "kysely_migrations" ("name", "timestamp") SELECT "name", "timestamp" FROM "gallery_migrations" ON CONFLICT ("name") DO NOTHING;'
+   ```
+
+   Without this step the earlier release stops on boot with `relation "storage_migration_log" already exists`. The failed boot changes nothing in the database.
+
+7. Switch the image to the earlier release and start the stack.
+
+Use your own container, user and database names if they differ. When you upgrade again, Gallery moves the records back and runs the undone migrations again.
 
 ## Migrating to VectorChord
 

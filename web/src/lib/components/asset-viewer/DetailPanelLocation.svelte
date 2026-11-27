@@ -1,20 +1,21 @@
 <script lang="ts">
-  import { page } from '$app/state';
-  import GeolocationPointPickerModal from '$lib/modals/GeolocationPointPickerModal.svelte';
-  import { getDetailedAddressRemainder } from '$lib/utils/address-display';
-  import { applyContextualFilter, buildContextualMapUrl } from '$lib/utils/filter-target';
-  import { handleError } from '$lib/utils/handle-error';
+  import { localizeCountry } from '#lib/gallery/utils/country-names.ts';
+  import GeolocationPointPickerModal from '#lib/modals/GeolocationPointPickerModal.svelte';
+  import { getDetailedAddressRemainder } from '#lib/utils/address-display.ts';
+  import { applyContextualFilter, buildContextualMapUrl } from '#lib/utils/filter-target.ts';
+  import { handleError } from '#lib/utils/handle-error.ts';
   import { ensureAssetAddress, updateAsset, type AssetResponseDto } from '@immich/sdk';
   import { Icon, IconButton, modalManager } from '@immich/ui';
   import { mdiContentCopy, mdiMapMarkerOutline, mdiMapOutline, mdiPencil } from '@mdi/js';
-  import { t } from 'svelte-i18n';
+  import { locale, t } from 'svelte-i18n';
+  import { page } from '$app/state';
 
   type Props = {
     isOwner: boolean;
     /**
-     * R4/E2 — false on a shared link, where there is no timeline to filter. Threaded from
-     * DetailPanel exactly like `isOwner`.
-     */
+    R4/E2 — false on a shared link, where there is no timeline to filter. Threaded from
+    DetailPanel exactly like `isOwner`.
+    */
     canFilter?: boolean;
     asset: AssetResponseDto;
     onAddressResolved?: (asset: AssetResponseDto) => void;
@@ -22,8 +23,6 @@
 
   let { isOwner, canFilter = false, asset = $bindable(), onAddressResolved }: Props = $props();
 
-  // R9/E7 — a value that trims to nothing produces a patch that trims to nothing: the click would
-  // close the asset viewer and apply NO filter. Such a value is rendered as plain text.
   let requestedPoint = $state('');
   $effect(() => {
     const exif = asset.exifInfo;
@@ -31,9 +30,9 @@
     if (
       (!isOwner && !canFilter) ||
       exif?.formattedAddress ||
-      typeof exif?.latitude !== 'number' ||
-      typeof exif?.longitude !== 'number' ||
-      !['China', '中国', '中华人民共和国'].includes(exif?.country ?? '') ||
+      !Number.isFinite(exif?.latitude) ||
+      !Number.isFinite(exif?.longitude) ||
+      !/^(china|中国|中华人民共和国)$/i.test(exif?.country?.trim() ?? '') ||
       requestedPoint === key
     ) {
       return;
@@ -42,32 +41,33 @@
     const id = asset.id;
     void ensureAssetAddress({ id })
       .then((result) => {
-        if (!(
-          asset.id === id &&
-          `${asset.id}:${asset.exifInfo?.latitude}:${asset.exifInfo?.longitude}` === key &&
-          result.formattedAddress
-        )) {
+        if (
+          asset.id !== id ||
+          `${asset.id}:${asset.exifInfo?.latitude}:${asset.exifInfo?.longitude}` !== key ||
+          !result.formattedAddress
+        ) {
           return;
         }
-
         asset = { ...asset, exifInfo: { ...asset.exifInfo, formattedAddress: result.formattedAddress } };
         onAddressResolved?.(asset);
       })
       .catch(() => {
-        /* Keep the existing location when offline or the provider is unavailable. */
+        /* Retain the original location when the provider is unavailable. */
       });
   });
-
+  // R9/E7 — a value that trims to nothing produces a patch that trims to nothing: the click would
+  // close the asset viewer and apply NO filter. Such a value is rendered as plain text.
   const city = $derived(asset.exifInfo?.city?.trim() ?? '');
   const stateName = $derived(asset.exifInfo?.state?.trim() ?? '');
   const country = $derived(asset.exifInfo?.country?.trim() ?? '');
+  const countryLabel = $derived(localizeCountry(country, $locale));
   const detailedAddress = $derived(getDetailedAddressRemainder(asset.exifInfo));
 
   // E10 — the pin carries the current context (Space scope + active filters) to the full map, and
   // centers it on this asset. Null on an album, which has no map URL (see buildContextualMapUrl).
   const mapUrl = $derived(
     buildContextualMapUrl(
-      page.url,
+      new URL(page.url.href),
       asset.exifInfo?.latitude && asset.exifInfo.longitude
         ? { lat: asset.exifInfo.latitude, lng: asset.exifInfo.longitude, zoom: 12.5 }
         : undefined,
@@ -94,6 +94,7 @@
         updateAssetDto: { latitude: point.lat, longitude: point.lng },
       });
       requestedPoint = '';
+      onAddressResolved?.(asset);
     } catch (error) {
       handleError(error, $t('errors.unable_to_change_location'));
     }
@@ -155,13 +156,13 @@
                 <button
                   type="button"
                   class="text-left hover:text-primary"
-                  aria-label="{$t('filter_by_location')}: {country}"
+                  aria-label="{$t('filter_by_location')}: {countryLabel}"
                   onclick={() => applyContextualFilter({ city: undefined, state: undefined, country })}
                 >
-                  {asset.exifInfo.country}
+                  {countryLabel}
                 </button>
               {:else}
-                <span>{asset.exifInfo.country}</span>
+                <span>{countryLabel}</span>
               {/if}
             </p>
           </div>

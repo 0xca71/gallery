@@ -1,5 +1,6 @@
 import 'package:auto_route/auto_route.dart';
 import 'package:flutter/material.dart';
+import 'package:immich_mobile/gallery/search/search_scope.dart';
 import 'package:immich_mobile/generated/translations.g.dart';
 import 'package:immich_mobile/presentation/widgets/bottom_sheet/archive_bottom_sheet.widget.dart';
 import 'package:immich_mobile/presentation/widgets/timeline/timeline.widget.dart';
@@ -12,8 +13,6 @@ import 'package:immich_mobile/widgets/common/mesmerizing_sliver_app_bar.dart';
 class ArchivePage extends StatelessWidget {
   const ArchivePage({super.key});
 
-  static const timelineOverviewControlsEnabled = true;
-
   @override
   Widget build(BuildContext context) {
     return TimelineRouteScope(
@@ -25,9 +24,10 @@ class ArchivePage extends StatelessWidget {
 
         return ref.watch(timelineFactoryProvider).archive(user.id, groupBy: groupBy, temporalScope: scope);
       },
+      search: const ArchiveSearchScope(),
       child: Timeline(
         withGroupingPill: true,
-        appBar: MesmerizingSliverAppBar(title: context.t.archive, icon: Icons.archive_outlined),
+        appBar: MesmerizingSliverAppBar(title: context.t.archive),
         bottomSheet: const ArchiveBottomSheet(),
       ),
     );

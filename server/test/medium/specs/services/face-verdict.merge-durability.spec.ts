@@ -1,5 +1,6 @@
 import { Kysely } from 'kysely';
 import { SharedSpaceRole, SourceType } from 'src/enum.js';
+import { GalleryPersonRepository } from 'src/gallery/repositories/gallery-person.repository.js';
 import { DatabaseRepository } from 'src/repositories/database.repository.js';
 import { FaceIdentityRepository } from 'src/repositories/face-identity.repository.js';
 import { FacePersonVerdictRepository } from 'src/repositories/face-person-verdict.repository.js';
@@ -27,6 +28,7 @@ const ALLOW_MERGE: MergeAuthorizer = () => Promise.resolve();
 
 let defaultDatabase: Kysely<DB>;
 
+// eslint-disable-next-line unicorn/no-unnecessary-parameters
 const setup = (db: Kysely<DB> = defaultDatabase) => {
   const { ctx } = newMediumService(BaseService, {
     database: db,
@@ -47,6 +49,7 @@ const setup = (db: Kysely<DB> = defaultDatabase) => {
     jobRepository,
     logger: ctx.getMock(LoggingRepository),
     personRepository: ctx.get(PersonRepository),
+    galleryPersonRepository: ctx.get(GalleryPersonRepository),
     sharedSpaceRepository: ctx.get(SharedSpaceRepository),
   });
   return {
@@ -91,10 +94,10 @@ const newSpacePerson = (spaceId: string, name: string) =>
     .executeTakeFirstOrThrow();
 
 /**
- * Space twin of {@link seedFace}: an editor-owned shared space with a space-reachable asset+face, and Bob/Robert
- * as two space-people in that space. Mirrors the fixture patterns in shared-space-face-suggestions.service.spec.ts
- * (`createSuggestionFixture`) and face-person-verdict.repository.spec.ts's space-person suggestion methods block.
- */
+Space twin of {@link seedFace}: an editor-owned shared space with a space-reachable asset+face, and Bob/Robert
+as two space-people in that space. Mirrors the fixture patterns in shared-space-face-suggestions.service.spec.ts
+(`createSuggestionFixture`) and face-person-verdict.repository.spec.ts's space-person suggestion methods block.
+*/
 const seedSpaceMergeFixture = async (ctx: Awaited<ReturnType<typeof setup>>['ctx']) => {
   const { user: owner } = await ctx.newUser();
   const { user: editor } = await ctx.newUser();

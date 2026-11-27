@@ -13,6 +13,19 @@ abstract class ServerFeatures with _$ServerFeatures {
     required bool passwordLogin,
     @Default(false) bool ocr,
     @Default(false) bool smartSearch,
+    // Fork capability signal: the sync request types the server declares it accepts
+    // (`GET /server/features` → `syncRequestTypes`). Null means "not declared" — a server that
+    // predates capability signalling (fork < 5.7.0), or features not loaded yet — and must stay
+    // distinct from an empty set, which would read as "declares nothing".
+    Set<String>? syncRequestTypes,
+    // Fork capability signal: the server reads takenAfter/takenBefore as a wall-clock range with an
+    // exclusive end (`GET /server/features` → `localTakenRange`). False on servers that predate it.
+    @Default(false) bool localTakenRange,
+    // Fork: Spatial Scene is on (`GET /server/features` → `spatialScene`). False on servers that predate it.
+    @Default(false) bool spatialScene,
+    // Fork: videos may have a Data Saver copy (`GET /server/features` → `dataSaverVideo`). False on servers that
+    // predate it.
+    @Default(false) bool dataSaverVideo,
   }) = _ServerFeatures;
 
   factory ServerFeatures.fromDto(ServerFeaturesDto dto) => ServerFeatures(
@@ -22,5 +35,9 @@ abstract class ServerFeatures with _$ServerFeatures {
     passwordLogin: dto.passwordLogin,
     ocr: dto.ocr,
     smartSearch: dto.smartSearch,
+    syncRequestTypes: dto.syncRequestTypes.orElse(null)?.toSet(),
+    localTakenRange: dto.localTakenRange.orElse(null) ?? false,
+    spatialScene: dto.spatialScene.orElse(null) ?? false,
+    dataSaverVideo: dto.dataSaverVideo.orElse(null) ?? false,
   );
 }

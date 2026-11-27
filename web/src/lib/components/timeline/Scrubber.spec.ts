@@ -1,13 +1,15 @@
-import { render, screen } from '@testing-library/svelte';
+import type { TimelineManager } from '#lib/managers/timeline-manager/timeline-manager.svelte.ts';
+import { test } from '#test/unit/fixtures.ts';
 import { tick } from 'svelte';
-import type { TimelineManager } from '$lib/managers/timeline-manager/timeline-manager.svelte';
+import { render } from 'vitest-browser-svelte';
+import { page } from 'vitest/browser';
 import Scrubber from './Scrubber.svelte';
 
 const testState = vi.hoisted(() => ({
   pointerCoarse: true,
 }));
 
-vi.mock('$lib/stores/media-query-manager.svelte', () => ({
+vi.mock('#lib/stores/media-query-manager.svelte.ts', () => ({
   mediaQueryManager: {
     get pointerCoarse() {
       return testState.pointerCoarse;
@@ -15,38 +17,23 @@ vi.mock('$lib/stores/media-query-manager.svelte', () => ({
   },
 }));
 
-vi.mock('$lib/stores/preferences.store', async () => {
-  const { readable } = await import('svelte/store');
-  return { locale: readable('en-US') };
-});
-
-vi.mock('@immich/ui', async (importOriginal) => {
-  const original = await importOriginal<typeof import('@immich/ui')>();
-  const { default: NoopComponent } = await import('@test-data/mocks/noop-component.svelte');
-  return { ...original, Icon: NoopComponent };
-});
-
 const makeTimelineManager = () =>
   ({
     scrolling: true,
+    grouping: 'day',
     scrubberMonths: [{ height: 1000, assetCount: 10, year: 2024, month: 1, title: 'Jan 2024' }],
     scrubberTimelineHeight: 1000,
     getAssetOrder: () => 'desc',
     getScrubberDateAtMonthScrollPercent: vi.fn(() => ({ year: 2024, month: 1, day: 15 })),
-    ensureScrubberMonthGeometry: vi.fn(),
+    ensureScrubberMonthGeometry: vi.fn().mockResolvedValue(undefined),
   }) as unknown as TimelineManager;
 
 describe('Scrubber', () => {
-  it('shows the precise day while dragging on a coarse-pointer device', async () => {
+  test('shows the precise day while dragging on a coarse-pointer device', async () => {
     const timelineManager = makeTimelineManager();
-    render(Scrubber, {
-      props: {
-        timelineManager,
-        height: 1000,
-      },
-    });
+    await render(Scrubber, { timelineManager, height: 1000 });
 
-    const scrubber = screen.getByRole('scrollbar');
+    const scrubber = page.getByRole('scrollbar').element() as HTMLElement;
     vi.spyOn(scrubber, 'getBoundingClientRect').mockReturnValue({
       top: 0,
       bottom: 1000,
@@ -82,7 +69,7 @@ describe('Scrubber', () => {
     await tick();
 
     expect(timelineManager.getScrubberDateAtMonthScrollPercent).toHaveBeenCalled();
-    expect(screen.getByText('Jan 15, 2024')).toBeInTheDocument();
+    await expect.element(page.getByText('Jan 15, 2024')).toBeInTheDocument();
     Reflect.deleteProperty(document, 'elementsFromPoint');
   });
 });

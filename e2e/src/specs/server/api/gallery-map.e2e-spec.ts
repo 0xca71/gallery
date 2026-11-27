@@ -83,9 +83,9 @@ describe('/gallery/map/markers', () => {
   });
 
   it('country filter narrows the result to matching assets', async () => {
-    // The thompson-springs fixture has country = 'United States of America'.
+    // The thompson-springs fixture reverse-geocodes to 'United States' (GeoNames names since immich-30199).
     const matching = await request(app)
-      .get('/gallery/map/markers?country=United%20States%20of%20America')
+      .get('/gallery/map/markers?country=United%20States')
       .set(asBearerAuth(user.accessToken));
     expect(matching.status).toBe(200);
     expect((matching.body as Array<{ id: string }>).map((m) => m.id)).toContain(assetWithGps.id);
@@ -368,7 +368,7 @@ describe('/gallery/map/markers', () => {
 
     it('an album asset that also lives in a shared space KEEPS its pin even when the caller has toggled that space out of their own timeline (R4 regression, #656)', async () => {
       // The R4 hole: the album query used to compute timelineSpaceIds from the caller's OWN
-      // showInTimeline preference and feed it into albumSharedSpaceScope as the RBAC gate. Toggling
+      // showInTimeline preference and feed it into albumConfinedToViewer as the RBAC gate. Toggling
       // showInTimeline=false for this space made that gate degenerate to "the asset must be in no
       // shared space at all", dropping spaceAssetId's pin for that caller — even though the album
       // grid kept showing it regardless. Since the fix, album ACCESS (checked above) is the whole
@@ -432,7 +432,7 @@ describe('/gallery/map/markers', () => {
 
     it('albumId NARROWS: an owner asset outside the album is excluded, even though it has a marker', async () => {
       // The over-inclusion direction. Dropping userIds for an album query means the whole safety of
-      // the album branch rests on inAlbums() inside albumSharedSpaceScope — whose first arm admits
+      // the album branch rests on albumMembership() plus albumConfinedToViewer, whose first arm admits
       // ANY asset that is in no shared space at all, for ANY caller. If a future refactor lost the
       // albumIds `$if` in searchAssetBuilder, or the service stopped forwarding albumIds, `?albumId=`
       // would silently widen to every non-space-shared geotagged asset on the instance, and every
@@ -491,10 +491,15 @@ describe('/gallery/map/markers', () => {
       ]);
 
       // Random images (distinct checksums, no EXIF) + an explicit GPS write. latitude/longitude are
-      // lockable exif properties (database.ts lockableProperties), so a user-set value is not
-      // clobbered by the metadata-extraction pass that follows the upload.
+      // lockable exif properties (database.ts lockableProperties), but the lock only protects a value
+      // that is already written when metadata extraction reads the row: a PUT that lands while that
+      // pass is in flight is overwritten by it, and the asset silently loses its pin (seen in CI).
+      // So wait for the upload pipeline to finish (assetUpload fires after it) before writing GPS.
+      // The socket must be connected before the upload, or the event can be missed.
+      const ownerWebsocket = await utils.connectWebsocket(owner.accessToken);
       const createGeotagged = async () => {
         const { id } = await utils.createAsset(owner.accessToken);
+        await utils.waitForWebsocketEvent({ event: 'assetUpload', id });
         const { status } = await request(app)
           .put(`/assets/${id}`)
           .set(asBearerAuth(owner.accessToken))
@@ -508,6 +513,7 @@ describe('/gallery/map/markers', () => {
       hiddenAssetId = await createGeotagged();
       lockedAssetId = await createGeotagged();
       trashedAssetId = await createGeotagged();
+      utils.disconnectWebsocket(ownerWebsocket);
 
       const album = await utils.createAlbum(owner.accessToken, {
         albumName: 't22 visibility album',
@@ -549,7 +555,7 @@ describe('/gallery/map/markers', () => {
       }
 
       await utils.deleteAssets(owner.accessToken, [trashedAssetId]);
-    });
+    }, 60_000);
 
     it('pins an ARCHIVED album asset, for the album owner and for a viewer of the shared album', async () => {
       for (const actor of [owner, viewer]) {
@@ -766,10 +772,14 @@ describe('/gallery/map/markers', () => {
       wildcardUser = await utils.userSetup(admin.accessToken, createUserDto.create('t23-wildcard-user'));
 
       // Random images so each filename gets its own asset row, geotagged so each can produce a pin.
+      // GPS is written only after the upload pipeline finishes, so metadata extraction cannot
+      // overwrite it (see the D4 setup above).
+      const ws = await utils.connectWebsocket(wildcardUser.accessToken);
       const createNamed = async (filename: string) => {
         const { id } = await utils.createAsset(wildcardUser.accessToken, {
           assetData: { bytes: makeRandomImage(), filename },
         });
+        await utils.waitForWebsocketEvent({ event: 'assetUpload', id });
         const { status } = await request(app)
           .put(`/assets/${id}`)
           .set(asBearerAuth(wildcardUser.accessToken))
@@ -781,7 +791,8 @@ describe('/gallery/map/markers', () => {
       underscoreAssetId = await createNamed('IMG_0001.png');
       dashAssetId = await createNamed('IMG-0001.png');
       percentAssetId = await createNamed('battery-100%.png');
-    });
+      utils.disconnectWebsocket(ws);
+    }, 60_000);
 
     it('does not treat `_` in an originalFileName filter as a single-char wildcard', async () => {
       const { status, body } = await request(app)
@@ -1126,6 +1137,67 @@ describe('/gallery/map/markers', () => {
 
       expect(status).toBe(200);
       expect(markerIds(body)).toEqual([favAssetId]);
+    });
+  });
+
+  describe('cross-scope favorite markers (#763 slice 4, E23)', () => {
+    let spaceOwner: LoginResponseDto;
+    let spaceGpsAsset: AssetMediaResponseDto;
+
+    beforeAll(async () => {
+      spaceOwner = await utils.userSetup(admin.accessToken, createUserDto.create('t18-space-owner'));
+      const filepath = join(testAssetDir, 'metadata/gps-position/thompson-springs.jpg');
+      spaceGpsAsset = await utils.createAsset(spaceOwner.accessToken, {
+        assetData: { bytes: await readFile(filepath), filename: basename(filepath) },
+      });
+      // Wait for metadata (GPS) extraction. The file's websocket is connected as `user`, so
+      // waitForWebsocketEvent will NOT see spaceOwner's upload — poll the post-condition instead
+      // (memory feedback_e2e_waitforqueuefinish_false_done).
+      let exifReady = false;
+      for (let i = 0; i < 30; i++) {
+        const info = await utils.getAssetInfo(spaceOwner.accessToken, spaceGpsAsset.id);
+        if (info.exifInfo?.latitude != null) {
+          exifReady = true;
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+      if (!exifReady) {
+        throw new Error('Timed out waiting for GPS metadata extraction on spaceGpsAsset');
+      }
+
+      const space = await utils.createSpace(spaceOwner.accessToken, { name: 'map-fav-space' });
+      await utils.addSpaceMember(spaceOwner.accessToken, space.id, {
+        userId: user.userId,
+        role: SharedSpaceRole.Viewer,
+      });
+      await utils.addSpaceAssets(spaceOwner.accessToken, space.id, [spaceGpsAsset.id]);
+      // The VIEWER favorites the non-owned space asset.
+      await request(app)
+        .put('/assets/favorites')
+        .set(asBearerAuth(user.accessToken))
+        .send({ ids: [spaceGpsAsset.id], isFavorite: true });
+    });
+
+    it('/map/markers?isFavorite=true&withSharedSpaces=true includes the cross-space favorite', async () => {
+      const { status, body } = await request(app)
+        .get('/map/markers?isFavorite=true&withSharedSpaces=true')
+        .set(asBearerAuth(user.accessToken));
+      expect(status).toBe(200);
+      expect((body as Array<{ id: string }>).map((m) => m.id)).toContain(spaceGpsAsset.id);
+    });
+
+    it('/gallery/map/markers?isFavorite=true&withSharedSpaces=true includes the cross-space favorite', async () => {
+      const { status, body } = await request(app)
+        .get('/gallery/map/markers?isFavorite=true&withSharedSpaces=true')
+        .set(asBearerAuth(user.accessToken));
+      expect(status).toBe(200);
+      expect((body as Array<{ id: string }>).map((m) => m.id)).toContain(spaceGpsAsset.id);
+    });
+
+    it("the owner's map does not show the viewer's favorite as their own (no cross-user read)", async () => {
+      const { body } = await request(app).get('/map/markers?isFavorite=true').set(asBearerAuth(spaceOwner.accessToken));
+      expect((body as Array<{ id: string }>).map((m) => m.id)).not.toContain(spaceGpsAsset.id);
     });
   });
 });

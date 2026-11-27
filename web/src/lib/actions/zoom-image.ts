@@ -1,7 +1,7 @@
+import { assetViewerManager } from '#lib/managers/asset-viewer-manager.svelte.ts';
+import type { Size } from '#lib/utils/container-utils.ts';
+import { constrainPhotoPosition, rotatePoint } from '#lib/utils/zoom-geometry.ts';
 import { createZoomImageWheel } from '@zoom-image/core';
-import { assetViewerManager } from '$lib/managers/asset-viewer-manager.svelte';
-import type { Size } from '$lib/utils/container-utils';
-import { constrainPhotoPosition, rotatePoint } from '$lib/utils/zoom-geometry';
 
 type ZoomOptions = { zoomTarget?: HTMLElement; image?: Size };
 

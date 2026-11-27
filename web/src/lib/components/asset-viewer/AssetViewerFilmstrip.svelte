@@ -1,7 +1,8 @@
 <script lang="ts">
-  import Thumbnail from '$lib/components/assets/thumbnail/Thumbnail.svelte';
-  import type { TimelineAsset } from '$lib/managers/timeline-manager/types';
-  import { toTimelineAsset } from '$lib/utils/timeline-util';
+  import Thumbnail from '#lib/components/assets/thumbnail/Thumbnail.svelte';
+  import type { TimelineAsset } from '#lib/managers/timeline-manager/types.ts';
+  import { handleError } from '#lib/utils/handle-error.ts';
+  import { toTimelineAsset } from '#lib/utils/timeline-util.ts';
   import type { AssetResponseDto } from '@immich/sdk';
   import { onDestroy, untrack } from 'svelte';
   import { t } from 'svelte-i18n';
@@ -40,14 +41,27 @@
     for (const item of element.querySelectorAll<HTMLElement>('[data-filmstrip-asset]')) {
       const rect = item.getBoundingClientRect();
       const distance = Math.abs(rect.left + rect.width / 2 - center);
-      if (distance < closestDistance) {
-        closest = item;
-        closestDistance = distance;
+      if (distance >= closestDistance) {
+        continue;
       }
+      closest = item;
+      closestDistance = distance;
     }
 
     const assetId = closest?.dataset.filmstripAsset;
     return assets.find((asset) => asset.id === assetId);
+  };
+
+  const selectTarget = async (asset: FilmstripAsset) => {
+    try {
+      await onAssetSelect(asset);
+    } catch (error) {
+      if (selectionPendingAssetId === asset.id) {
+        selectionPendingAssetId = undefined;
+        pendingAssetId = currentAssetId;
+      }
+      handleError(error, $t('error_while_navigating'));
+    }
   };
 
   const settleScroll = () => {
@@ -71,11 +85,7 @@
     const asset = assets.find(({ id }) => id === pendingAssetId);
     if (asset && asset.id !== currentAssetId) {
       selectionPendingAssetId = asset.id;
-      void Promise.resolve(onAssetSelect(asset)).catch(() => {
-        if (selectionPendingAssetId === asset.id) {
-          selectionPendingAssetId = undefined;
-        }
-      });
+      void selectTarget(asset);
     }
   };
 
@@ -131,7 +141,7 @@
       clearTimeout(scrollEndTimer);
       scrollEndTimer = undefined;
     }
-    void onAssetSelect(asset);
+    void selectTarget(asset);
   };
 
   const centerCurrentAsset = (assetId = currentAssetId) => {
@@ -203,13 +213,14 @@
 >
   <div class="flex w-max gap-1" style="padding-inline: calc(50vw - 28px);">
     {#each assets as asset, index (asset.id)}
-      {@const timelineAsset = toTimelineAsset(asset)}
-      {@const selected = asset.id === pendingAssetId}
-      {@const distanceFromPending = index - pendingAssetIndex}
-      {@const preload =
+      {const timelineAsset = $derived(toTimelineAsset(asset))}
+      {const selected = $derived(asset.id === pendingAssetId)}
+      {const distanceFromPending = $derived(index - pendingAssetIndex)}
+      {const preload = $derived(
         pendingAssetIndex >= 0 &&
-        distanceFromPending >= -filmstripPreloadBefore &&
-        distanceFromPending <= filmstripPreloadAfter}
+          distanceFromPending >= -filmstripPreloadBefore &&
+          distanceFromPending <= filmstripPreloadAfter,
+      )}
       <div
         class="relative size-14 shrink-0 snap-center overflow-hidden rounded-sm"
         data-filmstrip-asset={asset.id}
@@ -221,7 +232,6 @@
           readonly
           {preload}
           thumbnailSize={56}
-          dimmed={!selected}
           imageClass={selected ? 'ring-2 ring-white ring-offset-1 ring-offset-black' : 'opacity-75'}
           onClick={() => selectAsset(asset)}
         />

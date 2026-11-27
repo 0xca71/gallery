@@ -66,6 +66,51 @@ describe(DownloadService.name, () => {
       expect(archiveMock.addFile).toHaveBeenNthCalledWith(1, asset.originalPath, asset.originalFileName);
     });
 
+    it('should return the original file when the unedited version is requested', async () => {
+      const archiveMock = {
+        addFile: vitest.fn(),
+        finalize: vitest.fn(),
+        stream: new Readable(),
+      };
+      const asset = AssetFactory.create();
+
+      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([asset.id]));
+      mocks.asset.getForOriginals.mockResolvedValue([asset]);
+      mocks.storage.createZipStream.mockReturnValue(archiveMock);
+
+      await expect(sut.downloadArchive(authStub.admin, { assetIds: [asset.id], edited: false })).resolves.toMatchObject(
+        {
+          stream: archiveMock.stream,
+        },
+      );
+
+      expect(mocks.asset.getForOriginals).toHaveBeenCalledWith([asset.id], false);
+      expect(archiveMock.addFile).toHaveBeenCalledWith(asset.originalPath, asset.originalFileName);
+    });
+
+    it('should not return the unedited version when requested using a shared link', async () => {
+      const archiveMock = {
+        addFile: vitest.fn(),
+        finalize: vitest.fn(),
+        stream: new Readable(),
+      };
+      const asset = AssetFactory.create({ originalFileName: 'foo.heic' });
+      const editedPath = '/data/edited.jpg';
+
+      mocks.access.asset.checkSharedLinkAccess.mockResolvedValue(new Set([asset.id]));
+      mocks.asset.getForOriginals.mockResolvedValue([{ ...asset, editedPath }]);
+      mocks.storage.createZipStream.mockReturnValue(archiveMock);
+
+      await expect(
+        sut.downloadArchive(authStub.adminSharedLink, { assetIds: [asset.id], edited: false }),
+      ).resolves.toMatchObject({
+        stream: archiveMock.stream,
+      });
+
+      expect(mocks.asset.getForOriginals).toHaveBeenCalledWith([asset.id], true);
+      expect(archiveMock.addFile).toHaveBeenCalledWith(editedPath, 'foo.jpg');
+    });
+
     it('should log a warning if the original path could not be resolved', async () => {
       const archiveMock = {
         addFile: vitest.fn(),
@@ -163,9 +208,9 @@ describe(DownloadService.name, () => {
       { input: String.raw`C:\temp\abs3.jpg`, expected: 'Ctempabs3.jpg' },
       { input: 'a/../../b.jpg', expected: 'a....b.jpg' },
       { input: String.raw`..\..\win1.jpg`, expected: '....win1.jpg' },
-      { input: '/etc/passwd', expected: 'etcpasswd' },
-      { input: '..', expected: 'unnamed' },
-      { input: '', expected: 'unnamed' },
+      { input: '/etc/passwd', expected: 'etcpasswd.jpg' },
+      { input: '..', expected: 'unnamed.jpg' },
+      { input: '', expected: 'unnamed.jpg' },
     ])('should sanitize unsafe originalFileName "$input" to "$expected"', async ({ input, expected }) => {
       const archiveMock = {
         addFile: vitest.fn(),
@@ -332,7 +377,7 @@ describe(DownloadService.name, () => {
       mocks.storage.createZipStream.mockReturnValue(archiveMock);
 
       const mockBackend = { get: vitest.fn() };
-      vitest.spyOn(StorageService, 'resolveBackendForKey').mockReturnValue(mockBackend as any);
+      vitest.spyOn(StorageService, 'backendFor').mockReturnValue(mockBackend as any);
 
       await sut.downloadArchive(authStub.admin, { assetIds: [s3Asset.id] });
 
@@ -368,7 +413,7 @@ describe(DownloadService.name, () => {
       mocks.storage.createZipStream.mockReturnValue(archiveMock);
 
       const mockBackend = { get: vitest.fn() };
-      vitest.spyOn(StorageService, 'resolveBackendForKey').mockReturnValue(mockBackend as any);
+      vitest.spyOn(StorageService, 'backendFor').mockReturnValue(mockBackend as any);
 
       const { abort } = await sut.downloadArchive(authStub.admin, {
         assetIds: [s3Asset1.id, s3Asset2.id],
@@ -400,7 +445,7 @@ describe(DownloadService.name, () => {
       mocks.storage.createZipStream.mockReturnValue(archiveMock);
 
       const mockBackend = { get: vitest.fn() };
-      vitest.spyOn(StorageService, 'resolveBackendForKey').mockReturnValue(mockBackend as any);
+      vitest.spyOn(StorageService, 'backendFor').mockReturnValue(mockBackend as any);
 
       const { abort } = await sut.downloadArchive(authStub.admin, { assetIds: [s3Asset.id] });
 
@@ -454,7 +499,7 @@ describe(DownloadService.name, () => {
       mocks.storage.realpath.mockResolvedValue('/data/library/disk.jpg');
 
       const mockBackend = { get: vitest.fn() };
-      vitest.spyOn(StorageService, 'resolveBackendForKey').mockReturnValue(mockBackend as any);
+      vitest.spyOn(StorageService, 'backendFor').mockReturnValue(mockBackend as any);
 
       await sut.downloadArchive(authStub.admin, { assetIds: [diskAsset.id, s3Asset.id] });
 
@@ -493,7 +538,7 @@ describe(DownloadService.name, () => {
 
       const fetchError = new Error('S3 connection refused');
       const mockBackend = { get: vitest.fn().mockRejectedValue(fetchError) };
-      vitest.spyOn(StorageService, 'resolveBackendForKey').mockReturnValue(mockBackend as any);
+      vitest.spyOn(StorageService, 'backendFor').mockReturnValue(mockBackend as any);
 
       await sut.downloadArchive(authStub.admin, { assetIds: [s3Asset.id] });
 
@@ -531,7 +576,7 @@ describe(DownloadService.name, () => {
 
       const s3Stream = new Readable({ read() {} });
       const mockBackend = { get: vitest.fn().mockResolvedValue({ stream: s3Stream }) };
-      vitest.spyOn(StorageService, 'resolveBackendForKey').mockReturnValue(mockBackend as any);
+      vitest.spyOn(StorageService, 'backendFor').mockReturnValue(mockBackend as any);
 
       await sut.downloadArchive(authStub.admin, { assetIds: [s3Asset.id] });
 
