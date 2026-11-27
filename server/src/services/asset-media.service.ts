@@ -1,4 +1,10 @@
-import { BadRequestException, Injectable, InternalServerErrorException, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  InternalServerErrorException,
+  NotFoundException,
+  OnModuleDestroy,
+} from '@nestjs/common';
 import sanitize from 'sanitize-filename';
 import { StorageCore } from 'src/cores/storage.core.js';
 import { Asset, AuthSharedLink } from 'src/database.js';
@@ -27,6 +33,7 @@ import {
   Permission,
   StorageFolder,
 } from 'src/enum.js';
+import { OnDemandFullsizeCache, generateOnDemandFullsizeResponse } from 'src/gallery/utils/on-demand-fullsize.js';
 import { videoPlaybackCacheControl } from 'src/gallery/utils/video-playback.js';
 import { AuthRequest } from 'src/middleware/auth.guard.js';
 import { BaseService } from 'src/services/base.service.js';
@@ -43,7 +50,13 @@ export interface AssetMediaRedirectResponse {
 }
 
 @Injectable()
-export class AssetMediaService extends BaseService {
+export class AssetMediaService extends BaseService implements OnModuleDestroy {
+  private readonly onDemandFullsizeCache = new OnDemandFullsizeCache();
+
+  async onModuleDestroy() {
+    await this.onDemandFullsizeCache.clear();
+  }
+
   async getUploadAssetIdByChecksum(auth: AuthDto, checksum?: string): Promise<AssetMediaResponseDto | undefined> {
     if (!checksum) {
       return;
@@ -294,11 +307,30 @@ export class AssetMediaService extends BaseService {
       return { targetSize: AssetMediaSize.PREVIEW };
     }
 
+    const fileNameBase = isMetadataHidden(auth) ? id : getFileNameWithoutExtension(originalFileName);
+
+    if (dto.size === AssetMediaSize.FULLSIZE && !path) {
+      const generated = await generateOnDemandFullsizeResponse(
+        {
+          galleryAssetRepository: this.galleryAssetRepository,
+          imageAdjustRepository: this.imageAdjustRepository,
+          mediaRepository: this.mediaRepository,
+          backendMedia: this.backendMedia,
+          logger: this.logger,
+          getConfig: (options) => this.getConfig(options),
+        },
+        this.onDemandFullsizeCache,
+        { assetId: id, edited, fileNameBase },
+      );
+      if (generated) {
+        return generated;
+      }
+    }
+
     if (!path) {
       throw new NotFoundException('Asset media not found');
     }
 
-    const fileNameBase = isMetadataHidden(auth) ? id : getFileNameWithoutExtension(originalFileName);
     const fileName = `${fileNameBase}_${size}${getFilenameExtension(path)}`;
 
     return this.backendMedia.serveFromBackend(path, mimeTypes.lookup(path), CacheControl.PrivateWithCache, fileName);

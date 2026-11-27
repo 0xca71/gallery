@@ -4,6 +4,9 @@ import {
   NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { DiskStorageBackend } from 'src/backends/disk-storage.backend.js';
 import { AssetFile } from 'src/database.js';
@@ -12,6 +15,7 @@ import { AssetMediaCreateDto, AssetMediaSize, UploadFieldName } from 'src/dtos/a
 import { MapAsset } from 'src/dtos/asset-response.dto.js';
 import { AssetEditAction } from 'src/dtos/editing.dto.js';
 import { AssetFileType, AssetType, AssetVisibility, CacheControl, JobName } from 'src/enum.js';
+import { OnDemandFullsizeCache } from 'src/gallery/utils/on-demand-fullsize.js';
 import { storageBackends } from 'src/gallery/utils/storage-backends.js';
 import { RangeNotSatisfiableError } from 'src/interfaces/storage-backend.interface.js';
 import { AuthRequest } from 'src/middleware/auth.guard.js';
@@ -1064,16 +1068,86 @@ describe(AssetMediaService.name, () => {
       );
     });
 
-    it('rejects a missing fullsize image when fallback is explicitly disabled', async () => {
+    it('rejects a missing fullsize image when fallback is explicitly disabled and on-demand generation cannot produce one', async () => {
       const asset = AssetFactory.from({
         originalFileName: 'IMG_001.arw',
         originalPath: '/data/library/IMG_001.arw',
       }).build();
       mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([asset.id]));
       mocks.asset.getForThumbnail.mockResolvedValue({ ...asset, path: null });
+      mocks.galleryAsset.getForOnDemandFullsize.mockResolvedValue(undefined);
       await expect(
         sut.viewThumbnail(authStub.admin, asset.id, { size: AssetMediaSize.FULLSIZE, fallback: false }),
       ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('generates and caches fullsize on demand without writing asset_file when fallback is disabled', async () => {
+      const tempCacheDir = await mkdtemp(join(tmpdir(), 'asset-media-ondemand-'));
+
+      try {
+        (sut as any).onDemandFullsizeCache = new OnDemandFullsizeCache({ cacheDir: tempCacheDir });
+
+        const asset = AssetFactory.from({
+          type: AssetType.Image,
+          originalFileName: 'IMG_001.heic',
+          originalPath: '/data/library/IMG_001.heic',
+          fileModifiedAt: new Date('2026-10-30T10:00:00.000Z'),
+        }).build();
+
+        mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([asset.id]));
+        mocks.asset.getForThumbnail.mockResolvedValue({ ...asset, path: null });
+        mocks.galleryAsset.getForOnDemandFullsize.mockResolvedValue({
+          id: asset.id,
+          type: AssetType.Image,
+          originalPath: asset.originalPath,
+          originalFileName: asset.originalFileName,
+          fileModifiedAt: asset.fileModifiedAt,
+          orientation: '1',
+          colorspace: 'sRGB',
+          profileDescription: null,
+          bitsPerSample: 8,
+          projectionType: null,
+          edits: [],
+        });
+        mocks.imageAdjust.getForRender.mockResolvedValue(undefined);
+        mocks.media.decodeImage.mockResolvedValue({
+          data: Buffer.from('raw'),
+          info: { width: 4032, height: 3024, channels: 3 },
+        });
+        mocks.media.generateThumbnail.mockImplementation(async (_decoded, _options, outputPath) => {
+          await writeFile(outputPath, Buffer.from('on-demand-jpeg-bytes'));
+        });
+
+        const result = await sut.viewThumbnail(authStub.admin, asset.id, {
+          size: AssetMediaSize.FULLSIZE,
+          edited: true,
+          fallback: false,
+        });
+
+        expect(result).toBeInstanceOf(ImmichStreamResponse);
+        const streamRes = result as ImmichStreamResponse;
+        expect(streamRes.contentType).toBe('image/jpeg');
+        expect(streamRes.fileName).toBe('IMG_001_fullsize.jpeg');
+        expect(streamRes.cacheControl).toBe(CacheControl.PrivateWithCache);
+        expect(streamRes.length).toBe(20);
+        streamRes.stream.destroy();
+
+        // Must never persist permanent asset_file rows.
+        expect(mocks.asset.upsertFile).not.toHaveBeenCalled();
+        expect(mocks.asset.upsertFiles).not.toHaveBeenCalled();
+
+        // Second identical request should hit the LRU cache without re-decoding.
+        const second = (await sut.viewThumbnail(authStub.admin, asset.id, {
+          size: AssetMediaSize.FULLSIZE,
+          edited: true,
+          fallback: false,
+        })) as ImmichStreamResponse;
+        second.stream.destroy();
+        expect(mocks.media.decodeImage).toHaveBeenCalledTimes(1);
+        expect(mocks.media.generateThumbnail).toHaveBeenCalledTimes(1);
+      } finally {
+        await rm(tempCacheDir, { recursive: true, force: true });
+      }
     });
   });
 
