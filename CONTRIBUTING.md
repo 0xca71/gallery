@@ -54,6 +54,24 @@ Help us improve our [Immich Datasets](https://datasets.immich.app) by submitting
 
 If you like helping others, answering Q&A discussions here on GitHub and replying to people on our Discord is also always appreciated.
 
+## Custom Docker builds
+
+The personal `Custom Docker` workflow (`.github/workflows/custom-docker.yml`) requires an explicit `version` input
+for every manual build. There is no default version and no automatic lookup of the latest Gallery release.
+Choose a valid SemVer with a leading `v` that matches the selected source baseline, such as `v5.11.1-custom.1`.
+Increment the custom revision when rebuilding changed code; reusing a version does not add an upgrade-history entry.
+
+From GitHub Actions, select **Custom Docker**, choose the source branch, and enter the version under **Run workflow**.
+The equivalent CLI command, after the chosen branch includes the corresponding Gallery baseline, is:
+
+```bash
+gh workflow run custom-docker.yml --repo 0xca71/gallery --ref main -f version=v5.11.1-custom.1
+```
+
+The input stamps the version inside the image, including the server version shown in **About**. Existing branch,
+commit, timestamp, and `latest` image tags are unchanged. Deploy the newly built image to change the running version;
+merging this workflow change alone does not update a running instance.
+
 ## Releases
 
 > Fork-maintainer reference. Gallery releases are separate from upstream Immich releases.

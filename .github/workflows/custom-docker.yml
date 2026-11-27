@@ -2,7 +2,11 @@ name: Custom Docker
 
 on:
   workflow_dispatch:
-    # Disabled for personal-use CI; keep the file for easy re-enable.
+    inputs:
+      version:
+        description: 'Gallery version for this build (e.g. v5.11.1-custom.1); match the selected source baseline'
+        required: true
+        type: string
 
 concurrency:
   group: custom-docker-${{ github.ref }}
@@ -28,7 +32,7 @@ jobs:
       - name: Apply Gallery branding
         uses: ./.github/actions/apply-branding
         with:
-          version: v5.7.0-custom
+          version: ${{ inputs.version }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
