@@ -6,7 +6,7 @@ import { AssetFileType, AssetOrder, AssetOrderBy, AssetStatus, TimeBucketSize } 
 import { addBucketInterval, withTimeBucketAssetFilters } from 'src/gallery/utils/time-bucket-filter.js';
 import type { TimeBucketOptions } from 'src/repositories/asset.repository.js';
 import { DB } from 'src/schema/index.js';
-import { asUuid, truncatedDate } from 'src/utils/database.js';
+import { asUuid, truncatedDate, withEdits } from 'src/utils/database.js';
 import { albumMembership } from 'src/utils/shared-space-album-scope.js';
 
 export interface TimeBucketCoverItem {
@@ -202,6 +202,28 @@ export class GalleryAssetRepository {
       .where('asset_file.assetId', '=', assetId)
       .where('asset_file.type', '=', AssetFileType.EncodedVideo)
       .where('asset_file.isEdited', '=', true)
+      .executeTakeFirst();
+  }
+
+  // No @GenerateSql: undecorated repository methods are not documented; several already are.
+  async getForOnDemandFullsize(id: string) {
+    return this.db
+      .selectFrom('asset')
+      .leftJoin('asset_exif', 'asset_exif.assetId', 'asset.id')
+      .select([
+        'asset.id',
+        'asset.type',
+        'asset.originalPath',
+        'asset.originalFileName',
+        'asset.fileModifiedAt',
+        'asset_exif.orientation',
+        'asset_exif.colorspace',
+        'asset_exif.profileDescription',
+        'asset_exif.bitsPerSample',
+        'asset_exif.projectionType',
+      ])
+      .select(withEdits)
+      .where('asset.id', '=', asUuid(id))
       .executeTakeFirst();
   }
 
